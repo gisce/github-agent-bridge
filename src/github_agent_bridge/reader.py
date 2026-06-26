@@ -50,8 +50,19 @@ class ImapReader:
                 return 0
             uids = sorted(int(x) for x in data[0].split() if int(x) > last_uid)
             for uid in uids:
-                st, msgd = imap.uid("fetch", str(uid), "(RFC822)")
+                try:
+                    st, msgd = imap.uid("fetch", str(uid), "(RFC822)")
+                except imaplib.IMAP4.error as exc:
+                    self._record_fetch_failure(uid, f"IMAP4.error: {exc}")
+                    if self._is_lookup_failure(exc):
+                        self.queue.set_state("last_uid", str(uid))
+                        continue
+                    break
                 if st != "OK" or not msgd or not msgd[0]:
+                    self._record_fetch_failure(uid, f"{st}: {msgd!r}")
+                    if self._is_lookup_failure(msgd):
+                        self.queue.set_state("last_uid", str(uid))
+                        continue
                     break
                 msg = email.message_from_bytes(msgd[0][1])
                 from_addr = decode_header_value(msg.get("From", ""))
@@ -72,3 +83,10 @@ class ImapReader:
                 imap.logout()
             except Exception:
                 pass
+
+    def _record_fetch_failure(self, uid: int, detail: str) -> None:
+        self.queue.set_state("last_imap_fetch_error_uid", str(uid))
+        self.queue.set_state("last_imap_fetch_error", detail[:500])
+
+    def _is_lookup_failure(self, value: object) -> bool:
+        return "lookup failed" in str(value).lower()
