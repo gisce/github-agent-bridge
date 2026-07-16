@@ -319,7 +319,23 @@ def learn_from_events(
                 "confidence": 0.0,
                 "reason": "classification failed",
             }
-            proposals.append(store_proposal(db_path, fallback, auto_approve_confidence, model=model or "", error=str(exc)))
+            try:
+                proposals.append(store_proposal(db_path, fallback, auto_approve_confidence, model=model or "", error=str(exc)))
+            except sqlite3.Error as store_exc:
+                proposals.append(
+                    {
+                        "id": proposal_id(fallback["event_id"], fallback["scope"], fallback["type"], fallback["reason"]),
+                        "event_id": fallback["event_id"],
+                        "status": "error",
+                        "scope": fallback["scope"],
+                        "type": fallback["type"],
+                        "confidence": fallback["confidence"],
+                        "rule": fallback["rule"],
+                        "reason": fallback["reason"],
+                        "model": model or "",
+                        "error": f"{exc}; failed to store proposal: {store_exc}",
+                    }
+                )
     return {
         "processed": len(events),
         "approved": sum(1 for item in proposals if item["status"] == "approved"),

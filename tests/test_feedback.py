@@ -165,3 +165,26 @@ def test_learn_from_events_rejects_task_specific_comments(tmp_path, monkeypatch)
     assert result["rejected"] == 1
     assert feedback.list_rules(db) == []
     assert feedback.list_proposals(db, status="rejected")[0]["reason"] == "Only about this PR."
+
+
+def test_learn_from_events_reports_error_when_failure_cannot_be_stored(tmp_path, monkeypatch):
+    db = tmp_path / "q.sqlite3"
+    JobQueue(db)
+    feedback.capture_feedback(db, notification(), context(), "reply_comment", "auto_trusted", "review_only")
+
+    def fail_classification(event, **kwargs):
+        raise RuntimeError("ENOSPC: no space left on device")
+
+    def fail_store(*args, **kwargs):
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(feedback, "classify_event_with_llm", fail_classification)
+    monkeypatch.setattr(feedback, "store_proposal", fail_store)
+
+    result = feedback.learn_from_events(db, limit=5)
+
+    assert result["processed"] == 1
+    assert result["errors"] == 1
+    assert result["proposals"][0]["status"] == "error"
+    assert "ENOSPC" in result["proposals"][0]["error"]
+    assert "database or disk is full" in result["proposals"][0]["error"]
