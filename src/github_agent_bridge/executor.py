@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import sqlite3
 import threading
 import time
 import uuid
@@ -9,6 +11,9 @@ from .dispatch import GitHubClient, OpenClawDispatcher
 from .policy import Policy
 from .queue import JobQueue
 from .session_events import redact_event_detail
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -85,7 +90,10 @@ class ExecutorPool:
                 reason = "dispatch timeout" if result.timed_out else f"dispatch failed rc={result.returncode}"
                 self.queue.finish(job.id, "blocked", reason, result.detail)
         except Exception as exc:
-            self.queue.finish(job.id, "blocked", f"executor exception: {type(exc).__name__}", str(exc))
+            try:
+                self.queue.finish(job.id, "blocked", f"executor exception: {type(exc).__name__}", str(exc))
+            except sqlite3.Error:
+                logger.exception("failed to mark job %s blocked after executor exception: %s", job.id, exc)
         return True
 
     def react_eyes_for_job_contexts(self, job) -> bool:

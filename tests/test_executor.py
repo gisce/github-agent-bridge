@@ -1,3 +1,5 @@
+import sqlite3
+
 from github_agent_bridge.dashboard_data import job_session_events
 from github_agent_bridge.dispatch import DispatchResult
 from github_agent_bridge.executor import ExecutorConfig, ExecutorPool
@@ -132,6 +134,32 @@ def test_executor_records_session_activity_events(tmp_path):
     assert event_types == ["claimed", "dispatch_started", "openclaw_stdout", "openclaw_stderr", "dispatch_finished", "done"]
     stderr_event = job_session_events(db, dispatcher.jobs[0].id)[3]
     assert stderr_event["detail"] == "token=[redacted] [redacted]"
+
+
+def test_executor_survives_when_failure_cannot_be_recorded(tmp_path, monkeypatch, caplog):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_comment(queue)
+    dispatcher = RecordingDispatcher()
+    original_finish = queue.finish
+    finish_calls = 0
+
+    def fail_finish(*args, **kwargs):
+        nonlocal finish_calls
+        finish_calls += 1
+        raise sqlite3.OperationalError("database or disk is full")
+
+    monkeypatch.setattr(queue, "finish", fail_finish)
+    pool = ExecutorPool(queue, Policy(trusted_orgs={"gisce"}), dispatcher, github=FakeGitHub(assigned=False, mentioned=True), config=ExecutorConfig(run_once=True))
+
+    assert pool.work_one("worker-test") is True
+    assert finish_calls == 2
+    assert "failed to mark job" in caplog.text
+    assert "database or disk is full" in caplog.text
+
+    monkeypatch.setattr(queue, "finish", original_finish)
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "running"
 
 
 def test_unassigned_mentioned_pr_comment_stays_review_only(tmp_path):
