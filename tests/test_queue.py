@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from github_agent_bridge.models import Notification
 from github_agent_bridge.intent_classifier import IntentClassification
 from github_agent_bridge.policy import FeedbackLearning, IntentClassifier, Policy
@@ -48,6 +50,16 @@ def test_connect_recreates_missing_parent_directory(tmp_path):
         assert con.execute(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='jobs'"
         ).fetchone()[0] == 1
+
+
+def test_context_managed_connection_is_closed(tmp_path):
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    with q.connect() as con:
+        assert con.execute("SELECT 1").fetchone()[0] == 1
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        con.execute("SELECT 1")
 
 
 def test_queue_expands_user_in_db_path(tmp_path, monkeypatch):
