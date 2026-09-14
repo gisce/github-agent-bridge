@@ -1,5 +1,7 @@
 import threading
 
+import pytest
+
 from github_agent_bridge.dashboard_data import job_session_events
 from github_agent_bridge.dispatch import DispatchResult
 from github_agent_bridge.executor import ExecutorConfig, ExecutorPool
@@ -665,3 +667,22 @@ def test_shutdown_cancels_dispatch_and_blocks_job_without_requeue(tmp_path):
     assert stored.status == "blocked"
     assert stored.attempts == 1
     assert "executor shutdown requested" in stored.last_error
+
+
+def test_run_raises_when_worker_dies_unexpectedly(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        RecordingDispatcher(),
+        github=FakeGitHub(assigned=True),
+        config=ExecutorConfig(run_once=True),
+    )
+
+    def crash(worker_id=None):
+        raise RuntimeError("worker boom")
+
+    pool.work_one = crash
+
+    with pytest.raises(RuntimeError, match="executor worker terminated unexpectedly: .*worker boom"):
+        pool.run()
