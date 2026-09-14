@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.60.4 (2026-09-14)
+
+### Bug Fixes
+
+- Fail executor on worker thread crash
+  ([`0428ec4`](https://github.com/pilipilisbot/github-agent-bridge/commit/0428ec4cc121362f22c16f6bc45891cd1e2d1668))
+
+
 ## v0.60.3 (2026-09-01)
 
 ### Bug Fixes
