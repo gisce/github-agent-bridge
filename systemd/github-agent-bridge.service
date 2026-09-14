@@ -28,7 +28,7 @@ ExecStart=%h/.local/bin/github-agent-bridge \
   --node-bin ${GITHUB_AGENT_BRIDGE_NODE_BIN} \
   --channel ${GITHUB_AGENT_BRIDGE_DEFAULT_CHANNEL} \
   --to ${GITHUB_AGENT_BRIDGE_DEFAULT_TO}
-Restart=on-failure
+Restart=always
 RestartSec=10
 # Every process spawned by a job stays in this cgroup even if it reparents or
 # creates a new process group/session. Stopping/restarting the executor must

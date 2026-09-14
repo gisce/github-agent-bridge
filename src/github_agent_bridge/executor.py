@@ -58,6 +58,8 @@ class ExecutorPool:
         self.stop_event = threading.Event()
         self.executor_id = f"executor-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self._executor_lock_file = None
+        self._worker_failure_lock = threading.Lock()
+        self._worker_failures: list[tuple[str, BaseException]] = []
 
     def work_one(self, worker_id: str | None = None) -> bool:
         worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
@@ -236,6 +238,14 @@ class ExecutorPool:
             if not did:
                 time.sleep(self.config.idle_sleep_seconds)
 
+    def _run_worker(self, worker_id: str) -> None:
+        try:
+            self._loop(worker_id)
+        except BaseException as exc:
+            with self._worker_failure_lock:
+                self._worker_failures.append((worker_id, exc))
+            self._request_shutdown()
+
     def _request_shutdown(self) -> None:
         self.stop_event.set()
         shutdown = getattr(self.dispatcher, "shutdown", None)
@@ -293,7 +303,7 @@ class ExecutorPool:
             )
             self.queue.set_state("executor_process_tracking_id", self.executor_id)
             threads = [
-                threading.Thread(target=self._loop, args=(worker_id,), daemon=False)
+                threading.Thread(target=self._run_worker, args=(worker_id,), daemon=False)
                 for worker_id in worker_ids
             ]
             for thread in threads:
@@ -313,3 +323,6 @@ class ExecutorPool:
             )
             self._restore_signal_handlers(previous_handlers)
             self._release_executor_lock()
+        if self._worker_failures:
+            failures = ", ".join(f"{worker_id}: {type(exc).__name__}: {exc}" for worker_id, exc in self._worker_failures)
+            raise RuntimeError(f"executor worker terminated unexpectedly: {failures}")
