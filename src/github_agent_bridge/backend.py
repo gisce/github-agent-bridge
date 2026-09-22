@@ -65,7 +65,7 @@ GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_USER_URL = "https://api.github.com/user"
 GITHUB_TEAMS_URL = "https://api.github.com/user/teams"
-PROJECT_REPOSITORY_URL = "https://github.com/pilipilisbot/github-agent-bridge"
+PROJECT_REPOSITORY_URL = "https://github.com/gisce/github-agent-bridge"
 SESSION_VERSION = 1
 
 
@@ -164,7 +164,7 @@ def _autoupdate_systemd_units() -> dict[str, str]:
 def _dashboard_autoupdate_plan(db: str | Path) -> dict[str, Any]:
     return plan_update(
         db,
-        repo=_env("GITHUB_AGENT_BRIDGE_AUTOUPDATE_REPO", "pilipilisbot/github-agent-bridge"),
+        repo=_env("GITHUB_AGENT_BRIDGE_AUTOUPDATE_REPO", "gisce/github-agent-bridge"),
         repo_dir=_env("GITHUB_AGENT_BRIDGE_AUTOUPDATE_REPO_DIR", "."),
         target_tag=_env("GITHUB_AGENT_BRIDGE_AUTOUPDATE_TARGET_TAG") or None,
         gh_bin=_env("GITHUB_AGENT_BRIDGE_GH_BIN", "gh"),
@@ -177,7 +177,7 @@ def _dashboard_apply_autoupdate(plan: dict[str, Any], db: str | Path) -> dict[st
     return apply_update_plan(
         plan,
         db=db,
-        repo=_env("GITHUB_AGENT_BRIDGE_AUTOUPDATE_REPO", "pilipilisbot/github-agent-bridge"),
+        repo=_env("GITHUB_AGENT_BRIDGE_AUTOUPDATE_REPO", "gisce/github-agent-bridge"),
         backup_dir=_env("GITHUB_AGENT_BRIDGE_AUTOUPDATE_BACKUP_DIR") or None,
         install_command=shlex.split(install_command) if install_command else None,
         systemctl_bin=_env("GITHUB_AGENT_BRIDGE_SYSTEMCTL_BIN", "systemctl"),

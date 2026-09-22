@@ -43,8 +43,8 @@ def test_visible_followup_finds_review_comment_after_review_trigger():
 
 def test_visible_followup_finds_review_after_issue_comment_trigger():
     ctx = GitHubContext(
-        urls=["https://github.com/pilipilisbot/github-agent-bridge/pull/53#issuecomment-4663425063"],
-        repo="pilipilisbot/github-agent-bridge",
+        urls=["https://github.com/gisce/github-agent-bridge/pull/53#issuecomment-4663425063"],
+        repo="gisce/github-agent-bridge",
         issue_number=53,
         comment_id=4663425063,
     )
@@ -53,15 +53,15 @@ def test_visible_followup_finds_review_after_issue_comment_trigger():
         "user": {"login": "pilipilisbot"},
         "state": "CHANGES_REQUESTED",
         "submitted_at": "2026-06-09T19:50:00Z",
-        "html_url": "https://github.com/pilipilisbot/github-agent-bridge/pull/53#pullrequestreview-4325056741",
+        "html_url": "https://github.com/gisce/github-agent-bridge/pull/53#pullrequestreview-4325056741",
     }
     github = RecordingGitHubClient(
         {
             ("api", "user", "--jq", ".login"): "pilipilisbot\n",
-            ("api", "repos/pilipilisbot/github-agent-bridge/issues/comments/4663425063"): json.dumps({"created_at": "2026-06-09T19:45:39Z"}),
-            ("api", "--paginate", "repos/pilipilisbot/github-agent-bridge/issues/53/comments", "--jq", ".[] | @json"): "",
-            ("api", "--paginate", "repos/pilipilisbot/github-agent-bridge/pulls/53/comments", "--jq", ".[] | @json"): "",
-            ("api", "--paginate", "repos/pilipilisbot/github-agent-bridge/pulls/53/reviews", "--jq", ".[] | @json"): json.dumps(followup) + "\n",
+            ("api", "repos/gisce/github-agent-bridge/issues/comments/4663425063"): json.dumps({"created_at": "2026-06-09T19:45:39Z"}),
+            ("api", "--paginate", "repos/gisce/github-agent-bridge/issues/53/comments", "--jq", ".[] | @json"): "",
+            ("api", "--paginate", "repos/gisce/github-agent-bridge/pulls/53/comments", "--jq", ".[] | @json"): "",
+            ("api", "--paginate", "repos/gisce/github-agent-bridge/pulls/53/reviews", "--jq", ".[] | @json"): json.dumps(followup) + "\n",
         }
     )
 
@@ -116,26 +116,26 @@ def test_approved_review_is_non_actionable():
 
 def test_visible_followup_for_issue_comment_returns_newest_bot_comment_after_trigger():
     ctx = GitHubContext(
-        urls=["https://github.com/pilipilisbot/github-agent-bridge/pull/13#issuecomment-4524715895"],
-        repo="pilipilisbot/github-agent-bridge",
+        urls=["https://github.com/gisce/github-agent-bridge/pull/13#issuecomment-4524715895"],
+        repo="gisce/github-agent-bridge",
         issue_number=13,
         comment_id=4524715895,
     )
     old_followup = {
         "user": {"login": "pilipilisbot"},
         "created_at": "2026-05-23T08:03:45Z",
-        "html_url": "https://github.com/pilipilisbot/github-agent-bridge/pull/13#issuecomment-old",
+        "html_url": "https://github.com/gisce/github-agent-bridge/pull/13#issuecomment-old",
     }
     new_followup = {
         "user": {"login": "pilipilisbot"},
         "created_at": "2026-05-23T09:10:40Z",
-        "html_url": "https://github.com/pilipilisbot/github-agent-bridge/pull/13#issuecomment-new",
+        "html_url": "https://github.com/gisce/github-agent-bridge/pull/13#issuecomment-new",
     }
     github = RecordingGitHubClient(
         {
             ("api", "user", "--jq", ".login"): "pilipilisbot\n",
-            ("api", "repos/pilipilisbot/github-agent-bridge/issues/comments/4524715895"): json.dumps({"created_at": "2026-05-23T08:03:06Z"}),
-            ("api", "--paginate", "repos/pilipilisbot/github-agent-bridge/issues/13/comments", "--jq", ".[] | @json"): "\n".join(
+            ("api", "repos/gisce/github-agent-bridge/issues/comments/4524715895"): json.dumps({"created_at": "2026-05-23T08:03:06Z"}),
+            ("api", "--paginate", "repos/gisce/github-agent-bridge/issues/13/comments", "--jq", ".[] | @json"): "\n".join(
                 [json.dumps(old_followup), json.dumps(new_followup)]
             )
             + "\n",

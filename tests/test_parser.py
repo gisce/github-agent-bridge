@@ -10,22 +10,22 @@ def test_extract_review_comment_context():
 
 
 def test_extract_commit_comment_context():
-    ctx = extract_github_context("@pilipilisbot mira https://github.com/pilipilisbot/github-agent-bridge/commit/fbd7bc190e4f63b00785671144e834a3c99c3fb1#r185806568")
-    assert ctx.repo == "pilipilisbot/github-agent-bridge"
+    ctx = extract_github_context("@pilipilisbot mira https://github.com/gisce/github-agent-bridge/commit/fbd7bc190e4f63b00785671144e834a3c99c3fb1#r185806568")
+    assert ctx.repo == "gisce/github-agent-bridge"
     assert ctx.issue_number is None
     assert ctx.commit_sha == "fbd7bc190e4f63b00785671144e834a3c99c3fb1"
     assert ctx.commit_comment_id == 185806568
     assert ctx.target_kind == "commit_comment"
-    assert ctx.work_key == "pilipilisbot/github-agent-bridge@fbd7bc190e4f"
+    assert ctx.work_key == "gisce/github-agent-bridge@fbd7bc190e4f"
 
 
 def test_extract_workflow_run_context():
-    ctx = extract_github_context("Run failed: https://github.com/pilipilisbot/github-agent-bridge/actions/runs/26325244472")
-    assert ctx.repo == "pilipilisbot/github-agent-bridge"
+    ctx = extract_github_context("Run failed: https://github.com/gisce/github-agent-bridge/actions/runs/26325244472")
+    assert ctx.repo == "gisce/github-agent-bridge"
     assert ctx.workflow_run_id == 26325244472
     assert ctx.issue_number is None
     assert ctx.target_kind == "workflow_run"
-    assert ctx.work_key == "pilipilisbot/github-agent-bridge/actions/runs/26325244472"
+    assert ctx.work_key == "gisce/github-agent-bridge/actions/runs/26325244472"
 
 
 def test_extract_pr_comment_context_before_workflow_run_link():
@@ -51,8 +51,8 @@ def test_mentions_are_actionable():
 
 
 def test_workflow_run_failed_is_actionable_without_mention():
-    subject = "[pilipilisbot/github-agent-bridge] Run failed: tests - main"
-    body = "View run: https://github.com/pilipilisbot/github-agent-bridge/actions/runs/26325244472"
+    subject = "[gisce/github-agent-bridge] Run failed: tests - main"
+    body = "View run: https://github.com/gisce/github-agent-bridge/actions/runs/26325244472"
 
     assert classify_github_action(subject, body) == "workflow_run_failed"
     assert classify_work_intent(subject, body) == "work_allowed"
@@ -79,14 +79,14 @@ def test_merge_event_with_commit_sha_is_sync_after_merge():
 
 
 def test_merge_message_id_is_sync_after_merge():
-    subject = "Re: [pilipilisbot/github-agent-bridge] feat: isolate sessions (PR #96)"
-    body = "Merged #96 into main. https://github.com/pilipilisbot/github-agent-bridge/pull/96"
+    subject = "Re: [gisce/github-agent-bridge] feat: isolate sessions (PR #96)"
+    body = "Merged #96 into main. https://github.com/gisce/github-agent-bridge/pull/96"
 
     assert (
         classify_github_action(
             subject,
             body,
-            message_id="<pilipilisbot/github-agent-bridge/pull/96/merged@github.com>",
+            message_id="<gisce/github-agent-bridge/pull/96/merged@github.com>",
         )
         == "sync_after_merge"
     )
@@ -105,30 +105,30 @@ def test_sentry_pr_comment_after_merge_is_not_sync_after_merge():
 
 
 def test_review_requested_event_with_merged_text_is_not_sync_after_merge():
-    subject = "Re: [pilipilisbot/github-agent-bridge] fix: avoid treating merged comments as sync events (PR #129)"
+    subject = "Re: [gisce/github-agent-bridge] fix: avoid treating merged comments as sync events (PR #129)"
     body = (
         "avoid classifying ordinary comments on merged PRs as sync_after_merge events\n"
-        "https://github.com/pilipilisbot/github-agent-bridge/pull/129"
+        "https://github.com/gisce/github-agent-bridge/pull/129"
     )
 
     assert (
         classify_github_action(
             subject,
             body,
-            message_id="<pilipilisbot/github-agent-bridge/pull/129/issue_event/1@github.com>",
+            message_id="<gisce/github-agent-bridge/pull/129/issue_event/1@github.com>",
         )
         == "archive_notification"
     )
 
 
 def test_post_merge_cleanup_comment_is_not_sync_after_merge():
-    subject = "Re: [pilipilisbot/github-agent-bridge] fix: avoid treating merged comments as sync events (PR #129)"
+    subject = "Re: [gisce/github-agent-bridge] fix: avoid treating merged comments as sync events (PR #129)"
     body = (
         "Post-merge cleanup check completed for the routed sync_after_merge job.\n\n"
         "No workspace cleanup was performed because GitHub currently reports this PR as open "
         "(merged=false, merged_at=null), and the triggering timeline event is review_requested "
         "rather than a merge.\n"
-        "https://github.com/pilipilisbot/github-agent-bridge/pull/129#issuecomment-4729705613"
+        "https://github.com/gisce/github-agent-bridge/pull/129#issuecomment-4729705613"
     )
 
     assert classify_github_action(subject, body) == "archive_notification"

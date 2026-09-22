@@ -219,7 +219,7 @@ gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 \
 The default install command is:
 
 ```bash
-python -m pip install git+https://github.com/pilipilisbot/github-agent-bridge.git@<target-tag>
+python -m pip install git+https://github.com/gisce/github-agent-bridge.git@<target-tag>
 ```
 
 Set `GITHUB_AGENT_BRIDGE_AUTOUPDATE_INSTALL_COMMAND` or pass
@@ -390,7 +390,7 @@ GET /
 GET /jobs/{id}
 GET /api/health
 GET /api/status
-GET /api/jobs?status=pending&repo=pilipilisbot/github-agent-bridge&limit=20
+GET /api/jobs?status=pending&repo=gisce/github-agent-bridge&limit=20
 GET /api/jobs/{id}
 GET /api/jobs/{id}/logs
 GET /api/jobs/{id}/session
@@ -526,7 +526,7 @@ newer release is available. The alert includes the release URL and the first
 non-empty release-note line so operators can see what changed before updating:
 
 ```bash
-GITHUB_AGENT_BRIDGE_RELEASE_REPO=pilipilisbot/github-agent-bridge \
+GITHUB_AGENT_BRIDGE_RELEASE_REPO=gisce/github-agent-bridge \
   gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 monitor --json
 ```
 

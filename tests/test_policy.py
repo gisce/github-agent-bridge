@@ -47,10 +47,10 @@ def test_repo_roles_precedence_and_default():
 
 def test_policy_from_file_loads_roles_and_rejects_unknown(tmp_path):
     valid = tmp_path / "policy.json"
-    valid.write_text('{"repoRoles": {"GISCE/ERP": "Owner"}, "orgRoles": {"pilipilisbot": "maintainer"}}')
+    valid.write_text('{"repoRoles": {"GISCE/ERP": "Owner"}, "orgRoles": {"gisce": "maintainer"}}')
     policy = Policy.from_file(valid)
     assert policy.role_for("gisce/erp") == "owner"
-    assert policy.role_for("pilipilisbot/github-agent-bridge") == "maintainer"
+    assert policy.role_for("gisce/github-agent-bridge") == "maintainer"
 
     invalid = tmp_path / "invalid.json"
     invalid.write_text('{"repoRoles": {"gisce/erp": "boss"}}')

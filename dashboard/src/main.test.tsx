@@ -41,7 +41,7 @@ describe("dashboard routing and API query helpers", () => {
       buildJobQuery(
         {
           status: " pending ",
-          repo: " pilipilisbot/github-agent-bridge ",
+          repo: " gisce/github-agent-bridge ",
           thread: "",
           action: " open_issue ",
           intent: " work_allowed ",
@@ -49,11 +49,11 @@ describe("dashboard routing and API query helpers", () => {
         },
         24,
       ),
-    ).toBe("/api/jobs?status=pending&repo=pilipilisbot%2Fgithub-agent-bridge&action=open_issue&intent=work_allowed&actor=ecarreras&limit=24");
+    ).toBe("/api/jobs?status=pending&repo=gisce%2Fgithub-agent-bridge&action=open_issue&intent=work_allowed&actor=ecarreras&limit=24");
   });
 
   it("builds knowledge queries and recognizes the knowledge route", () => {
-    expect(buildKnowledgeQuery(" pilipilisbot/github-agent-bridge ", " proposed ", 25)).toBe("/api/knowledge?repo=pilipilisbot%2Fgithub-agent-bridge&status=proposed&limit=25");
+    expect(buildKnowledgeQuery(" gisce/github-agent-bridge ", " proposed ", 25)).toBe("/api/knowledge?repo=gisce%2Fgithub-agent-bridge&status=proposed&limit=25");
     expect(isKnowledgePath("/knowledge")).toBe(true);
     expect(isKnowledgePath("/knowledge/")).toBe(true);
     expect(isKnowledgePath("/knowledge/extra")).toBe(false);
@@ -315,8 +315,8 @@ describe("MCP access page", () => {
 describe("status badges", () => {
   const job = {
     id: 58,
-    work_key: "pilipilisbot/github-agent-bridge#58",
-    repo: "pilipilisbot/github-agent-bridge",
+    work_key: "gisce/github-agent-bridge#58",
+    repo: "gisce/github-agent-bridge",
     thread: 58,
     status: "pending",
     action: "open_issue",
@@ -427,7 +427,7 @@ describe("status badges", () => {
   });
 
   it("shows GitHub links at the top of the job detail", () => {
-    const githubUrl = "https://github.com/pilipilisbot/github-agent-bridge/issues/114#issuecomment-4651153034";
+    const githubUrl = "https://github.com/gisce/github-agent-bridge/issues/114#issuecomment-4651153034";
     const { container } = render(
       <JobDetail
         job={{ ...job, github_urls: [githubUrl], worklog: [] }}
@@ -601,8 +601,8 @@ describe("status badges", () => {
         jobs={[
           {
             id: 58,
-            work_key: "pilipilisbot/github-agent-bridge#58",
-            repo: "pilipilisbot/github-agent-bridge",
+            work_key: "gisce/github-agent-bridge#58",
+            repo: "gisce/github-agent-bridge",
             thread: 58,
             status: "blocked",
             action: "reply_comment",
@@ -651,8 +651,8 @@ describe("status badges", () => {
         jobs={[
           {
             id: 58,
-            work_key: "pilipilisbot/github-agent-bridge#58",
-            repo: "pilipilisbot/github-agent-bridge",
+            work_key: "gisce/github-agent-bridge#58",
+            repo: "gisce/github-agent-bridge",
             thread: 58,
             status: "blocked",
             action: "reply_comment",
@@ -701,8 +701,8 @@ describe("status badges", () => {
         jobs={[
           {
             id: 58,
-            work_key: "pilipilisbot/github-agent-bridge#58",
-            repo: "pilipilisbot/github-agent-bridge",
+            work_key: "gisce/github-agent-bridge#58",
+            repo: "gisce/github-agent-bridge",
             thread: 58,
             status: "running",
             action: "reply_comment",
@@ -746,8 +746,8 @@ describe("status badges", () => {
         jobs={[
           {
             id: 58,
-            work_key: "pilipilisbot/github-agent-bridge#58",
-            repo: "pilipilisbot/github-agent-bridge",
+            work_key: "gisce/github-agent-bridge#58",
+            repo: "gisce/github-agent-bridge",
             thread: 58,
             status: "pending",
             action: "reply_comment",
@@ -770,8 +770,8 @@ describe("status badges", () => {
           },
           {
             id: 59,
-            work_key: "pilipilisbot/github-agent-bridge#59",
-            repo: "pilipilisbot/github-agent-bridge",
+            work_key: "gisce/github-agent-bridge#59",
+            repo: "gisce/github-agent-bridge",
             thread: 59,
             status: "running",
             action: "reply_comment",
@@ -913,11 +913,11 @@ describe("system page", () => {
 
 describe("product metadata", () => {
   it("shows the bridge version and upstream repository link", () => {
-    render(<ProductMeta about={{ service: "github-agent-bridge-dashboard", version: "0.18.7", repository_url: "https://github.com/pilipilisbot/github-agent-bridge" }} />);
+    render(<ProductMeta about={{ service: "github-agent-bridge-dashboard", version: "0.18.7", repository_url: "https://github.com/gisce/github-agent-bridge" }} />);
 
     expect(screen.getByText("Operational dashboard")).toBeInTheDocument();
     expect(screen.getByText("v0.18.7")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /github/i })).toHaveAttribute("href", "https://github.com/pilipilisbot/github-agent-bridge");
+    expect(screen.getByRole("link", { name: /github/i })).toHaveAttribute("href", "https://github.com/gisce/github-agent-bridge");
   });
 });
 
@@ -927,8 +927,8 @@ describe("autoupdate notice", () => {
     installed_tag: "v0.27.0",
     target: {
       tag_name: "v0.28.0",
-      url: "https://github.com/pilipilisbot/github-agent-bridge/releases/tag/v0.28.0",
-      body: "## Changes\n- Add **safe** autoupdate planning\n- Improve [dashboard release visibility](https://github.com/pilipilisbot/github-agent-bridge/releases/tag/v0.28.0)",
+      url: "https://github.com/gisce/github-agent-bridge/releases/tag/v0.28.0",
+      body: "## Changes\n- Add **safe** autoupdate planning\n- Improve [dashboard release visibility](https://github.com/gisce/github-agent-bridge/releases/tag/v0.28.0)",
     },
     decision: "stage_defer_executor_reload",
     executor_reload_pending: true,
@@ -951,8 +951,8 @@ describe("autoupdate notice", () => {
     expect(screen.getByText("executor or queue")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Changes" })).toBeInTheDocument();
     expect(screen.getByText("safe")).toHaveClass("font-semibold");
-    expect(screen.getByRole("link", { name: "dashboard release visibility" })).toHaveAttribute("href", "https://github.com/pilipilisbot/github-agent-bridge/releases/tag/v0.28.0");
-    expect(screen.getByRole("link", { name: /^release$/i })).toHaveAttribute("href", "https://github.com/pilipilisbot/github-agent-bridge/releases/tag/v0.28.0");
+    expect(screen.getByRole("link", { name: "dashboard release visibility" })).toHaveAttribute("href", "https://github.com/gisce/github-agent-bridge/releases/tag/v0.28.0");
+    expect(screen.getByRole("link", { name: /^release$/i })).toHaveAttribute("href", "https://github.com/gisce/github-agent-bridge/releases/tag/v0.28.0");
   });
 
   it("offers manual admin actions for recorded autoupdate plans", async () => {
@@ -1038,7 +1038,7 @@ describe("job filters", () => {
     const user = userEvent.setup();
     let filters = {
       status: "pending",
-      repo: "pilipilisbot/github-agent-bridge",
+      repo: "gisce/github-agent-bridge",
       thread: "164",
       action: "open_issue",
       intent: "work_allowed",
@@ -1054,7 +1054,7 @@ describe("job filters", () => {
     expect(appliedFilters.getByText("Status")).toBeInTheDocument();
     expect(appliedFilters.getByText("pending")).toBeInTheDocument();
     expect(appliedFilters.getByText("Repo")).toBeInTheDocument();
-    expect(appliedFilters.getByText("pilipilisbot/github-agent-bridge")).toBeInTheDocument();
+    expect(appliedFilters.getByText("gisce/github-agent-bridge")).toBeInTheDocument();
     expect(appliedFilters.getByText("@ecarreras")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Clear filters" }));
@@ -1068,7 +1068,7 @@ describe("job filters", () => {
     const user = userEvent.setup();
     let filters = {
       status: "pending",
-      repo: "pilipilisbot/github-agent-bridge",
+      repo: "gisce/github-agent-bridge",
       thread: "82",
       action: "open_issue",
       intent: "work_allowed",
@@ -1080,7 +1080,7 @@ describe("job filters", () => {
     });
     const { rerender } = render(<Filters filters={filters} actorOptions={[]} onChange={onChange} />);
 
-    expect(screen.getByLabelText("Repository")).toHaveValue("pilipilisbot/github-agent-bridge");
+    expect(screen.getByLabelText("Repository")).toHaveValue("gisce/github-agent-bridge");
     expect(screen.getByLabelText("Thread")).toHaveValue("82");
     await user.click(screen.getByRole("button", { name: "Clear" }));
 
@@ -1101,7 +1101,7 @@ describe("knowledge proposals", () => {
     render(
       <KnowledgePage
         data={{
-          repositories: ["pilipilisbot/github-agent-bridge"],
+          repositories: ["gisce/github-agent-bridge"],
           summary: { proposed: 1, approved: 0, rules: 1, events: 1 },
           proposals: [
             {
@@ -1110,7 +1110,7 @@ describe("knowledge proposals", () => {
               created_at: "2026-06-04T10:00:00Z",
               updated_at: "2026-06-04T10:01:00Z",
               status: "proposed",
-              scope: "repo:pilipilisbot/github-agent-bridge",
+              scope: "repo:gisce/github-agent-bridge",
               type: "operating_rule",
               confidence: 0.72,
               rule: "Keep knowledge moderation auditable.",
@@ -1123,7 +1123,7 @@ describe("knowledge proposals", () => {
           rules: [
             {
               id: "rule-1",
-              scope: "repo:pilipilisbot/github-agent-bridge",
+              scope: "repo:gisce/github-agent-bridge",
               type: "style_preference",
               rule: "Keep rule rows compact.",
               confidence: 0.82,
@@ -1137,15 +1137,15 @@ describe("knowledge proposals", () => {
                   occurred_at: "2026-06-04T10:00:00Z",
                   captured_at: "2026-06-04T10:01:00Z",
                   source: "github",
-                  scope: "repo:pilipilisbot/github-agent-bridge",
+                  scope: "repo:gisce/github-agent-bridge",
                   actor: "ecarreras",
                   trigger_actor: "ecarreras",
                   trigger_actor_avatar_url: "https://avatars.githubusercontent.com/u/294235?v=4",
-                  github_urls: ["https://github.com/pilipilisbot/github-agent-bridge/issues/73#issuecomment-1"],
-                  source_url: "https://github.com/pilipilisbot/github-agent-bridge/issues/73#issuecomment-1",
+                  github_urls: ["https://github.com/gisce/github-agent-bridge/issues/73#issuecomment-1"],
+                  source_url: "https://github.com/gisce/github-agent-bridge/issues/73#issuecomment-1",
                   source_job_id: 510,
                   source_table: "job",
-                  github_context: { urls: ["https://github.com/pilipilisbot/github-agent-bridge/issues/73#issuecomment-1"] },
+                  github_context: { urls: ["https://github.com/gisce/github-agent-bridge/issues/73#issuecomment-1"] },
                   comment: "Prefer tabs for knowledge.",
                   context: { issue: 73 },
                   classification: "style_preference",
@@ -1161,15 +1161,15 @@ describe("knowledge proposals", () => {
               occurred_at: "2026-06-04T10:00:00Z",
               captured_at: "2026-06-04T10:01:00Z",
               source: "github",
-              scope: "repo:pilipilisbot/github-agent-bridge",
+              scope: "repo:gisce/github-agent-bridge",
               actor: "ecarreras",
               trigger_actor: "ecarreras",
               trigger_actor_avatar_url: "https://avatars.githubusercontent.com/u/294235?v=4",
-              github_urls: ["https://github.com/pilipilisbot/github-agent-bridge/issues/73#issuecomment-1"],
-              source_url: "https://github.com/pilipilisbot/github-agent-bridge/issues/73#issuecomment-1",
+              github_urls: ["https://github.com/gisce/github-agent-bridge/issues/73#issuecomment-1"],
+              source_url: "https://github.com/gisce/github-agent-bridge/issues/73#issuecomment-1",
               source_job_id: 510,
               source_table: "job",
-              github_context: { urls: ["https://github.com/pilipilisbot/github-agent-bridge/issues/73#issuecomment-1"] },
+              github_context: { urls: ["https://github.com/gisce/github-agent-bridge/issues/73#issuecomment-1"] },
               comment: "Prefer tabs for knowledge.",
               context: { issue: 73 },
               classification: "style_preference",
@@ -1204,13 +1204,13 @@ describe("knowledge proposals", () => {
     expect(screen.queryByLabelText("Proposal status")).not.toBeInTheDocument();
     expect(screen.getByText("@ecarreras")).toBeInTheDocument();
     expect(screen.getByText("Job #510")).toBeInTheDocument();
-    expect(screen.getByText("pilipilisbot/github-agent-bridge/issues/73#issuecomment-1")).toBeInTheDocument();
+    expect(screen.getByText("gisce/github-agent-bridge/issues/73#issuecomment-1")).toBeInTheDocument();
 
     await user.click(screen.getByRole("tab", { name: /events \(1\)/i }));
     expect(screen.getByText("Prefer tabs for knowledge.")).toBeInTheDocument();
     expect(screen.getByText("@ecarreras")).toBeInTheDocument();
     expect(screen.getByText("Job #510")).toBeInTheDocument();
-    expect(screen.getByText("pilipilisbot/github-agent-bridge/issues/73#issuecomment-1")).toBeInTheDocument();
+    expect(screen.getByText("gisce/github-agent-bridge/issues/73#issuecomment-1")).toBeInTheDocument();
   });
 
   it("lets manageable curated rules edit scope only after entering edit mode", async () => {
@@ -1219,7 +1219,7 @@ describe("knowledge proposals", () => {
     const rules = [
       {
         id: "rule-1",
-        scope: "repo:pilipilisbot/github-agent-bridge",
+        scope: "repo:gisce/github-agent-bridge",
         type: "style_preference",
         rule: "Keep rule rows compact.",
         confidence: 0.82,
@@ -1270,7 +1270,7 @@ describe("knowledge proposals", () => {
         rules={[
           {
             id: "rule-1",
-            scope: "repo:pilipilisbot/github-agent-bridge",
+            scope: "repo:gisce/github-agent-bridge",
             type: "style_preference",
             rule: "Keep rule rows compact.",
             confidence: 0.82,
@@ -1308,7 +1308,7 @@ describe("knowledge proposals", () => {
         created_at: "2026-06-04T10:00:00Z",
         updated_at: "2026-06-04T10:01:00Z",
         status: "proposed",
-        scope: "repo:pilipilisbot/github-agent-bridge",
+        scope: "repo:gisce/github-agent-bridge",
         type: "operating_rule",
         confidence: 0.72,
         rule: "Keep knowledge moderation auditable.",
@@ -1337,7 +1337,7 @@ describe("knowledge proposals", () => {
         created_at: "2026-06-04T10:00:00Z",
         updated_at: "2026-06-04T10:01:00Z",
         status: "proposed",
-        scope: "repo:pilipilisbot/github-agent-bridge",
+        scope: "repo:gisce/github-agent-bridge",
         type: "operating_rule",
         confidence: 0.72,
         rule: "Keep knowledge moderation auditable.",
@@ -1349,15 +1349,15 @@ describe("knowledge proposals", () => {
           occurred_at: "2026-06-04T10:00:00Z",
           captured_at: "2026-06-04T10:01:00Z",
           source: "github",
-          scope: "repo:pilipilisbot/github-agent-bridge",
+          scope: "repo:gisce/github-agent-bridge",
           actor: "copilot-pull-request-reviewer[bot]",
           trigger_actor: "copilot-pull-request-reviewer[bot]",
           trigger_actor_avatar_url: "",
-          github_urls: ["https://github.com/pilipilisbot/github-agent-bridge/pull/117#pullrequestreview-1"],
-          source_url: "https://github.com/pilipilisbot/github-agent-bridge/pull/117#pullrequestreview-1",
+          github_urls: ["https://github.com/gisce/github-agent-bridge/pull/117#pullrequestreview-1"],
+          source_url: "https://github.com/gisce/github-agent-bridge/pull/117#pullrequestreview-1",
           source_job_id: 510,
           source_table: "job",
-          github_context: { urls: ["https://github.com/pilipilisbot/github-agent-bridge/pull/117#pullrequestreview-1"] },
+          github_context: { urls: ["https://github.com/gisce/github-agent-bridge/pull/117#pullrequestreview-1"] },
           comment: "Preserve backward compatibility.",
           context: {},
           classification: "technical_criterion",
@@ -1371,7 +1371,7 @@ describe("knowledge proposals", () => {
 
     expect(screen.getByText("@copilot-pull-request-reviewer[bot]")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Job #510/i })).toHaveAttribute("href", "/jobs/510");
-    expect(screen.getByRole("link", { name: /github.com\/pilipilisbot\/github-agent-bridge/i })).toHaveAttribute("href", "https://github.com/pilipilisbot/github-agent-bridge/pull/117#pullrequestreview-1");
+    expect(screen.getByRole("link", { name: /github.com\/gisce\/github-agent-bridge/i })).toHaveAttribute("href", "https://github.com/gisce/github-agent-bridge/pull/117#pullrequestreview-1");
   });
 });
 

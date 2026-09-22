@@ -320,7 +320,7 @@ def test_dashboard_about_exposes_package_version_and_repository(tmp_path):
     assert response.json() == {
         "service": "github-agent-bridge-dashboard",
         "version": __version__,
-        "repository_url": "https://github.com/pilipilisbot/github-agent-bridge",
+        "repository_url": "https://github.com/gisce/github-agent-bridge",
     }
 
 
@@ -1259,8 +1259,8 @@ def test_dashboard_admin_manages_mcp_tokens(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     q = JobQueue(db)
     q.enqueue(
-        notif(body="@pilipilisbot https://github.com/pilipilisbot/github-agent-bridge/issues/182#issuecomment-1"),
-        Policy(trusted_orgs=["pilipilisbot"]),
+        notif(body="@pilipilisbot https://github.com/gisce/github-agent-bridge/issues/182#issuecomment-1"),
+        Policy(trusted_orgs=["gisce"]),
     )
     with sqlite3.connect(db) as con:
         con.execute("UPDATE jobs SET trigger_actor=?, trigger_actor_avatar_url=? WHERE id=1", ("pilipilisbot", "https://github.com/pilipilisbot.png?size=80"))

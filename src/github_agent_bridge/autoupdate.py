@@ -469,7 +469,7 @@ def apply_update_plan(
     plan: dict[str, Any],
     *,
     db: str | Path | None = None,
-    repo: str = "pilipilisbot/github-agent-bridge",
+    repo: str = "gisce/github-agent-bridge",
     backup_dir: str | Path | None = None,
     install_command: Sequence[str] | None = None,
     migration_command: Sequence[str] | None = None,
@@ -702,7 +702,7 @@ def complete_pending_reload(
 def plan_update(
     db: str | Path,
     *,
-    repo: str = "pilipilisbot/github-agent-bridge",
+    repo: str = "gisce/github-agent-bridge",
     repo_dir: str | Path = ".",
     target_tag: str | None = None,
     gh_bin: str = "gh",
