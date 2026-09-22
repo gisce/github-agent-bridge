@@ -26,6 +26,19 @@ CREATE TABLE IF NOT EXISTS jobs (
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_work_status ON jobs(work_key, status);
+CREATE INDEX IF NOT EXISTS idx_jobs_dashboard_order ON jobs(
+  CASE status
+    WHEN 'running' THEN 0
+    WHEN 'pending' THEN 1
+    WHEN 'waiting_approval' THEN 2
+    WHEN 'blocked' THEN 3
+    WHEN 'denied' THEN 3
+    WHEN 'done' THEN 4
+    ELSE 5
+  END,
+  COALESCE(finished_at, started_at, updated_at, created_at) DESC,
+  id DESC
+);
 CREATE TABLE IF NOT EXISTS coalesced_notifications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
