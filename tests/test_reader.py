@@ -150,3 +150,45 @@ def test_fetch_once_quarantines_poison_github_notification_and_continues(monkeyp
     assert "missing GitHub context" in quarantine["error"]
     assert "BROKEN" in quarantine["body_excerpt"]
     assert job["uid"] == 2
+
+
+def test_fetch_once_retries_transient_enqueue_storage_failure(monkeypatch, tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    mailbox = MailboxWithMessages({
+        1: github_message(
+            "<retry@github.com>",
+            "@pilipilisbot https://github.com/gisce/erp/issues/42#issuecomment-99",
+        ),
+    })
+    original_enqueue = queue.enqueue
+    attempts = {"count": 0}
+
+    def fail_once_then_enqueue(notification, policy):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_enqueue(notification, policy)
+
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda *args: mailbox)
+    monkeypatch.setattr(queue, "enqueue", fail_once_then_enqueue)
+    monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
+
+    reader = ImapReader(
+        ImapConfig("imap.example.com", 993, "bot@example.com", "secret"),
+        queue,
+        Policy(trusted_orgs={"gisce"}, bot_logins={"pilipilisbot"}),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        reader.fetch_once()
+
+    assert queue.get_state("last_uid", "0") == "0"
+    assert reader.fetch_once() == 1
+    assert attempts["count"] == 2
+    assert queue.get_state("last_uid") == "1"
+    assert queue.stats()["pending"] == 1
+    with sqlite3.connect(db) as con:
+        quarantined_count = con.execute("SELECT COUNT(*) FROM quarantined_notifications").fetchone()[0]
+
+    assert quarantined_count == 0
