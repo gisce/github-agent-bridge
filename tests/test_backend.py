@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from github_agent_bridge import __version__
 from github_agent_bridge import feedback
 from github_agent_bridge.backend import DashboardConfig, _encode_session, _is_admin, _is_allowed, _journal_stream_events, _session_stream_events, _sign, create_app
-from github_agent_bridge.dashboard_data import get_job_detail, job_session, job_session_events, job_session_transcript, list_all_job_actor_logins, list_job_actors, list_jobs, metrics_summary
+from github_agent_bridge.dashboard_data import JOB_LIST_ORDER_SQL, get_job_detail, job_session, job_session_events, job_session_transcript, jobs_select_sql, list_all_job_actor_logins, list_job_actors, list_jobs, metrics_summary
 from github_agent_bridge.monitor import MonitorReport
 from github_agent_bridge.models import GitHubContext, Notification
 from github_agent_bridge.mcp import create_token
@@ -579,6 +579,46 @@ def test_dashboard_jobs_orders_active_work_before_finished_jobs(tmp_path):
         done_old.id,
     ]
     assert [row["id"] for row in list_jobs(db, status_filter="done", limit=10)] == [done_new.id, done_old.id]
+
+
+def test_dashboard_unfiltered_job_list_uses_order_index(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    q = JobQueue(db)
+    rows = [
+        (
+            f"gisce/erp#{index}",
+            "gisce/erp",
+            index,
+            "done",
+            "reply_comment",
+            "trusted",
+            "work_allowed",
+            f"Job {index}",
+            f"<{index}@github.com>",
+            "{}",
+            f"2026-01-01T00:{index % 60:02d}:00Z",
+            f"2026-01-01T00:{index % 60:02d}:00Z",
+        )
+        for index in range(200)
+    ]
+    with q.connect() as con:
+        con.executemany(
+            """
+            INSERT INTO jobs (
+                work_key, repo, thread, status, action, decision, work_intent,
+                subject, message_id, context_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        plan = con.execute(
+            f"EXPLAIN QUERY PLAN {jobs_select_sql(con)} ORDER BY {JOB_LIST_ORDER_SQL} LIMIT ?",
+            (12,),
+        ).fetchall()
+
+    details = [row[3] for row in plan]
+    assert any("USING INDEX idx_jobs_dashboard_order" in detail for detail in details)
+    assert all("USE TEMP B-TREE FOR ORDER BY" not in detail for detail in details)
 
 
 def test_dashboard_exposes_job_detail_logs_and_metrics(tmp_path):
