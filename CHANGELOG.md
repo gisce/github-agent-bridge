@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.60.5 (2026-09-22)
+
+### Performance Improvements
+
+- Index dashboard job ordering
+  ([`76b4243`](https://github.com/gisce/github-agent-bridge/commit/76b42434424c6fd1fbaecd1209c83c3198d3c7f5))
+
+
 ## v0.60.4 (2026-09-14)
 
 ### Bug Fixes
