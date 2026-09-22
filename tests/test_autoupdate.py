@@ -263,12 +263,12 @@ def test_systemd_plan_accepts_custom_unit_names():
 
 
 def test_default_install_command_targets_release_tag():
-    assert default_install_command("pilipilisbot/github-agent-bridge", "v1.2.4", python_bin="python") == [
+    assert default_install_command("gisce/github-agent-bridge", "v1.2.4", python_bin="python") == [
         "python",
         "-m",
         "pip",
         "install",
-        "git+https://github.com/pilipilisbot/github-agent-bridge.git@v1.2.4",
+        "git+https://github.com/gisce/github-agent-bridge.git@v1.2.4",
     ]
 
 
@@ -292,7 +292,7 @@ def test_apply_update_plan_installs_and_runs_immediate_systemd_actions():
                 ]
             },
         },
-        repo="pilipilisbot/github-agent-bridge",
+        repo="gisce/github-agent-bridge",
         install_command=["python", "-m", "pip", "install", "pkg"],
         runner=runner,
         run_postchecks=False,

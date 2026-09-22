@@ -6,9 +6,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/pilipilisbot/github-agent-bridge/actions/workflows/tests.yml"><img alt="tests" src="https://github.com/pilipilisbot/github-agent-bridge/actions/workflows/tests.yml/badge.svg"></a>
-  <a href="https://github.com/pilipilisbot/github-agent-bridge/actions/workflows/release.yml"><img alt="release" src="https://github.com/pilipilisbot/github-agent-bridge/actions/workflows/release.yml/badge.svg"></a>
-  <a href="https://github.com/pilipilisbot/github-agent-bridge/releases"><img alt="latest release" src="https://img.shields.io/github/v/release/pilipilisbot/github-agent-bridge?sort=semver"></a>
+  <a href="https://github.com/gisce/github-agent-bridge/actions/workflows/tests.yml"><img alt="tests" src="https://github.com/gisce/github-agent-bridge/actions/workflows/tests.yml/badge.svg"></a>
+  <a href="https://github.com/gisce/github-agent-bridge/actions/workflows/release.yml"><img alt="release" src="https://github.com/gisce/github-agent-bridge/actions/workflows/release.yml/badge.svg"></a>
+  <a href="https://github.com/gisce/github-agent-bridge/releases"><img alt="latest release" src="https://img.shields.io/github/v/release/gisce/github-agent-bridge?sort=semver"></a>
   <img alt="python" src="https://img.shields.io/badge/python-3.11%2B-blue">
 </p>
 
@@ -46,7 +46,7 @@ flowchart LR
 Install from GitHub:
 
 ```bash
-python -m pip install git+https://github.com/pilipilisbot/github-agent-bridge.git
+python -m pip install git+https://github.com/gisce/github-agent-bridge.git
 ```
 
 For a full operator install, including policy, IMAP, rollout, and systemd units, see [`docs/installation.md`](docs/installation.md).
@@ -54,7 +54,7 @@ For a full operator install, including policy, IMAP, rollout, and systemd units,
 For local development:
 
 ```bash
-git clone https://github.com/pilipilisbot/github-agent-bridge.git
+git clone https://github.com/gisce/github-agent-bridge.git
 cd github-agent-bridge
 python -m venv .venv
 . .venv/bin/activate

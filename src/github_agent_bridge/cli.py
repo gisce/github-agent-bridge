@@ -516,7 +516,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-persist-observability", action="store_true", help="skip writing process samples and alert observations")
     s.set_defaults(func=cmd_monitor)
     s = sub.add_parser("update", help="check a GitHub release update and record safe reload state")
-    s.add_argument("--repo", default=os.getenv("GITHUB_AGENT_BRIDGE_AUTOUPDATE_REPO") or "pilipilisbot/github-agent-bridge")
+    s.add_argument("--repo", default=os.getenv("GITHUB_AGENT_BRIDGE_AUTOUPDATE_REPO") or "gisce/github-agent-bridge")
     s.add_argument("--repo-dir", default=os.getenv("GITHUB_AGENT_BRIDGE_AUTOUPDATE_REPO_DIR") or ".")
     s.add_argument("--target-tag", default=os.getenv("GITHUB_AGENT_BRIDGE_AUTOUPDATE_TARGET_TAG"))
     s.add_argument("--gh-bin", default=os.getenv("GITHUB_AGENT_BRIDGE_GH_BIN", "gh"))

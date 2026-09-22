@@ -20,7 +20,7 @@ Install from GitHub. There is no PyPI publish yet.
 
 ```bash
 python3 -m pip install --user \
-  'git+https://github.com/pilipilisbot/github-agent-bridge.git'
+  'git+https://github.com/gisce/github-agent-bridge.git'
 ```
 
 Make sure the script directory is on `PATH` and both installed entrypoints are available:
@@ -35,7 +35,7 @@ For a pinned install, replace `vX.Y.Z` with a release tag:
 
 ```bash
 python3 -m pip install --user \
-  'git+https://github.com/pilipilisbot/github-agent-bridge.git@vX.Y.Z'
+  'git+https://github.com/gisce/github-agent-bridge.git@vX.Y.Z'
 ```
 
 ## Create runtime directories
@@ -58,7 +58,7 @@ Start from the example policy:
 
 ```bash
 curl -fsSL \
-  https://raw.githubusercontent.com/pilipilisbot/github-agent-bridge/main/policy.example.json \
+  https://raw.githubusercontent.com/gisce/github-agent-bridge/main/policy.example.json \
   -o ~/.config/github-agent-bridge/policy.json
 chmod 600 ~/.config/github-agent-bridge/policy.json
 ```
@@ -211,7 +211,7 @@ gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 \
 Clone the repository if you did not keep a checkout, because the systemd unit files are not installed by `pip`:
 
 ```bash
-git clone https://github.com/pilipilisbot/github-agent-bridge.git /tmp/github-agent-bridge
+git clone https://github.com/gisce/github-agent-bridge.git /tmp/github-agent-bridge
 cd /tmp/github-agent-bridge
 ```
 

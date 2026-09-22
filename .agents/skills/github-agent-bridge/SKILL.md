@@ -163,7 +163,7 @@ Inspect learned feedback rules that affect agent prompts:
 
 ```bash
 gab --db "$DB" feedback-rules
-gab --db "$DB" rules pilipilisbot/github-agent-bridge
+gab --db "$DB" rules gisce/github-agent-bridge
 gab --db "$DB" feedback-events --limit 20
 gab --db "$DB" feedback-proposals --limit 20
 ```

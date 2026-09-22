@@ -24,14 +24,14 @@ def test_monitor_alerts_when_github_release_is_newer(tmp_path, monkeypatch):
     db = tmp_path / "bridge.sqlite3"
     JobQueue(db)
     monkeypatch.setattr(monitor_module, "_package_version", lambda: "0.18.1")
-    monkeypatch.setenv("GITHUB_AGENT_BRIDGE_RELEASE_REPO", "pilipilisbot/github-agent-bridge")
+    monkeypatch.setenv("GITHUB_AGENT_BRIDGE_RELEASE_REPO", "gisce/github-agent-bridge")
     monkeypatch.setattr(
         monitor_module,
         "_latest_github_release",
         lambda repo: {
             "tag_name": "v0.18.2",
             "name": "v0.18.2",
-            "html_url": "https://github.com/pilipilisbot/github-agent-bridge/releases/tag/v0.18.2",
+            "html_url": "https://github.com/gisce/github-agent-bridge/releases/tag/v0.18.2",
             "published_at": "2026-05-25T10:00:00Z",
             "body": "Fixes the install drift warning.",
         },
@@ -41,7 +41,7 @@ def test_monitor_alerts_when_github_release_is_newer(tmp_path, monkeypatch):
 
     assert report.ok is False
     assert report.metrics["package_version"] == "0.18.1"
-    assert report.metrics["release_repo"] == "pilipilisbot/github-agent-bridge"
+    assert report.metrics["release_repo"] == "gisce/github-agent-bridge"
     assert report.metrics["latest_release"]["tag_name"] == "v0.18.2"
     assert any("new github-agent-bridge release v0.18.2 available" in a for a in report.alerts)
     assert any("Fixes the install drift warning." in a for a in report.alerts)
@@ -51,14 +51,14 @@ def test_monitor_does_not_alert_when_github_release_matches(tmp_path, monkeypatc
     db = tmp_path / "bridge.sqlite3"
     JobQueue(db)
     monkeypatch.setattr(monitor_module, "_package_version", lambda: "0.18.2")
-    monkeypatch.setenv("GITHUB_AGENT_BRIDGE_RELEASE_REPO", "pilipilisbot/github-agent-bridge")
+    monkeypatch.setenv("GITHUB_AGENT_BRIDGE_RELEASE_REPO", "gisce/github-agent-bridge")
     monkeypatch.setattr(
         monitor_module,
         "_latest_github_release",
         lambda repo: {
             "tag_name": "v0.18.2",
             "name": "v0.18.2",
-            "html_url": "https://github.com/pilipilisbot/github-agent-bridge/releases/tag/v0.18.2",
+            "html_url": "https://github.com/gisce/github-agent-bridge/releases/tag/v0.18.2",
             "published_at": "2026-05-25T10:00:00Z",
             "body": "Current release.",
         },
@@ -73,13 +73,13 @@ def test_monitor_does_not_alert_when_github_release_matches(tmp_path, monkeypatc
 def test_monitor_release_lookup_failure_is_not_alert(tmp_path, monkeypatch):
     db = tmp_path / "bridge.sqlite3"
     JobQueue(db)
-    monkeypatch.setenv("GITHUB_AGENT_BRIDGE_RELEASE_REPO", "pilipilisbot/github-agent-bridge")
+    monkeypatch.setenv("GITHUB_AGENT_BRIDGE_RELEASE_REPO", "gisce/github-agent-bridge")
     monkeypatch.setattr(monitor_module, "_latest_github_release", lambda repo: None)
 
     report = monitor(db, check_systemd=False)
 
     assert report.ok is True
-    assert report.metrics["latest_release_error"] == "could not fetch latest release for pilipilisbot/github-agent-bridge"
+    assert report.metrics["latest_release_error"] == "could not fetch latest release for gisce/github-agent-bridge"
 
 
 def test_monitor_release_lookup_runtime_error_is_not_fatal(monkeypatch):
@@ -88,7 +88,7 @@ def test_monitor_release_lookup_runtime_error_is_not_fatal(monkeypatch):
 
     monkeypatch.setattr(monitor_module.urllib.request, "urlopen", fail_urlopen)
 
-    assert monitor_module._latest_github_release("pilipilisbot/github-agent-bridge") is None
+    assert monitor_module._latest_github_release("gisce/github-agent-bridge") is None
 
 
 def test_monitor_alerts_on_blocked_job(tmp_path):

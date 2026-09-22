@@ -61,8 +61,8 @@ def test_review_reaction_targets_review_comments():
 def test_commit_comment_reaction_targets_commit_comment():
     client = RecordingGitHubClient()
     ctx = GitHubContext(
-        ["https://github.com/pilipilisbot/github-agent-bridge/commit/fbd7bc1#r185806568"],
-        "pilipilisbot/github-agent-bridge",
+        ["https://github.com/gisce/github-agent-bridge/commit/fbd7bc1#r185806568"],
+        "gisce/github-agent-bridge",
         commit_comment_id=185806568,
         commit_sha="fbd7bc1",
         target_kind="commit_comment",
@@ -70,7 +70,7 @@ def test_commit_comment_reaction_targets_commit_comment():
 
     assert client.react_eyes(ctx) is True
 
-    assert any("repos/pilipilisbot/github-agent-bridge/comments/185806568/reactions" in " ".join(call) for call in client.calls)
+    assert any("repos/gisce/github-agent-bridge/comments/185806568/reactions" in " ".join(call) for call in client.calls)
 
 
 def test_shadow_dispatch_returns_command_without_running():

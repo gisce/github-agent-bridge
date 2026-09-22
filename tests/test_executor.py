@@ -164,12 +164,12 @@ def enqueue_workflow_run_failed(queue: JobQueue):
 def enqueue_sync_after_merge(queue: JobQueue):
     notification = Notification(
         uid=4,
-        message_id="<pilipilisbot/github-agent-bridge/pull/96/merged@github.com>",
-        subject="Re: [pilipilisbot/github-agent-bridge] feat: isolate OpenClaw sessions per work key (PR #96)",
+        message_id="<gisce/github-agent-bridge/pull/96/merged@github.com>",
+        subject="Re: [gisce/github-agent-bridge] feat: isolate OpenClaw sessions per work key (PR #96)",
         from_addr="notifications@github.com",
-        body="Merged #96 into main. https://github.com/pilipilisbot/github-agent-bridge/pull/96",
+        body="Merged #96 into main. https://github.com/gisce/github-agent-bridge/pull/96",
     )
-    job, state = queue.enqueue(notification, Policy(trusted_orgs={"pilipilisbot"}))
+    job, state = queue.enqueue(notification, Policy(trusted_orgs={"gisce"}))
     assert state == "enqueued"
     assert job is not None
     assert job.action == "sync_after_merge"
@@ -500,7 +500,7 @@ def test_sync_after_merge_noop_duplicate_followup_is_done(tmp_path):
     github = FakeGitHub(assigned=False, mentioned=False)
     github.followup_url = None
 
-    pool = ExecutorPool(queue, Policy(trusted_orgs={"pilipilisbot"}), dispatcher, github=github, config=ExecutorConfig(run_once=True))
+    pool = ExecutorPool(queue, Policy(trusted_orgs={"gisce"}), dispatcher, github=github, config=ExecutorConfig(run_once=True))
     assert pool.work_one("worker-test") is True
 
     assert dispatcher.jobs[0].id == job.id
@@ -522,7 +522,7 @@ def test_sync_after_merge_repeat_without_followup_is_done(tmp_path):
     github = FakeGitHub(assigned=False, mentioned=False)
     github.followup_url = None
 
-    pool = ExecutorPool(queue, Policy(trusted_orgs={"pilipilisbot"}), dispatcher, github=github, config=ExecutorConfig(run_once=True))
+    pool = ExecutorPool(queue, Policy(trusted_orgs={"gisce"}), dispatcher, github=github, config=ExecutorConfig(run_once=True))
     assert pool.work_one("worker-test") is True
 
     stored = queue.get(job.id)
