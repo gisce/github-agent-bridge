@@ -202,6 +202,31 @@ class JobQueue:
             con.commit()
             return self.get(int(row["id"]))
 
+    def record_worker_heartbeat(
+        self,
+        worker_id: str,
+        executor_id: str,
+        pid: int,
+        loop_state: str,
+        active_job_id: int | None = None,
+        recent_error_count: int = 0,
+    ) -> None:
+        now = utc_now()
+        with self.connect() as con:
+            con.execute(
+                """INSERT INTO worker_heartbeats(
+                       worker_id, executor_id, pid, last_seen, active_job_id, loop_state, recent_error_count
+                   ) VALUES(?,?,?,?,?,?,?)
+                   ON CONFLICT(worker_id) DO UPDATE SET
+                       executor_id=excluded.executor_id,
+                       pid=excluded.pid,
+                       last_seen=excluded.last_seen,
+                       active_job_id=excluded.active_job_id,
+                       loop_state=excluded.loop_state,
+                       recent_error_count=excluded.recent_error_count""",
+                (worker_id, executor_id, pid, now, active_job_id, loop_state, recent_error_count),
+            )
+
     def register_runtime_process(
         self,
         job_id: int,

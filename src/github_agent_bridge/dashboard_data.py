@@ -203,6 +203,19 @@ def inspect_db_read_only(db: str | Path) -> dict[str, Any]:
             state = {r["key"]: r["value"] for r in con.execute("SELECT key,value FROM state")}
             out["last_uid"] = state.get("last_uid")
             out["executor_process_tracking_id"] = state.get("executor_process_tracking_id")
+            out["executor_worker_count"] = int(state.get("executor_worker_count") or 0)
+        if table_exists(con, "worker_heartbeats"):
+            heartbeats = []
+            for row in con.execute(
+                """SELECT worker_id, executor_id, pid, last_seen, active_job_id, loop_state,
+                          recent_error_count,
+                          CAST((julianday('now') - julianday(last_seen)) * 86400 AS INTEGER) age_seconds
+                   FROM worker_heartbeats ORDER BY worker_id"""
+            ):
+                item = dict(row)
+                item["age_seconds"] = max(0, int(item["age_seconds"] or 0))
+                heartbeats.append(item)
+            out["worker_heartbeats"] = heartbeats
         if table_exists(con, "feedback_rule_proposals"):
             knowledge_counts = {
                 r["status"]: int(r["count"])

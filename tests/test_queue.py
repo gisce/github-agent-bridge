@@ -250,6 +250,21 @@ def test_claim_parallel_different_work_keys_but_not_same(tmp_path):
     assert q.claim_next("w3") is None
 
 
+def test_worker_heartbeat_upserts_liveness_and_active_job(tmp_path):
+    q = JobQueue(tmp_path / "bridge.sqlite3")
+    job, _ = q.enqueue(notif(1, "<heartbeat@github.com>", BODY1), policy())
+
+    q.record_worker_heartbeat("executor-1/worker-0", "executor-1", 123, "idle")
+    q.record_worker_heartbeat("executor-1/worker-0", "executor-1", 123, "running", job.id, 2)
+
+    with q.connect() as con:
+        row = con.execute("SELECT * FROM worker_heartbeats").fetchone()
+    assert row["worker_id"] == "executor-1/worker-0"
+    assert row["active_job_id"] == job.id
+    assert row["loop_state"] == "running"
+    assert row["recent_error_count"] == 2
+
+
 def test_claim_can_filter_by_work_intent(tmp_path):
     q = JobQueue(tmp_path / "q.sqlite3")
     work_job, _ = q.enqueue(notif(1, "<1@github.com>", BODY1), policy())

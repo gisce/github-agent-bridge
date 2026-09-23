@@ -639,6 +639,11 @@ def test_run_blocks_orphaned_jobs_before_claiming_new_work(tmp_path):
     assert stored is not None
     assert stored.status == "blocked"
     assert "No prior executor process owns" in stored.last_error
+    with queue.connect() as con:
+        heartbeat = con.execute("SELECT * FROM worker_heartbeats").fetchone()
+    assert heartbeat is not None
+    assert heartbeat["executor_id"] == pool.executor_id
+    assert heartbeat["pid"] > 0
 
 
 def test_shutdown_cancels_dispatch_and_blocks_job_without_requeue(tmp_path):
