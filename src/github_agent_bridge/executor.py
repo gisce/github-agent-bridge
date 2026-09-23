@@ -46,6 +46,7 @@ class ExecutorConfig:
     work_intents: frozenset[str] | None = None
     missing_followup_retries: int = 1
     transient_dispatch_retries: int = 2
+    heartbeat_interval_seconds: float = 5.0
 
 
 class ExecutorPool:
@@ -60,12 +61,35 @@ class ExecutorPool:
         self._executor_lock_file = None
         self._worker_failure_lock = threading.Lock()
         self._worker_failures: list[tuple[str, BaseException]] = []
+        self._worker_state_lock = threading.Lock()
+        self._worker_states: dict[str, tuple[str, int | None, int]] = {}
+
+    def _set_worker_state(self, worker_id: str, loop_state: str, active_job_id: int | None = None, *, error: bool = False) -> None:
+        with self._worker_state_lock:
+            _, _, errors = self._worker_states.get(worker_id, ("starting", None, 0))
+            self._worker_states[worker_id] = (loop_state, active_job_id, errors + int(error))
+
+    def _record_worker_heartbeat(self, worker_id: str) -> None:
+        with self._worker_state_lock:
+            loop_state, active_job_id, errors = self._worker_states.get(worker_id, ("starting", None, 0))
+        self.queue.record_worker_heartbeat(
+            worker_id, self.executor_id, os.getpid(), loop_state, active_job_id, errors
+        )
+
+    def _heartbeat_loop(self, worker_id: str) -> None:
+        while not self.stop_event.is_set():
+            self._record_worker_heartbeat(worker_id)
+            self.stop_event.wait(self.config.heartbeat_interval_seconds)
+        self._record_worker_heartbeat(worker_id)
 
     def work_one(self, worker_id: str | None = None) -> bool:
         worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
+        self._set_worker_state(worker_id, "claiming")
         job = self.queue.claim_next(worker_id, self.config.work_intents)
         if not job:
+            self._set_worker_state(worker_id, "idle")
             return False
+        self._set_worker_state(worker_id, "running", job.id)
         if self.stop_event.is_set():
             self.queue.block_running(
                 "executor shutdown interrupted job before dispatch",
@@ -242,6 +266,8 @@ class ExecutorPool:
         try:
             self._loop(worker_id)
         except BaseException as exc:
+            self._set_worker_state(worker_id, "error", error=True)
+            self._record_worker_heartbeat(worker_id)
             with self._worker_failure_lock:
                 self._worker_failures.append((worker_id, exc))
             self._request_shutdown()
@@ -297,11 +323,22 @@ class ExecutorPool:
         worker_ids = [f"{self.executor_id}/worker-{i}" for i in range(worker_count)]
         threads: list[threading.Thread] = []
         try:
+            self.queue.delete_worker_heartbeats_except(self.executor_id)
             self.queue.block_running(
                 "orphaned running job recovered at executor startup",
                 "No prior executor process owns this running job. It was blocked, not auto-requeued, to avoid duplicate external actions.",
             )
             self.queue.set_state("executor_process_tracking_id", self.executor_id)
+            self.queue.set_state("executor_worker_count", str(worker_count))
+            for worker_id in worker_ids:
+                self._set_worker_state(worker_id, "starting")
+                self._record_worker_heartbeat(worker_id)
+            heartbeat_threads = [
+                threading.Thread(target=self._heartbeat_loop, args=(worker_id,), daemon=True)
+                for worker_id in worker_ids
+            ]
+            for thread in heartbeat_threads:
+                thread.start()
             threads = [
                 threading.Thread(target=self._run_worker, args=(worker_id,), daemon=False)
                 for worker_id in worker_ids

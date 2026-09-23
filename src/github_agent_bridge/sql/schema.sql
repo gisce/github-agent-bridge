@@ -110,6 +110,16 @@ CREATE TABLE IF NOT EXISTS process_samples (
   idle_seconds INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_process_samples_ts ON process_samples(ts);
+CREATE TABLE IF NOT EXISTS worker_heartbeats (
+  worker_id TEXT PRIMARY KEY,
+  executor_id TEXT NOT NULL,
+  pid INTEGER NOT NULL,
+  last_seen TEXT NOT NULL,
+  active_job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+  loop_state TEXT NOT NULL,
+  recent_error_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_worker_heartbeats_executor_seen ON worker_heartbeats(executor_id, last_seen);
 CREATE TABLE IF NOT EXISTS alerts (
   fingerprint TEXT PRIMARY KEY,
   source TEXT NOT NULL,

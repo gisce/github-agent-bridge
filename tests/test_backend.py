@@ -1604,6 +1604,16 @@ def test_dashboard_processes_exposes_live_executor_snapshot(tmp_path, monkeypatc
                         "children": [],
                     }
                 ],
+                "executor_worker_count": 1,
+                "worker_heartbeats_live": 1,
+                "worker_heartbeats": [
+                    {
+                        "worker_id": "executor-123/worker-0",
+                        "loop_state": "running",
+                        "active_job_id": 1,
+                        "age_seconds": 2,
+                    }
+                ],
             },
         )
 
@@ -1616,6 +1626,8 @@ def test_dashboard_processes_exposes_live_executor_snapshot(tmp_path, monkeypatc
     payload = response.json()
     assert payload["executor"]["service"] == "active"
     assert payload["executor"]["children"][0]["cpu_ticks"] == 12
+    assert payload["executor"]["workers"][0]["active_job_id"] == 1
+    assert payload["signals"]["worker_liveness"]["state"] == "live"
     assert payload["signals"]["live_process"]["state"] == "live"
     assert payload["signals"]["semantic_progress"][0]["semantic_progress"]["phase"] == "claimed"
     assert payload["samples"] == []
