@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v0.60.6 (2026-09-23)
+
+### Bug Fixes
+
+- Quarantine poison GitHub notifications
+  ([`5539bac`](https://github.com/gisce/github-agent-bridge/commit/5539bac5a5603c89f08dedcc7a08e96ef12568d6))
+
+- Retry transient enqueue storage failures
+  ([`b129f29`](https://github.com/gisce/github-agent-bridge/commit/b129f29df04879a2b6182c22e54ef6253a930b24))
+
+### Chores
+
+- Migrate repository references to gisce
+  ([#210](https://github.com/gisce/github-agent-bridge/pull/210),
+  [`9baccbd`](https://github.com/gisce/github-agent-bridge/commit/9baccbdf8c3ffa8e4c8869163e9b26280bcb345b))
+
+### Testing
+
+- Cover quarantine schema upgrades
+  ([`1ddaa48`](https://github.com/gisce/github-agent-bridge/commit/1ddaa4895cfe57ec190c9e67cd4b7f16c375cc29))
+
+
 ## v0.60.5 (2026-09-22)
 
 ### Performance Improvements
