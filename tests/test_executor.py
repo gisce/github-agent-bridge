@@ -623,6 +623,8 @@ def test_non_actionable_review_reacts_without_dispatch_even_when_assigned(tmp_pa
 
 def test_run_blocks_orphaned_jobs_before_claiming_new_work(tmp_path):
     queue = JobQueue(tmp_path / "bridge.sqlite3")
+    queue.record_worker_heartbeat("old-executor/worker-0", "old-executor", 123, "idle")
+    queue.record_worker_heartbeat("older-executor/worker-0", "older-executor", 456, "running")
     job = enqueue_pr_comment(queue)
     queue.claim_next("executor-that-no-longer-exists/worker-0")
     pool = ExecutorPool(
@@ -640,7 +642,9 @@ def test_run_blocks_orphaned_jobs_before_claiming_new_work(tmp_path):
     assert stored.status == "blocked"
     assert "No prior executor process owns" in stored.last_error
     with queue.connect() as con:
-        heartbeat = con.execute("SELECT * FROM worker_heartbeats").fetchone()
+        heartbeats = con.execute("SELECT * FROM worker_heartbeats").fetchall()
+    assert len(heartbeats) == 1
+    heartbeat = heartbeats[0]
     assert heartbeat is not None
     assert heartbeat["executor_id"] == pool.executor_id
     assert heartbeat["pid"] > 0

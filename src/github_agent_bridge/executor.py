@@ -323,6 +323,7 @@ class ExecutorPool:
         worker_ids = [f"{self.executor_id}/worker-{i}" for i in range(worker_count)]
         threads: list[threading.Thread] = []
         try:
+            self.queue.delete_worker_heartbeats_except(self.executor_id)
             self.queue.block_running(
                 "orphaned running job recovered at executor startup",
                 "No prior executor process owns this running job. It was blocked, not auto-requeued, to avoid duplicate external actions.",
