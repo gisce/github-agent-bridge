@@ -223,15 +223,24 @@ def classify_notification_with_llm(
     openclaw_dir = os.path.dirname(cfg.openclaw_bin)
     if openclaw_dir:
         env["PATH"] = openclaw_dir + os.pathsep + env.get("PATH", "")
-    proc = subprocess.run(
-        cmd,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=cfg.timeout + 30,
-        env=env,
-    )
+    try:
+        proc = subprocess.run(
+            cmd,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=cfg.timeout + 30,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # TimeoutExpired.__str__ contains the complete command and prompt, so
+        # metadata truncation hides the useful part of the failure.
+        detail = exc.stderr or exc.stdout or ""
+        if isinstance(detail, bytes):
+            detail = detail.decode(errors="replace")
+        suffix = f": {compact(detail, 300)}" if detail.strip() else ""
+        raise RuntimeError(f"intent classifier timed out after {cfg.timeout + 30}s{suffix}") from exc
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"openclaw exited {proc.returncode}")
     text = _openclaw_text_from_json(proc.stdout)
