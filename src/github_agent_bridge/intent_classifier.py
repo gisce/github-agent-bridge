@@ -202,6 +202,7 @@ def classify_notification_with_llm(
     cmd = [
         cfg.openclaw_bin,
         "agent",
+        "--local",
         "--json",
         "--session-id",
         intent_session_id(cfg.session_id, n, ctx, agent),
