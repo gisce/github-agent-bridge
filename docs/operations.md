@@ -69,6 +69,27 @@ GITHUB_AGENT_BRIDGE_WORKERS=2
 GITHUB_AGENT_BRIDGE_WORK_INTENT=review_only
 ```
 
+### OpenClaw concurrency headroom
+
+The executor workers run long OpenClaw agent turns, while the intent classifier
+and feedback learner make short control-plane agent calls. All of them consume
+OpenClaw's global agent concurrency. Therefore, when either classifier is
+enabled, `agents.defaults.maxConcurrent` must be **greater than** the bridge
+worker count. Otherwise four busy workers can fill a four-slot OpenClaw queue,
+causing enqueue-time classification to time out and fall back to the parser.
+
+For the standard four-worker deployment, use eight OpenClaw slots:
+
+```bash
+openclaw config set agents.defaults.maxConcurrent 8 --strict-json
+openclaw config validate
+```
+
+Keep `GITHUB_AGENT_BRIDGE_WORKERS=4`; the extra OpenClaw slots are headroom for
+classification, feedback, and interactive operations, not additional bridge
+jobs. As a minimum sizing rule use `maxConcurrent >= workers + 2`; eight is the
+recommended value for four workers when both background classifiers are active.
+
 Reader timer job:
 
 ```bash
