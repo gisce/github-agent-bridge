@@ -231,6 +231,7 @@ def test_classify_notification_with_llm_uses_isolated_session_id(monkeypatch):
         )
 
     session_ids = [cmd[cmd.index("--session-id") + 1] for cmd in calls]
+    assert all("--local" in cmd for cmd in calls)
     assert session_ids[0].startswith("intent-base-gisce-developer-")
     assert session_ids[1].startswith("intent-base-gisce-developer-")
     assert session_ids[0] != session_ids[1]

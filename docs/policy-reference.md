@@ -733,11 +733,11 @@ Agents must also apply the comment value rule before posting: comment only when 
 
 `intentClassifier` controls an optional enqueue-time LLM classifier for trusted GitHub comments and reviews. It is disabled by default; when enabled, the bridge calls OpenClaw with the packaged `prompt_rules/intent_classifier.md` prompt or `promptOverrides.rules.intent_classifier`, expects JSON output, and uses the result only when confidence is high enough. Low-confidence, invalid, timed-out, or failed classifier calls fall back to the deterministic parser result.
 
-Classifier calls share OpenClaw's global concurrency with executor jobs. Size
-`agents.defaults.maxConcurrent` above the bridge worker count so long-running
-jobs cannot starve enqueue-time classification. See
-[`operations.md`](operations.md#openclaw-concurrency-headroom) for the sizing
-rule and production command.
+Classifier calls use `openclaw agent --local`, isolating enqueue-time routing
+from gateway concurrency, event-loop stalls, and gateway SQLite locks. Normal
+executor, feedback-learning, and interactive gateway calls still need suitable
+OpenClaw concurrency headroom; see
+[`operations.md`](operations.md#openclaw-concurrency-headroom).
 
 The classifier returns structured semantics: whether the event is addressed to the configured agent, the requested action, the work intent, write permission, and the scope of any requested state change. Results not addressed to the configured agent are normalized to `archive_notification` + `review_only`. Results that request `work_allowed` without `write_permission=state_change_allowed` are normalized back to `review_only`.
 

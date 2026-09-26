@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -398,6 +399,17 @@ def test_openclaw_json_payload_text_is_extracted():
     raw = '{"result":{"payloads":[{"text":"{\\\"is_feedback\\\":false,\\\"scope\\\":\\\"global\\\",\\\"type\\\":\\\"domain_context\\\",\\\"rule\\\":\\\"\\\",\\\"confidence\\\":0,\\\"reason\\\":\\\"shape test\\\"}"}]}}'
 
     assert feedback._extract_json_object(feedback._openclaw_text_from_json(raw))["reason"] == "shape test"
+
+
+def test_openclaw_top_level_payload_text_is_extracted():
+    raw = json.dumps(
+        {
+            "payloads": [{"text": '{"reason": "current shape"}', "mediaUrl": None}],
+            "meta": {"finalAssistantVisibleText": '{"reason": "current shape"}'},
+        }
+    )
+
+    assert feedback._extract_json_object(feedback._openclaw_text_from_json(raw))["reason"] == "current shape"
 
 
 def test_learning_prompt_uses_packaged_prompt_resource():

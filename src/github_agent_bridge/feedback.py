@@ -204,6 +204,11 @@ def _openclaw_text_from_json(raw: str) -> str:
         value = data.get(key)
         if isinstance(value, str) and value.strip():
             return value
+    payloads = data.get("payloads")
+    if isinstance(payloads, list):
+        for payload in payloads:
+            if isinstance(payload, dict) and isinstance(payload.get("text"), str) and payload["text"].strip():
+                return payload["text"]
     if isinstance(data.get("result"), dict):
         payloads = data["result"].get("payloads")
         if isinstance(payloads, list):
