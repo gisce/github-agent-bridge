@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.60.7 (2026-09-26)
+
+### Bug Fixes
+
+- Isolate intent classifier from gateway
+  ([`05c0651`](https://github.com/gisce/github-agent-bridge/commit/05c0651f2ba7427048158aeb9e02df9cdf74310d))
+
+### Documentation
+
+- Require OpenClaw concurrency headroom
+  ([`59cabb7`](https://github.com/gisce/github-agent-bridge/commit/59cabb790a9c423699c3810462ccba2562720c8b))
+
+
 ## v0.60.6 (2026-09-23)
 
 ### Bug Fixes
