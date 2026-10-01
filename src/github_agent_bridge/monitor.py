@@ -28,6 +28,8 @@ ALERT_READER_TIMER = "monitor.reader_timer"
 ALERT_READER_LAST_RESULT = "monitor.reader_last_result"
 ALERT_READER_STALE = "monitor.reader_stale"
 ALERT_RUNNING_JOB_STALLED = "monitor.running_job_stalled"
+ALERT_WORKER_HEARTBEAT_MISSING = "monitor.worker_heartbeat_missing"
+ALERT_WORKER_HEARTBEAT_STALE = "monitor.worker_heartbeat_stale"
 ALERT_QUARANTINED_NOTIFICATIONS = "monitor.quarantined_notifications"
 
 
@@ -38,6 +40,7 @@ class MonitorThresholds:
     work_running_warn_seconds: int = 4200
     progress_warn_seconds: int = 600
     reader_recent_seconds: int = 180
+    worker_heartbeat_warn_seconds: int = 20
 
 
 @dataclass
@@ -60,6 +63,7 @@ class MonitorReport:
             f"pending={metrics.get('pending', 0)}",
             f"blocked={metrics.get('blocked', 0)}",
             f"running={metrics.get('running', 0)}",
+            f"workers_live={metrics.get('worker_heartbeats_live', 0)}/{metrics.get('executor_worker_count', 0)}",
             f"quarantined={metrics.get('quarantined_notifications', 0)}",
             f"oldest_pending={metrics.get('oldest_pending_age_seconds') if metrics.get('oldest_pending_age_seconds') is not None else '-'}",
             f"last_uid={metrics.get('last_uid', '-')}",
@@ -295,6 +299,34 @@ def monitor(
         })
         if executor_state != "active":
             _add_alert(metrics, alerts, ALERT_EXECUTOR_SERVICE, f"executor service is {executor_state}")
+        tracking_id = metrics.get("executor_process_tracking_id")
+        expected_workers = int(metrics.get("executor_worker_count") or 0)
+        current_heartbeats = [
+            heartbeat for heartbeat in metrics.get("worker_heartbeats", [])
+            if heartbeat.get("executor_id") == tracking_id
+        ]
+        live_heartbeats = [
+            heartbeat for heartbeat in current_heartbeats
+            if int(heartbeat.get("age_seconds") or 0) <= thresholds.worker_heartbeat_warn_seconds
+        ]
+        metrics["worker_heartbeats_live"] = len(live_heartbeats)
+        if executor_state == "active" and expected_workers and len(current_heartbeats) < expected_workers:
+            _add_alert(
+                metrics, alerts, ALERT_WORKER_HEARTBEAT_MISSING,
+                f"executor has {len(current_heartbeats)}/{expected_workers} worker heartbeats",
+            )
+        stale_heartbeats = [
+            heartbeat for heartbeat in current_heartbeats
+            if int(heartbeat.get("age_seconds") or 0) > thresholds.worker_heartbeat_warn_seconds
+        ]
+        if executor_state == "active" and stale_heartbeats:
+            detail = ", ".join(
+                f"{heartbeat['worker_id']}={heartbeat['age_seconds']}s" for heartbeat in stale_heartbeats
+            )
+            _add_alert(
+                metrics, alerts, ALERT_WORKER_HEARTBEAT_STALE,
+                f"stale worker heartbeats: {detail}",
+            )
         if metrics.get("running_jobs") and executor_state == "active" and not children:
             tracking_id = metrics.get("executor_process_tracking_id")
             expects_live_process = not tracking_id or any(

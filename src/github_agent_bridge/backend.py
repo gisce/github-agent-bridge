@@ -869,8 +869,20 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
                 "service": metrics.get("executor_service", "unknown"),
                 "pid": metrics.get("executor_pid"),
                 "children": metrics.get("executor_children", []),
+                "workers": metrics.get("worker_heartbeats", []),
+                "expected_workers": metrics.get("executor_worker_count", 0),
             },
             "signals": {
+                "worker_liveness": {
+                    "state": (
+                        "live"
+                        if metrics.get("executor_worker_count", 0)
+                        and metrics.get("worker_heartbeats_live", 0) == metrics.get("executor_worker_count", 0)
+                        else "degraded"
+                    ),
+                    "live_count": metrics.get("worker_heartbeats_live", 0),
+                    "expected_count": metrics.get("executor_worker_count", 0),
+                },
                 "live_process": {
                     "state": "live" if metrics.get("executor_children") else "no_child_process",
                     "child_count": len(metrics.get("executor_children", []) or []),
@@ -885,7 +897,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             },
             "alerts": report.alerts,
             "samples": samples,
-            "detail": "Live process state, persisted process activity samples, semantic job heartbeats and visible OpenClaw output are reported separately.",
+            "detail": "Worker liveness, process state, persisted process activity samples, semantic job progress and visible OpenClaw output are reported separately.",
         }
 
     @app.get("/api/systemd")
