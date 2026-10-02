@@ -4,7 +4,7 @@ version = "0.61.0"
 description = "GitHub notification to OpenClaw agent bridge for Pilipilis"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["pywebpush>=2.0"]
+dependencies = ["jsonschema>=4.18", "pywebpush>=2.0"]
 
 [project.optional-dependencies]
 dashboard = ["fastapi>=0.110", "uvicorn>=0.29"]

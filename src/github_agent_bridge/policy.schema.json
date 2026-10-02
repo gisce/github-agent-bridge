@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/gisce/github-agent-bridge/blob/main/src/github_agent_bridge/policy.schema.json",
+  "title": "GitHub Agent Bridge policy",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "source": {"$ref": "#/$defs/source"}, "trustedRepos": {"$ref": "#/$defs/stringArray"},
+    "trustedOrgs": {"$ref": "#/$defs/stringArray"}, "enabledRepos": {"$ref": "#/$defs/stringArray"},
+    "botLogins": {"$ref": "#/$defs/stringArray"}, "repoRoutes": {"$ref": "#/$defs/routeMap"},
+    "orgRoutes": {"$ref": "#/$defs/routeMap"}, "actions": {"$ref": "#/$defs/actions"},
+    "repoRoles": {"$ref": "#/$defs/roleMap"}, "orgRoles": {"$ref": "#/$defs/roleMap"},
+    "modelRoutes": {"$ref": "#/$defs/modelRoutes"}, "promptOverrides": {"$ref": "#/$defs/promptOverrides"},
+    "feedbackLearning": {"$ref": "#/$defs/feedbackLearning"}, "intentClassifier": {"$ref": "#/$defs/intentClassifier"}
+  },
+  "$defs": {
+    "stringArray": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "source": {"type": "object", "additionalProperties": false, "properties": {
+      "from": {"oneOf": [{"type": "string"}, {"$ref": "#/$defs/stringArray"}]},
+      "requiredAuth": {"$ref": "#/$defs/stringArray"}, "requiredUrlPrefix": {"type": "string", "minLength": 1},
+      "messageIdDomain": {"type": "string", "minLength": 1}
+    }},
+    "route": {"type": "object", "additionalProperties": false, "properties": {
+      "agent": {"type": "string"}, "channel": {"type": "string"}, "to": {"type": "string"}
+    }},
+    "routeMap": {"type": "object", "additionalProperties": {"$ref": "#/$defs/route"}},
+    "actions": {"type": "object", "additionalProperties": false, "properties": {
+      "auto": {"$ref": "#/$defs/stringArray"}, "ask": {"$ref": "#/$defs/stringArray"},
+      "trustedAuto": {"$ref": "#/$defs/stringArray"}, "deny": {"$ref": "#/$defs/stringArray"}
+    }},
+    "roleMap": {"type": "object", "additionalProperties": {"enum": ["owner", "maintainer", "contributor", "reviewer"]}},
+    "thinking": {"enum": ["off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max"]},
+    "modelRoute": {"type": "object", "additionalProperties": false, "properties": {
+      "model": {"type": "string", "minLength": 1}, "thinking": {"$ref": "#/$defs/thinking"}
+    }},
+    "modelRouteMap": {"type": "object", "additionalProperties": {"$ref": "#/$defs/modelRoute"}},
+    "complexityRouteMap": {"type": "object", "additionalProperties": false, "properties": {
+      "mechanical": {"$ref": "#/$defs/modelRoute"}, "substantive": {"$ref": "#/$defs/modelRoute"}
+    }},
+    "repoModelRoutes": {"type": "object", "additionalProperties": false, "properties": {
+      "default": {"$ref": "#/$defs/modelRoute"}, "byAction": {"$ref": "#/$defs/modelRouteMap"},
+      "byIntent": {"$ref": "#/$defs/modelRouteMap"}, "byComplexity": {"$ref": "#/$defs/complexityRouteMap"}
+    }},
+    "modelRoutes": {"type": "object", "additionalProperties": false, "properties": {
+      "default": {"$ref": "#/$defs/modelRoute"}, "byAction": {"$ref": "#/$defs/modelRouteMap"},
+      "byIntent": {"$ref": "#/$defs/modelRouteMap"}, "byComplexity": {"$ref": "#/$defs/complexityRouteMap"},
+      "byRepo": {"type": "object", "additionalProperties": {"$ref": "#/$defs/repoModelRoutes"}}
+    }},
+    "pathMap": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+    "promptOverrides": {"type": "object", "additionalProperties": false, "properties": {
+      "base": {"type": "string", "minLength": 1}, "roles": {"$ref": "#/$defs/pathMap"},
+      "intents": {"$ref": "#/$defs/pathMap"}, "rules": {"$ref": "#/$defs/pathMap"}
+    }},
+    "feedbackLearning": {"type": "object", "additionalProperties": false, "properties": {
+      "enabled": {"type": "boolean"}, "minConfidence": {"type": "number", "minimum": 0, "maximum": 1},
+      "autoApproveConfidence": {"type": "number", "minimum": 0, "maximum": 1},
+      "maxEventsPerRun": {"type": "integer", "minimum": 1}, "model": {"type": "string", "minLength": 1},
+      "thinking": {"$ref": "#/$defs/thinking"}, "sessionId": {"type": "string", "minLength": 1},
+      "fallbackToDefaultModel": {"type": "boolean"}
+    }},
+    "intentClassifier": {"type": "object", "additionalProperties": false, "properties": {
+      "enabled": {"type": "boolean"}, "model": {"type": "string", "minLength": 1},
+      "thinking": {"$ref": "#/$defs/thinking"}, "minConfidence": {"type": "number", "minimum": 0, "maximum": 1},
+      "onlyWhenParserDefaulted": {"type": "boolean"}, "openclawBin": {"type": "string", "minLength": 1},
+      "sessionId": {"type": "string", "minLength": 1}, "timeout": {"type": "integer", "minimum": 1}
+    }}
+  }
+}

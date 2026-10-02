@@ -2,6 +2,14 @@
 
 `policy.json` controls which GitHub notifications the bridge trusts, which repositories are in scope, which actions are automatic, where OpenClaw agent work is delivered, which operating posture the agent uses, whether the optional LLM intent classifier is enabled, and whether feedback learning is captured.
 
+The machine-readable JSON Schema lives at [`src/github_agent_bridge/policy.schema.json`](../src/github_agent_bridge/policy.schema.json). Before restarting the service, validate an edited policy with:
+
+```bash
+gab validate-policy --policy ~/.config/github-agent-bridge/policy.json
+```
+
+Schema errors include the offending dotted path and reject unknown fields. Validation also applies runtime semantic checks, including referenced prompt override files.
+
 ## Quick map
 
 ```mermaid

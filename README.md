@@ -94,6 +94,14 @@ gab --db "$DB" --policy ./policy.example.json run --mode shadow --once
 
 ## Policy in one screen
 
+Validate policy files before deploying them:
+
+```bash
+gab validate-policy --policy ./policy.json
+```
+
+The published JSON Schema is [`src/github_agent_bridge/policy.schema.json`](src/github_agent_bridge/policy.schema.json). Editors can use it for completion and inline diagnostics; the command also runs semantic checks such as prompt override file existence.
+
 The bridge is conservative by default. `policy.json` decides what is trusted, what is in scope, where work is delivered, and how the agent should behave.
 
 ```json

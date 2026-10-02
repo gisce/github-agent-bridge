@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from importlib.resources import files
 from pathlib import Path
+
+from jsonschema import Draft202012Validator
 
 from .models import GitHubContext, Notification
 
@@ -25,6 +28,20 @@ ALLOWED_PROMPT_RULES = {
 }
 DEFAULT_REPO_ROLE = "contributor"
 DEFAULT_BOT_LOGINS = frozenset({"pilipilisbot"})
+
+
+def validate_policy_file(path: str | Path) -> None:
+    policy_path = Path(path).expanduser()
+    data = json.loads(policy_path.read_text(encoding="utf-8"))
+    schema = json.loads(files("github_agent_bridge").joinpath("policy.schema.json").read_text(encoding="utf-8"))
+    errors = sorted(Draft202012Validator(schema).iter_errors(data), key=lambda error: list(error.absolute_path))
+    if errors:
+        details = []
+        for error in errors:
+            location = ".".join(str(part) for part in error.absolute_path) or "<root>"
+            details.append(f"{location}: {error.message}")
+        raise ValueError("policy schema validation failed:\n" + "\n".join(details))
+    Policy.from_file(policy_path)
 
 
 def complexity_from_metadata(metadata: dict | None) -> str:
