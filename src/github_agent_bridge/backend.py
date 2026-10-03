@@ -55,9 +55,10 @@ from .monitor import monitor
 from .mcp import MCPServer, authenticate_token, create_token, list_tokens, revoke_token, update_token_owner
 from .observability import configure_sentry, list_alerts, recent_process_samples
 from .queue import JobQueue
+from .policy import Policy
 from .systemd_status import allowed_unit_names, stream_journal_lines, systemd_status
 from .web_push import delete_subscription, save_subscription, subscription_status
-from .webhook import persist_shadow_delivery, verify_signature
+from .webhook import persist_shadow_delivery, verify_signature, webhook_notification
 
 
 DEFAULT_HOST = os.getenv("GITHUB_AGENT_BRIDGE_DASHBOARD_HOST", "127.0.0.1")
@@ -236,6 +237,8 @@ class DashboardConfig:
         webhook_secrets_by_owner: dict[str, tuple[str, ...]] | None = None,
         webhook_max_bytes: int | None = None,
         webhook_retention_days: int | None = None,
+        webhook_mode: str | None = None,
+        webhook_policy: str | Path | None = None,
     ) -> None:
         self.db = Path(db).expanduser()
         self.secret_key = secret_key or os.getenv("GITHUB_AGENT_BRIDGE_DASHBOARD_SECRET_KEY", "")
@@ -259,6 +262,13 @@ class DashboardConfig:
         self.webhook_secrets_by_owner = webhook_secrets_by_owner if webhook_secrets_by_owner is not None else _webhook_secrets_by_owner_env()
         self.webhook_max_bytes = webhook_max_bytes or int(os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_MAX_BYTES", "1048576"))
         self.webhook_retention_days = webhook_retention_days or int(os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_RETENTION_DAYS", "30"))
+        self.webhook_mode = (webhook_mode or os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_MODE", "shadow")).lower()
+        if self.webhook_mode not in {"shadow", "canary"}:
+            raise ValueError("GITHUB_AGENT_BRIDGE_WEBHOOK_MODE must be shadow or canary")
+        policy_value = webhook_policy or os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_POLICY", "")
+        self.webhook_policy = Path(policy_value).expanduser() if policy_value else None
+        if self.webhook_mode == "canary" and self.webhook_policy is None:
+            raise ValueError("GITHUB_AGENT_BRIDGE_WEBHOOK_POLICY is required in canary mode")
 
     @property
     def oauth_ready(self) -> bool:
@@ -766,6 +776,21 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         if not verify_signature(raw_payload, signature, webhook_secrets):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_signature")
         ensure_webhook_schema()
+        enqueue_status = None
+        job_id = None
+        if config.webhook_mode == "canary":
+            policy = Policy.from_file(config.webhook_policy)
+            notification = webhook_notification(event_name, delivery_id, payload)
+            repo = str(full_name or "").lower()
+            if notification is None:
+                enqueue_status = "ignored"
+            elif repo not in policy.enabled_repos:
+                enqueue_status = "outside_canary"
+            else:
+                job, enqueue_status = JobQueue(config.db).ingest(
+                    notification, policy, source="webhook", source_key=delivery_id,
+                )
+                job_id = job.id if job else None
         receipt = persist_shadow_delivery(
             config.db,
             delivery_id=delivery_id,
@@ -774,7 +799,14 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             hook_id=hook_id,
             retention_days=config.webhook_retention_days,
         )
-        return {"mode": "shadow", "status": receipt.status, "event_key": receipt.event_key}
+        response = {
+            "mode": config.webhook_mode,
+            "status": receipt.status,
+            "event_key": receipt.event_key,
+        }
+        if config.webhook_mode != "shadow":
+            response.update({"enqueue_status": enqueue_status, "job_id": job_id})
+        return response
 
     @app.get("/api/webhooks/github/status")
     @app.get("/api/webhooks/github/summary")
@@ -813,7 +845,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             if count
         }
         return {
-            "mode": "shadow",
+            "mode": config.webhook_mode,
             "configured": bool(config.webhook_secrets or config.webhook_secrets_by_owner),
             "receipts": counts,
             "duplicate_deliveries": row[2],

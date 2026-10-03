@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .models import utc_now
+from .models import Notification, utc_now
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,50 @@ def canonical_webhook_event_key(event_name: str, payload: dict[str, Any]) -> str
         if run_id and action:
             return f"workflow_run:{action}:{repo}:{run_id}"
     return None
+
+
+def webhook_notification(
+    event_name: str,
+    delivery_id: str,
+    payload: dict[str, Any],
+) -> Notification | None:
+    """Translate actionable webhook payloads into the transport-neutral queue input."""
+    action = str(payload.get("action") or "")
+    if (event_name, action) not in {
+        ("issue_comment", "created"),
+        ("pull_request_review_comment", "created"),
+        ("pull_request_review", "submitted"),
+        ("commit_comment", "created"),
+        ("workflow_run", "completed"),
+    }:
+        return None
+    repository = payload.get("repository") if isinstance(payload.get("repository"), dict) else {}
+    repo = str(repository.get("full_name") or "")
+    if not repo:
+        return None
+    subject = payload.get("pull_request") or payload.get("issue") or payload.get("workflow_run") or {}
+    number = subject.get("number") if isinstance(subject, dict) else None
+    source = (
+        payload.get("comment") or payload.get("review") or payload.get("workflow_run") or {}
+    )
+    if not isinstance(source, dict):
+        return None
+    url = str(source.get("html_url") or subject.get("html_url") or repository.get("html_url") or "")
+    if not url.startswith("https://github.com/"):
+        return None
+    body = str(source.get("body") or "")
+    sender = payload.get("sender") if isinstance(payload.get("sender"), dict) else {}
+    login = str(sender.get("login") or "GitHub")
+    title = str(subject.get("title") or subject.get("name") or event_name)
+    suffix = f" (#{number})" if number else ""
+    return Notification(
+        uid=None,
+        message_id=f"<{delivery_id}@github.com>",
+        subject=f"[{repo}] {title}{suffix}",
+        from_addr=f"{login} <notifications@github.com>",
+        body=f"{body}\n\n{url}",
+        auth={"spf": True, "dkim": True, "dmarc": True},
+    )
 
 
 def persist_shadow_delivery(
