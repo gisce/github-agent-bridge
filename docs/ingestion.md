@@ -128,5 +128,22 @@ Comment and review `edited` deliveries are observed under a distinct key and
 do not retrigger work. Phase 2 must make an explicit policy decision before
 any non-`created` action can enqueue a job.
 
+## Canary dual ingestion
+
+Set `GITHUB_AGENT_BRIDGE_WEBHOOK_MODE=canary` and point
+`GITHUB_AGENT_BRIDGE_WEBHOOK_POLICY` at the reader/executor policy file. Canary
+mode converts only supported actionable deliveries into the common queue and
+requires their repository to be explicitly listed in `enabledRepos`; an empty
+allowlist enqueues nothing. IMAP continues unchanged. Both transports use the
+same canonical event key, so the first committed receipt wins and the second is
+recorded as a duplicate of the same job.
+
+For enqueueing, the common queue transaction commits before the monitoring
+receipt. A crash in that narrow gap cannot lose work: GitHub retries the
+delivery, the durable `ingest_receipts(source='webhook', source_key=<delivery>)`
+row makes the queue operation idempotent, and the retry repairs the monitoring
+receipt. `edited` comments/reviews, unsupported families, and repositories
+outside `enabledRepos` remain observational only.
+
 Webhook enqueueing must not be enabled until recovery of persisted-but-
 unprocessed receipts and divergence metrics have been validated in production.
