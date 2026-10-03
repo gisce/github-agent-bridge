@@ -1767,7 +1767,7 @@ function WebhookPage({
   ];
   return (
     <section className="grid gap-4">
-      <PageTitle icon={<Activity className="h-5 w-5 text-muted" aria-hidden />} title="GitHub webhooks" subtitle={summary?.mode === "canary" ? "Canary ingestion health. Only enabled repositories may create jobs." : "Shadow ingestion health. Deliveries are observed but do not create jobs."} action={<RefreshButton onClick={onRefresh} />} />
+      <PageTitle icon={<Activity className="h-5 w-5 text-muted" aria-hidden />} title="GitHub webhooks" subtitle={summary?.mode === "primary" ? "Primary webhook ingestion. IMAP remains active as an idempotent safety net." : summary?.mode === "canary" ? "Canary ingestion health. Only enabled repositories may create jobs." : "Shadow ingestion health. Deliveries are observed but do not create jobs."} action={<RefreshButton onClick={onRefresh} />} />
       {error ? <Banner tone="error" text={error.message} /> : null}
       <div className="flex max-w-full flex-wrap rounded-md border border-border bg-white p-1" role="tablist" aria-label="Webhook dashboard section">
         {sections.map((item) => <button key={item.id} type="button" role="tab" aria-label={item.count === undefined ? item.label : `${item.label} (${item.count} total)`} aria-selected={section === item.id} className={cn("inline-flex h-8 items-center gap-2 rounded px-3 text-sm font-semibold", section === item.id ? "bg-primary text-white" : "text-muted hover:bg-slate-50 hover:text-foreground")} onClick={() => onSectionChange(item.id)}>{item.label}{item.count !== undefined ? <span className="rounded border border-current/30 px-1 font-mono text-[10px]">{item.count}</span> : null}</button>)}

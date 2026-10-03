@@ -172,6 +172,41 @@ def test_webhook_canary_ignores_repo_outside_enabled_repos(tmp_path):
         assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
 
 
+def test_webhook_primary_requires_explicit_acknowledgement(tmp_path):
+    try:
+        DashboardConfig(
+            db=tmp_path / "bridge.sqlite3", webhook_mode="primary",
+            webhook_policy=canary_policy(tmp_path), webhook_primary_ack=False,
+        )
+    except ValueError as exc:
+        assert "PRIMARY_ACK" in str(exc)
+    else:
+        raise AssertionError("primary mode must require an explicit acknowledgement")
+
+
+def test_webhook_primary_enqueues_trusted_repo_without_canary_allowlist(tmp_path):
+    policy = canary_policy(tmp_path)
+    policy.write_text(json.dumps({
+        "trustedOrgs": ["gisce"], "enabledRepos": [], "botLogins": ["giscebot"],
+        "actions": {"trustedAuto": ["reply_comment"]},
+    }))
+    payload = actionable_issue_comment_payload()
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3", require_auth=False,
+        webhook_secrets=(SECRET,), webhook_mode="primary", webhook_policy=policy,
+        webhook_primary_ack=True,
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github", content=payload, headers=signed_headers(payload),
+    )
+
+    assert response.json()["mode"] == "primary"
+    assert response.json()["enqueue_status"] == "enqueued"
+    with sqlite3.connect(config.db) as con:
+        assert con.execute("SELECT first_source FROM github_events").fetchone()[0] == "webhook"
+
+
 def test_webhook_shadow_selects_secret_by_repository_owner(tmp_path):
     payload = issue_comment_payload()
     client = TestClient(create_app(DashboardConfig(
