@@ -90,6 +90,8 @@ def webhook_notification(
     if not url.startswith("https://github.com/"):
         return None
     body = str(source.get("body") or "")
+    if event_name == "workflow_run":
+        body = f"Workflow run {source.get('conclusion') or source.get('status') or action}.\n{body}"
     sender = payload.get("sender") if isinstance(payload.get("sender"), dict) else {}
     login = str(sender.get("login") or "GitHub")
     title = str(subject.get("title") or subject.get("name") or event_name)
