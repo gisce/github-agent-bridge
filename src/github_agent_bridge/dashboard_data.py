@@ -4,7 +4,7 @@ import json
 import os
 import sqlite3
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -47,7 +47,8 @@ def parse_utc(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
     except ValueError:
         return None
 
@@ -396,6 +397,14 @@ def get_job_detail(db: str | Path, job_id: int) -> dict[str, Any] | None:
                 (job_id,),
             ).fetchall()
         ] if table_exists(con, "job_progress") else []
+        job["runs"] = [
+            dict(run)
+            for run in con.execute(
+                """SELECT id, attempt, started_at, finished_at, result, worker_id, session_id, is_estimated
+                FROM job_runs WHERE job_id=? ORDER BY attempt""",
+                (job_id,),
+            ).fetchall()
+        ] if table_exists(con, "job_runs") else []
         job["coalesced_notifications"] = [
             {
                 "id": row["id"],
@@ -704,13 +713,19 @@ def metrics_summary(db: str | Path, *, timezone_name: str = "UTC") -> dict[str, 
         if not table_exists(con, "jobs"):
             return {"db_exists": True, "schema_ok": False, "status_counts": {}, "runtime_seconds": {}}
         rows = con.execute("SELECT status, repo, action, work_intent, created_at, started_at, finished_at FROM jobs").fetchall()
+        run_rows = con.execute(
+            """SELECT job_runs.started_at, job_runs.finished_at, jobs.work_intent
+            FROM job_runs
+            JOIN jobs ON jobs.id=job_runs.job_id
+            WHERE job_runs.finished_at IS NOT NULL"""
+        ).fetchall() if table_exists(con, "job_runs") else rows
     status_counts = Counter(row["status"] for row in rows)
     by_repo = Counter(row["repo"] or "unknown" for row in rows)
     by_action = Counter(row["action"] for row in rows)
     by_intent = Counter(row["work_intent"] for row in rows)
     by_created_day = Counter(day for day in (created_day(row["created_at"], timezone) for row in rows) if day)
     runtimes = sorted(
-        seconds for seconds in (completed_duration_seconds(row["started_at"], row["finished_at"]) for row in rows) if seconds is not None
+        seconds for seconds in (completed_duration_seconds(row["started_at"], row["finished_at"]) for row in run_rows) if seconds is not None
     )
     waits = sorted(
         seconds for seconds in (duration_seconds(row["created_at"], row["started_at"]) for row in rows if row["started_at"]) if seconds is not None
@@ -723,7 +738,7 @@ def metrics_summary(db: str | Path, *, timezone_name: str = "UTC") -> dict[str, 
         "by_action": dict(by_action),
         "by_intent": dict(by_intent),
         "by_created_day": dict(sorted(by_created_day.items())),
-        "runtime_usage": runtime_usage(rows, timezone),
+        "runtime_usage": runtime_usage(run_rows, timezone),
         "runtime_seconds": percentiles(runtimes),
         "queue_wait_seconds": percentiles(waits),
     }
@@ -754,10 +769,10 @@ def runtime_usage(rows: list[sqlite3.Row], timezone: ZoneInfo) -> dict[str, list
         seconds = completed_duration_seconds(row["started_at"], row["finished_at"])
         if started is None or finished is None or seconds is None:
             continue
-        bucket_at = finished
-        local = bucket_at.astimezone(timezone)
-        day = local.date().isoformat()
-        month = f"{local.year:04d}-{local.month:02d}"
+        day = majority_runtime_day(started, finished, timezone)
+        if day is None:
+            continue
+        month = day[:7]
         mode = runtime_usage_mode(row["work_intent"])
         add_runtime_bucket(daily, day, seconds, mode)
         add_runtime_bucket(monthly, month, seconds, mode)
@@ -767,15 +782,40 @@ def runtime_usage(rows: list[sqlite3.Row], timezone: ZoneInfo) -> dict[str, list
     }
 
 
+def majority_runtime_day(started: datetime, finished: datetime, timezone: ZoneInfo) -> str | None:
+    """Return the local day containing most elapsed runtime, preferring the start day on ties."""
+    if finished < started:
+        return None
+    start_day = started.astimezone(timezone).date()
+    end_day = finished.astimezone(timezone).date()
+    current_day = start_day
+    best_day = start_day
+    best_seconds = -1.0
+    while current_day <= end_day:
+        day_start = datetime.combine(current_day, time.min, tzinfo=timezone).astimezone(UTC)
+        next_day = current_day + timedelta(days=1)
+        day_end = datetime.combine(next_day, time.min, tzinfo=timezone).astimezone(UTC)
+        overlap_start = max(started, day_start)
+        overlap_end = min(finished, day_end)
+        overlap_seconds = max(0.0, (overlap_end - overlap_start).total_seconds())
+        if overlap_seconds > best_seconds:
+            best_day = current_day
+            best_seconds = overlap_seconds
+        current_day = next_day
+    return best_day.isoformat()
+
+
 def runtime_usage_mode(work_intent: str | None) -> str:
     return "work" if work_intent == "work_allowed" else "review"
 
 
 def add_runtime_bucket(buckets: dict[str, dict[str, int]], bucket: str, seconds: int, mode: str) -> None:
-    current = buckets.setdefault(bucket, {"seconds": 0, "jobs": 0, "work_seconds": 0, "review_seconds": 0, "work_jobs": 0, "review_jobs": 0})
+    current = buckets.setdefault(bucket, {"seconds": 0, "runs": 0, "jobs": 0, "work_seconds": 0, "review_seconds": 0, "work_runs": 0, "review_runs": 0, "work_jobs": 0, "review_jobs": 0})
     current["seconds"] += seconds
+    current["runs"] += 1
     current["jobs"] += 1
     current[f"{mode}_seconds"] += seconds
+    current[f"{mode}_runs"] += 1
     current[f"{mode}_jobs"] += 1
 
 
@@ -785,9 +825,12 @@ def runtime_bucket_rows(buckets: dict[str, dict[str, int]]) -> list[dict[str, An
             "bucket": bucket,
             "seconds": values["seconds"],
             "minutes": round(values["seconds"] / 60, 2),
+            "runs": values["runs"],
             "jobs": values["jobs"],
             "work_seconds": values["work_seconds"],
             "review_seconds": values["review_seconds"],
+            "work_runs": values["work_runs"],
+            "review_runs": values["review_runs"],
             "work_jobs": values["work_jobs"],
             "review_jobs": values["review_jobs"],
         }

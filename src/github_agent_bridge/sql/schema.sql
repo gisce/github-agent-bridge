@@ -39,6 +39,24 @@ CREATE INDEX IF NOT EXISTS idx_jobs_dashboard_order ON jobs(
   COALESCE(finished_at, started_at, updated_at, created_at) DESC,
   id DESC
 );
+CREATE TABLE IF NOT EXISTS job_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  attempt INTEGER NOT NULL CHECK(attempt > 0),
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  result TEXT CHECK(result IN ('done','blocked','requeued','cancelled','historical')),
+  worker_id TEXT,
+  session_id TEXT NOT NULL,
+  is_estimated INTEGER NOT NULL DEFAULT 0 CHECK(is_estimated IN (0, 1)),
+  CHECK(
+    (finished_at IS NULL AND result IS NULL)
+    OR (finished_at IS NOT NULL AND result IS NOT NULL)
+  ),
+  UNIQUE(job_id, attempt)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_job_runs_open ON job_runs(job_id) WHERE finished_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_job_runs_finished ON job_runs(finished_at);
 CREATE TABLE IF NOT EXISTS ingest_receipts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   source TEXT NOT NULL,

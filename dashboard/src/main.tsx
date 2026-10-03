@@ -32,9 +32,12 @@ type RuntimeUsageBucket = {
   bucket: string;
   seconds: number;
   minutes: number;
+  runs?: number;
   jobs: number;
   work_seconds: number;
   review_seconds: number;
+  work_runs: number;
+  review_runs: number;
   work_jobs: number;
   review_jobs: number;
 };
@@ -3942,6 +3945,7 @@ function RuntimeUsageChart({ usage, loading, totalJobs }: { usage: RuntimeUsage 
     label: runtimeBucketLabel(row.bucket, grouping),
   }));
   const totalSeconds = rows.reduce((total, row) => total + row.seconds, 0);
+  const totalRuns = rows.reduce((total, row) => total + (row.runs ?? row.jobs), 0);
   if (loading && data.length === 0) return <EmptyState text="Loading runtime usage..." />;
   if (data.length === 0) return <EmptyState text={totalJobs > 0 ? "No jobs have recorded runtime yet." : "No job history available."} />;
   return (
@@ -3949,7 +3953,7 @@ function RuntimeUsageChart({ usage, loading, totalJobs }: { usage: RuntimeUsage 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2 text-sm text-muted">
           <TimerReset className="h-4 w-4" aria-hidden />
-          <span>{formatRuntimeUsageSeconds(totalSeconds)} consumed across {rows.reduce((total, row) => total + row.jobs, 0)} job{rows.reduce((total, row) => total + row.jobs, 0) === 1 ? "" : "s"}</span>
+          <span>{formatRuntimeUsageSeconds(totalSeconds)} consumed across {totalRuns} run{totalRuns === 1 ? "" : "s"}</span>
         </div>
         <div className="inline-flex h-8 rounded-md border border-border bg-white p-0.5" aria-label="Runtime grouping">
           {(["day", "month"] as const).map((value) => (

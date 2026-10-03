@@ -405,6 +405,88 @@ def test_claim_can_filter_by_work_intent(tmp_path):
     assert claimed.work_intent == "review_only"
 
 
+def test_job_runs_preserve_each_attempt_across_requeue(tmp_path):
+    q = JobQueue(tmp_path / "q.sqlite3")
+    job, _ = q.enqueue(notif(1, "<1@github.com>", BODY1), policy())
+    q.update_work_intent(job.id, "work_allowed", "implementation request")
+
+    first = q.claim_next("worker-1")
+    assert first is not None
+    assert q.requeue_running(first.id, "transient failure") is True
+    second = q.claim_next("worker-2")
+    assert second is not None
+    q.finish(second.id, "done", "completed")
+
+    with q.connect() as con:
+        runs = con.execute(
+            "SELECT * FROM job_runs WHERE job_id=? ORDER BY attempt",
+            (job.id,),
+        ).fetchall()
+
+    assert [run["attempt"] for run in runs] == [1, 2]
+    assert [run["result"] for run in runs] == ["requeued", "done"]
+    assert [run["worker_id"] for run in runs] == ["worker-1", "worker-2"]
+    assert all(run["started_at"] for run in runs)
+    assert all(run["finished_at"] for run in runs)
+    assert [run["session_id"] for run in runs] == [
+        f"github-agent-bridge-job-{job.id}-attempt-1",
+        f"github-agent-bridge-job-{job.id}-attempt-2",
+    ]
+
+
+def test_block_and_cancel_close_active_job_runs(tmp_path):
+    q = JobQueue(tmp_path / "q.sqlite3")
+    blocked, _ = q.enqueue(notif(1, "<1@github.com>", BODY1), policy())
+    cancelled, _ = q.enqueue(notif(2, "<2@github.com>", BODY_OTHER), policy())
+
+    assert q.claim_next("worker-1").id == blocked.id
+    assert q.block_running("executor stopped", "shutdown", job_ids=[blocked.id]) == [blocked.id]
+    assert q.claim_next("worker-2").id == cancelled.id
+    assert q.mark_cancelled(cancelled.id, actor="ecarreras", reason="obsolete") is not None
+
+    with q.connect() as con:
+        results = dict(
+            con.execute(
+                "SELECT job_id, result FROM job_runs WHERE job_id IN (?, ?)",
+                (blocked.id, cancelled.id),
+            ).fetchall()
+        )
+
+    assert results == {blocked.id: "blocked", cancelled.id: "cancelled"}
+
+
+def test_init_backfills_only_the_known_legacy_interval_as_estimated(tmp_path):
+    db = tmp_path / "q.sqlite3"
+    q = JobQueue(db)
+    job, _ = q.enqueue(notif(1, "<1@github.com>", BODY1), policy())
+    with q.connect() as con:
+        con.execute("DROP TABLE job_runs")
+        con.execute(
+            """UPDATE jobs
+            SET attempts=3, started_at=?, finished_at=?, metadata_json=?
+            WHERE id=?""",
+            (
+                "2026-09-01T10:00:00Z",
+                "2026-09-01T10:30:00Z",
+                '{"openclaw_session_id":"legacy-session"}',
+                job.id,
+            ),
+        )
+
+    JobQueue(db)
+    JobQueue(db)
+
+    with sqlite3.connect(db) as con:
+        con.row_factory = sqlite3.Row
+        runs = con.execute("SELECT * FROM job_runs WHERE job_id=?", (job.id,)).fetchall()
+
+    assert len(runs) == 1
+    assert runs[0]["attempt"] == 3
+    assert runs[0]["result"] == "historical"
+    assert runs[0]["session_id"] == "legacy-session"
+    assert runs[0]["is_estimated"] == 1
+
+
 def test_cancel_running_records_actor_reason_and_finish_preserves_cancellation(tmp_path):
     q = JobQueue(tmp_path / "q.sqlite3")
     job, _ = q.enqueue(notif(1, "<1@github.com>", BODY1), policy())
@@ -728,6 +810,11 @@ def test_unlock_stale_can_limit_to_selected_running_jobs(tmp_path):
 
     assert q.get(job1.id).status == "running"
     assert q.get(job2.id).status == "pending"
+    with q.connect() as con:
+        assert con.execute(
+            "SELECT result FROM job_runs WHERE job_id=?",
+            (job2.id,),
+        ).fetchone()["result"] == "requeued"
 
 
 def test_block_running_can_limit_jobs_and_never_requeues(tmp_path):

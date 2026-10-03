@@ -660,6 +660,7 @@ def test_dashboard_exposes_job_detail_logs_and_metrics(tmp_path):
             }
         }
         con.execute("UPDATE jobs SET metadata_json=?, work_intent=? WHERE id=?", (json.dumps(metadata), "work_allowed", job.id))
+    assert q.claim_next("worker-1").id == job.id
     q.finish(job.id, "done", "completed")
 
     detail = get_job_detail(db, job.id)
@@ -671,6 +672,8 @@ def test_dashboard_exposes_job_detail_logs_and_metrics(tmp_path):
     assert detail["intent_classifier"]["llm"]["write_permission"] == "state_change_allowed"
     assert detail["intent_classifier"]["llm"]["scope"] == "Update the PR tests."
     assert detail["worklog"][0]["phase"] == "queued"
+    assert detail["runs"][0]["result"] == "done"
+    assert detail["runs"][0]["worker_id"] == "worker-1"
     assert metrics["status_counts"]["done"] == 1
     assert list(metrics["by_created_day"].values()) == [1]
     assert client.get(f"/api/jobs/{job.id}/logs").json()["logs"][-1]["phase"] == "done"
@@ -690,28 +693,20 @@ def test_dashboard_metrics_groups_runtime_usage_by_requested_timezone(tmp_path):
         notif(uid=4, mid="<4@github.com>", body="@pilipilisbot https://github.com/gisce/erp/pull/4#issuecomment-40"),
         Policy(trusted_orgs=["gisce"]),
     )
-    q.finish(first.id, "done", "completed")
-    q.finish(second.id, "done", "completed")
-    q.finish(missing_finish.id, "done", "completed")
-    q.finish(invalid_finish.id, "done", "completed")
     with q.connect() as con:
-        con.execute(
-            "UPDATE jobs SET started_at=?, finished_at=? WHERE id=?",
-            ("2026-06-01T23:30:00Z", "2026-06-02T00:30:00Z", first.id),
-        )
         con.execute("UPDATE jobs SET work_intent=? WHERE id=?", ("work_allowed", first.id))
-        con.execute(
-            "UPDATE jobs SET started_at=?, finished_at=? WHERE id=?",
-            ("2026-06-02T10:00:00Z", "2026-06-02T10:30:00Z", second.id),
-        )
         con.execute("UPDATE jobs SET work_intent=? WHERE id=?", ("review_only", second.id))
-        con.execute(
-            "UPDATE jobs SET started_at=?, finished_at=NULL WHERE id=?",
-            ("2026-06-02T11:00:00Z", missing_finish.id),
-        )
-        con.execute(
-            "UPDATE jobs SET started_at=?, finished_at=? WHERE id=?",
-            ("2026-06-02T12:00:00Z", "n/a", invalid_finish.id),
+        con.executemany(
+            """INSERT INTO job_runs(
+                job_id,attempt,started_at,finished_at,result,worker_id,session_id
+            ) VALUES(?,?,?,?,?,?,?)""",
+            [
+                (first.id, 1, "2026-06-01T03:20:00Z", "2026-06-01T03:50:00Z", "requeued", "worker-1", "run-1"),
+                (first.id, 2, "2026-06-01T03:55:00Z", "2026-06-01T04:35:00Z", "done", "worker-1", "run-2"),
+                (second.id, 1, "2026-07-01T03:30:00Z", "2026-07-01T04:30:00Z", "done", "worker-2", "run-3"),
+                (missing_finish.id, 1, "2026-06-02T11:00:00Z", None, None, "worker-3", "run-4"),
+                (invalid_finish.id, 1, "2026-06-02T12:00:00Z", "n/a", "done", "worker-4", "run-5"),
+            ],
         )
 
     metrics = metrics_summary(db, timezone_name="America/New_York")
@@ -720,40 +715,101 @@ def test_dashboard_metrics_groups_runtime_usage_by_requested_timezone(tmp_path):
 
     assert metrics["runtime_usage"]["day"] == [
         {
-            "bucket": "2026-06-01",
-            "seconds": 3600,
-            "minutes": 60.0,
+            "bucket": "2026-05-31",
+            "seconds": 1800,
+            "minutes": 30.0,
+            "runs": 1,
             "jobs": 1,
-            "work_seconds": 3600,
+            "work_seconds": 1800,
             "review_seconds": 0,
+            "work_runs": 1,
+            "review_runs": 0,
             "work_jobs": 1,
             "review_jobs": 0,
         },
         {
-            "bucket": "2026-06-02",
-            "seconds": 1800,
-            "minutes": 30.0,
+            "bucket": "2026-06-01",
+            "seconds": 2400,
+            "minutes": 40.0,
+            "runs": 1,
+            "jobs": 1,
+            "work_seconds": 2400,
+            "review_seconds": 0,
+            "work_runs": 1,
+            "review_runs": 0,
+            "work_jobs": 1,
+            "review_jobs": 0,
+        },
+        {
+            "bucket": "2026-06-30",
+            "seconds": 3600,
+            "minutes": 60.0,
+            "runs": 1,
             "jobs": 1,
             "work_seconds": 0,
-            "review_seconds": 1800,
+            "review_seconds": 3600,
+            "work_runs": 0,
+            "review_runs": 1,
             "work_jobs": 0,
             "review_jobs": 1,
         },
     ]
     assert metrics["runtime_usage"]["month"] == [
         {
+            "bucket": "2026-05",
+            "seconds": 1800,
+            "minutes": 30.0,
+            "runs": 1,
+            "jobs": 1,
+            "work_seconds": 1800,
+            "review_seconds": 0,
+            "work_runs": 1,
+            "review_runs": 0,
+            "work_jobs": 1,
+            "review_jobs": 0,
+        },
+        {
             "bucket": "2026-06",
-            "seconds": 5400,
-            "minutes": 90.0,
+            "seconds": 6000,
+            "minutes": 100.0,
+            "runs": 2,
             "jobs": 2,
-            "work_seconds": 3600,
-            "review_seconds": 1800,
+            "work_seconds": 2400,
+            "review_seconds": 3600,
+            "work_runs": 1,
+            "review_runs": 1,
             "work_jobs": 1,
             "review_jobs": 1,
         },
     ]
-    assert metrics["runtime_seconds"] == {"median": 1800, "p90": 3600, "p99": 3600}
+    assert metrics["runtime_seconds"] == {"median": 2400, "p90": 3600, "p99": 3600}
     assert payload["runtime_usage"] == metrics["runtime_usage"]
+
+
+def test_dashboard_runtime_uses_elapsed_time_across_dst_fallback(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    q = JobQueue(db)
+    job, _ = q.enqueue(notif(), Policy(trusted_orgs=["gisce"]))
+    with q.connect() as con:
+        con.execute(
+            """INSERT INTO job_runs(
+                job_id,attempt,started_at,finished_at,result,worker_id,session_id
+            ) VALUES(?,?,?,?,?,?,?)""",
+            (
+                job.id,
+                1,
+                "2026-11-01T05:30:00Z",
+                "2026-11-01T07:30:00Z",
+                "done",
+                "worker-1",
+                "dst-run",
+            ),
+        )
+
+    metrics = metrics_summary(db, timezone_name="America/New_York")
+
+    assert metrics["runtime_usage"]["day"][0]["bucket"] == "2026-11-01"
+    assert metrics["runtime_usage"]["day"][0]["seconds"] == 7200
 
 
 def test_dashboard_exposes_safe_openclaw_session_correlation(tmp_path):

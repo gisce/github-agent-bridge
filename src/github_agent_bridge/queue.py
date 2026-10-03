@@ -99,6 +99,7 @@ class JobQueue:
             con.executescript(SCHEMA)
             self._ensure_columns(con)
             self._ensure_indexes(con)
+            self._backfill_job_runs(con)
         return con
 
     def init(self) -> None:
@@ -106,6 +107,7 @@ class JobQueue:
             con.executescript(SCHEMA)
             self._ensure_columns(con)
             self._ensure_indexes(con)
+            self._backfill_job_runs(con)
 
     def enqueue(self, n: Notification, policy: Policy) -> tuple[Job | None, str]:
         """Backward-compatible email enqueue entrypoint."""
@@ -367,9 +369,15 @@ class JobQueue:
                 metadata["openclaw_session_id"] = session_id_for_job_attempt(int(row["id"]), int(row["attempts"]) + 1)
             else:
                 metadata.setdefault("openclaw_session_id", session_id_for_job(int(row["id"])))
+            attempt = int(row["attempts"]) + 1
             con.execute(
-                "UPDATE jobs SET status='running', locked_by=?, attempts=attempts+1, started_at=?, updated_at=?, metadata_json=? WHERE id=?",
+                "UPDATE jobs SET status='running', locked_by=?, attempts=attempts+1, started_at=?, finished_at=NULL, updated_at=?, metadata_json=? WHERE id=?",
                 (worker_id, now, now, json.dumps(metadata, sort_keys=True), row["id"]),
+            )
+            con.execute(
+                """INSERT INTO job_runs(job_id,attempt,started_at,worker_id,session_id)
+                VALUES(?,?,?,?,?)""",
+                (row["id"], attempt, now, worker_id, metadata["openclaw_session_id"]),
             )
             self._log(con, row["id"], row["work_key"], "running", f"claimed by {worker_id}", None)
             self._session_event(con, row["id"], row["work_key"], metadata["openclaw_session_id"], "claimed", f"claimed by {worker_id}", None)
@@ -454,6 +462,7 @@ class JobQueue:
     def finish(self, job_id: int, status: str, summary: str, detail: str | None = None) -> None:
         now = utc_now()
         with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
             row = con.execute("SELECT work_key FROM jobs WHERE id=?", (job_id,)).fetchone()
             metadata = self._job_metadata(con, job_id)
             cancellation = metadata.get("cancellation")
@@ -470,10 +479,13 @@ class JobQueue:
                     "UPDATE jobs SET status=?, last_error=?, locked_by=NULL, finished_at=?, updated_at=? WHERE id=?",
                     (status, detail if status == "blocked" else None, now, now, job_id),
                 )
+            run_result = "cancelled" if isinstance(cancellation, dict) and cancellation.get("state") in {"requested", "cancelled"} else status
+            self._finish_run(con, job_id, run_result, now)
             self._log(con, job_id, row["work_key"] if row else None, status, summary, detail)
             session_id = metadata.get("openclaw_session_id") or session_id_for_job(job_id)
             self._session_event(con, job_id, row["work_key"] if row else None, str(session_id), status, summary, detail)
             self._progress(con, job_id, row["work_key"] if row else None, "semantic", status, summary, detail)
+            con.commit()
 
     def request_cancel_running(
         self,
@@ -574,6 +586,7 @@ class JobQueue:
             if not cur.rowcount:
                 con.commit()
                 return None
+            self._finish_run(con, job_id, "cancelled", now)
             self._log(con, job_id, row["work_key"], "cancelled", summary, detail)
             session_id = str(metadata.get("openclaw_session_id") or session_id_for_job(job_id))
             self._session_event(con, job_id, row["work_key"], session_id, "cancelled", summary, detail)
@@ -591,21 +604,25 @@ class JobQueue:
     ) -> bool:
         now = utc_now()
         with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
             row = con.execute(
                 "SELECT work_key, metadata_json FROM jobs WHERE id=? AND status='running'",
                 (job_id,),
             ).fetchone()
             if row is None:
+                con.commit()
                 return False
             metadata = json.loads(row["metadata_json"] or "{}")
             if fresh_session:
                 metadata["fresh_session_on_retry"] = True
             cur = con.execute(
-                "UPDATE jobs SET status='pending', locked_by=NULL, last_error=NULL, updated_at=?, metadata_json=? WHERE id=? AND status='running'",
-                (now, json.dumps(metadata, sort_keys=True), job_id),
+                "UPDATE jobs SET status='pending', locked_by=NULL, last_error=NULL, finished_at=?, updated_at=?, metadata_json=? WHERE id=? AND status='running'",
+                (now, now, json.dumps(metadata, sort_keys=True), job_id),
             )
             if cur.rowcount:
+                self._finish_run(con, job_id, "requeued", now)
                 self._log(con, job_id, row["work_key"], "retry", summary, detail)
+            con.commit()
             return bool(cur.rowcount)
 
     def block_running(
@@ -658,6 +675,7 @@ class JobQueue:
                     continue
                 job_id = int(row["id"])
                 blocked_ids.append(job_id)
+                self._finish_run(con, job_id, "blocked", now)
                 self._log(con, job_id, row["work_key"], "blocked", summary, detail)
                 metadata = json.loads(row["metadata_json"] or "{}")
                 session_id = str(metadata.get("openclaw_session_id") or session_id_for_job(job_id))
@@ -724,17 +742,22 @@ class JobQueue:
 
     def unlock_stale(self, older_than_seconds: int, job_ids: list[int] | None = None) -> int:
         with self.connect() as con:
+            con.execute("BEGIN IMMEDIATE")
             args: list[object] = [older_than_seconds]
             sql = "SELECT id, work_key FROM jobs WHERE status='running' AND started_at IS NOT NULL AND (julianday('now') - julianday(started_at)) * 86400 > ?"
             if job_ids is not None:
                 if not job_ids:
+                    con.commit()
                     return 0
                 sql += f" AND id IN ({','.join('?' for _ in job_ids)})"
                 args.extend(job_ids)
             rows = con.execute(sql, args).fetchall()
+            now = utc_now()
             for row in rows:
-                con.execute("UPDATE jobs SET status='pending', locked_by=NULL, updated_at=? WHERE id=?", (utc_now(), row["id"]))
+                con.execute("UPDATE jobs SET status='pending', locked_by=NULL, finished_at=?, updated_at=? WHERE id=?", (now, now, row["id"]))
+                self._finish_run(con, int(row["id"]), "requeued", now)
                 self._log(con, row["id"], row["work_key"], "unlock_stale", f"running job older than {older_than_seconds}s requeued", None)
+            con.commit()
             return len(rows)
 
     def get(self, job_id: int) -> Job | None:
@@ -795,6 +818,55 @@ class JobQueue:
         if row is None:
             return {}
         return json.loads(row["metadata_json"] or "{}")
+
+    def _finish_run(self, con: sqlite3.Connection, job_id: int, result: str, finished_at: str) -> None:
+        con.execute(
+            """UPDATE job_runs
+            SET finished_at=?, result=?
+            WHERE id=(
+                SELECT id FROM job_runs
+                WHERE job_id=? AND finished_at IS NULL
+                ORDER BY attempt DESC LIMIT 1
+            ) AND finished_at IS NULL""",
+            (finished_at, result, job_id),
+        )
+
+    def _backfill_job_runs(self, con: sqlite3.Connection) -> None:
+        """Preserve the one historical interval recoverable from legacy jobs."""
+        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_runs'").fetchone() is None:
+            return
+        rows = con.execute(
+            """SELECT id, attempts, started_at, finished_at, locked_by, metadata_json
+            FROM jobs
+            WHERE started_at IS NOT NULL
+              AND finished_at IS NOT NULL
+              AND julianday(finished_at) >= julianday(started_at)
+              AND NOT EXISTS (SELECT 1 FROM job_runs WHERE job_runs.job_id=jobs.id)"""
+        ).fetchall()
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                metadata = {}
+            attempt = max(1, int(row["attempts"] or 0))
+            session_id = str(
+                metadata.get("openclaw_session_id")
+                or session_id_for_job_attempt(int(row["id"]), attempt)
+            )
+            con.execute(
+                """INSERT OR IGNORE INTO job_runs(
+                    job_id,attempt,started_at,finished_at,result,worker_id,session_id,is_estimated
+                ) VALUES(?,?,?,?,?,?,?,1)""",
+                (
+                    row["id"],
+                    attempt,
+                    row["started_at"],
+                    row["finished_at"],
+                    "historical",
+                    row["locked_by"],
+                    session_id,
+                ),
+            )
 
     def _ensure_columns(self, con: sqlite3.Connection) -> None:
         tables = {

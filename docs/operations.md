@@ -479,6 +479,30 @@ before it is returned to the authenticated dashboard. The process activity panel
 uses persisted process samples for a compact CPU history line chart when monitor
 samples exist, and falls back to the live executor snapshot otherwise.
 
+### Run history and runtime accounting
+
+Every successful queue claim creates a `job_runs` row with its own attempt,
+worker, OpenClaw session id, and start time. Every transition out of `running`
+closes that run with a finish time and a `done`, `blocked`, `requeued`, or
+`cancelled` result. The `started_at` and `finished_at` columns on `jobs` remain a
+compatibility summary of the current or latest attempt; runtime metrics use
+completed `job_runs` as their source of truth.
+
+`GET /api/metrics/summary` assigns a completed run to the dashboard-local day
+that contains the largest share of its elapsed runtime. A tie is assigned to the
+local start day, and monthly totals are derived from that selected day. Runtime
+is measured in UTC elapsed seconds, so DST changes do not add or lose execution
+time. The response retains the legacy `jobs` count fields as aliases for run
+counts and also returns explicit `runs`, `work_runs`, and `review_runs` fields.
+
+Schema initialization backfills at most one recoverable interval per legacy
+job. That row has result `historical` and `is_estimated=1`; earlier attempts are
+not reconstructed from the old aggregate fields. Run rows have the same
+retention lifecycle as their parent job and are removed by `ON DELETE CASCADE`
+when that job is deleted. They are not independently age-pruned because doing
+so would silently rewrite historical usage totals; deployments should apply any
+future job-retention policy to `jobs`, which also bounds run storage.
+
 When publishing the dashboard through nginx, disable buffering for the proxied
 dashboard location so SSE events flush immediately. Also intercept upstream
 restart errors so browser users see a short auto-refreshing maintenance page
