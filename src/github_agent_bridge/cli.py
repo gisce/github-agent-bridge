@@ -224,8 +224,7 @@ def job_dict(job):
 
 def cmd_status(args: argparse.Namespace) -> int:
     metrics = inspect_db_read_only(args.db)
-    queue = JobQueue(args.db)
-    print(json.dumps({"stats": metrics.get("counts", {}), "oldest_pending_age_seconds": metrics.get("oldest_pending_age_seconds"), "executor_pause": queue.executor_pause_state()}, ensure_ascii=False, indent=2))
+    print(json.dumps({"stats": metrics.get("counts", {}), "oldest_pending_age_seconds": metrics.get("oldest_pending_age_seconds"), "executor_pause": metrics.get("executor_pause", {"paused": False})}, ensure_ascii=False, indent=2))
     return 0
 
 

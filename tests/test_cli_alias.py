@@ -39,6 +39,28 @@ def test_pause_resume_executor_cli_updates_queue_state(tmp_path, capsys):
     assert JobQueue(db).executor_paused() is False
 
 
+def test_status_cli_does_not_create_missing_database(tmp_path, capsys):
+    db = tmp_path / "missing.sqlite3"
+
+    cli.main(["--db", str(db), "status"])
+
+    status = capsys.readouterr().out
+    assert '"executor_pause"' in status
+    assert '"paused": false' in status
+    assert not db.exists()
+
+
+def test_status_cli_reads_legacy_database_without_state_table(tmp_path, capsys):
+    db = tmp_path / "legacy.sqlite3"
+    db.touch()
+
+    cli.main(["--db", str(db), "status"])
+
+    status = capsys.readouterr().out
+    assert '"executor_pause"' in status
+    assert '"paused": false' in status
+
+
 def test_rules_cli_renders_applicable_rules_as_prompt_text(tmp_path, capsys):
     db = tmp_path / "q.sqlite3"
     JobQueue(db)
