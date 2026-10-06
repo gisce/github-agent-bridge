@@ -6,6 +6,7 @@ import {
   ActorFilter,
   App,
   AutoupdateNotice,
+  ExecutorPauseControl,
   Filters,
   JobDetail,
   JobDetailPage,
@@ -1016,6 +1017,45 @@ describe("status badges", () => {
 });
 
 describe("system page", () => {
+  it("shows executor state to readers but reserves the switch for admins", () => {
+    const onChange = vi.fn();
+    render(<ExecutorPauseControl state={{ paused: true, reason: "upgrade window" }} loading={false} statusError={null} pending={false} actionError="" isAdmin={false} onChange={onChange} />);
+
+    expect(screen.getByText("Paused")).toBeInTheDocument();
+    expect(screen.getByText("Reason: upgrade window")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Pause executor" })).toBeChecked();
+    expect(screen.getByRole("switch", { name: "Pause executor" })).toBeDisabled();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("confirms both pause and resume and disables changes while saving", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const props = { loading: false, statusError: null, pending: false, actionError: "", isAdmin: true, onChange };
+    const { rerender } = render(<ExecutorPauseControl {...props} state={{ paused: false }} />);
+    const toggle = screen.getByRole("switch", { name: "Pause executor" });
+
+    await user.click(toggle);
+    expect(confirm).toHaveBeenCalledWith("Pause executor? New jobs will remain pending; running jobs will continue.");
+    expect(onChange).not.toHaveBeenCalled();
+
+    confirm.mockReturnValue(true);
+    await user.click(toggle);
+    expect(onChange).toHaveBeenCalledWith(true);
+
+    rerender(<ExecutorPauseControl {...props} state={{ paused: true }} />);
+    await user.click(toggle);
+    expect(confirm).toHaveBeenCalledWith("Resume executor? Pending jobs may start running.");
+    expect(onChange).toHaveBeenCalledWith(false);
+
+    rerender(<ExecutorPauseControl {...props} state={{ paused: true }} pending={true} />);
+    expect(toggle).toBeDisabled();
+    rerender(<ExecutorPauseControl {...props} state={{ paused: true }} statusError={new Error("database unavailable")} />);
+    expect(toggle).toBeDisabled();
+    confirm.mockRestore();
+  });
+
   const systemdUnit = {
     role: "executor",
     kind: "service",

@@ -82,8 +82,11 @@ def test_dashboard_status_is_read_only_and_lists_recent_jobs(tmp_path):
         "refresh_autoupdate_plan",
         "apply_autoupdate",
         "complete_autoupdate_reload",
+        "pause_executor",
+        "resume_executor",
     ]
     assert response.json()["autoupdate"] == {}
+    assert response.json()["executor_pause"] == {"paused": False}
     assert response.json()["metrics"]["pending"] == 1
     assert response.json()["metrics"]["knowledge"]["proposed"] == 1
     assert jobs.json()["jobs"][0]["work_key"] == "gisce/erp#1"
@@ -183,6 +186,34 @@ def test_dashboard_autoupdate_state_requires_admin_profile(tmp_path):
     assert "view_autoupdate_plan" not in reader["admin_actions"]
     assert admin["autoupdate"]["target"]["tag_name"] == "v0.28.0"
     assert "view_autoupdate_plan" in admin["admin_actions"]
+
+
+def test_dashboard_executor_pause_is_visible_but_only_admin_can_change_it(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice"}, admin_users={"admin"}))
+    client = TestClient(app)
+
+    assert client.post("/api/executor/pause").status_code == 401
+    client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Alice"})))
+    assert client.get("/api/status").json()["executor_pause"] == {"paused": False}
+    assert "pause_executor" not in client.get("/api/status").json()["admin_actions"]
+    assert client.post("/api/executor/pause").status_code == 403
+    assert client.post("/api/executor/resume").status_code == 403
+    assert queue.executor_paused() is False
+
+    client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Admin"}, is_admin=True)))
+    paused = client.post("/api/executor/pause")
+    assert paused.status_code == 200
+    assert paused.json()["executor_pause"]["paused"] is True
+    assert paused.json()["executor_pause"]["reason"] == "dashboard:admin"
+    assert client.get("/api/status").json()["executor_pause"]["paused"] is True
+    assert queue.executor_paused() is True
+
+    resumed = client.post("/api/executor/resume")
+    assert resumed.status_code == 200
+    assert resumed.json()["executor_pause"]["paused"] is False
+    assert queue.executor_paused() is False
 
 
 def test_dashboard_autoupdate_refresh_requires_admin_and_records_plan(tmp_path, monkeypatch):

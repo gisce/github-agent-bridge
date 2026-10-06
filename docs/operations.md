@@ -183,6 +183,10 @@ continues running without external error reporting.
 After all executor instances have been upgraded to a version with pause support,
 pause claims on the shared queue before an update window:
 
+Admins can also use the confirmed **Pause** switch in the dashboard's **System**
+page. Other dashboard users can see the state but cannot change it. The switch
+and CLI use the same persisted state; the page refreshes it while open.
+
 ```bash
 gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 \
   pause-executor --reason "upgrade window"
