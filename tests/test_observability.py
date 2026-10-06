@@ -67,6 +67,10 @@ def test_configure_sentry_initializes_sdk_with_bridge_env(monkeypatch):
         "release": "github-agent-bridge@9.9.9",
         "environment": "production",
         "send_default_pii": False,
+        "ignore_errors": [
+            "fastapi.exceptions.HTTPException",
+            "starlette.exceptions.HTTPException",
+        ],
         "traces_sample_rate": 0.25,
         "profiles_sample_rate": 0.5,
     }

@@ -344,9 +344,11 @@ Recharts for percentile charts.
 Webhook administrators can request a configuration refresh from a hook detail
 page. This runs `gh api --method POST <validated-ping-path>` under the dashboard
 service identity, so `gh auth status` must report an account with organization
-or repository webhook write permission. Each request and result is retained in
-`webhook_hook_actions`; raw CLI errors are audited but are not returned to the
-browser.
+or repository webhook write permission. Classic OAuth tokens need
+`admin:org_hook` for organization hooks or `admin:repo_hook` for repository
+hooks; fine-grained tokens need the corresponding webhook write permission.
+Each request and result is retained in `webhook_hook_actions`; raw CLI errors
+are audited but are not returned to the browser.
 The process activity API and dashboard distinguish live executor process state,
 persisted process activity, semantic job progress, and visible transcript/output
 progress so operators can tell whether a running job is merely alive or actually
