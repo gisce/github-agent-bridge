@@ -192,6 +192,9 @@ class JobQueue:
                     **metadata["intent_classifier"],
                     "error": str(exc)[:500],
                 }
+        if action == "submit_review":
+            intent = "review_only"
+            metadata["intent_guardrail"] = "submit_review_read_only"
         decision = policy.decision(n, ctx, action)
         status = {"auto": "done", "ask": "waiting_approval", "deny": "denied"}.get(decision, "pending")
         now = utc_now()
@@ -784,9 +787,11 @@ class JobQueue:
     def update_work_intent(self, job_id: int, work_intent: str, summary: str) -> Job | None:
         now = utc_now()
         with self.connect() as con:
-            row = con.execute("SELECT work_key FROM jobs WHERE id=?", (job_id,)).fetchone()
+            row = con.execute("SELECT work_key, action FROM jobs WHERE id=?", (job_id,)).fetchone()
             if row is None:
                 return None
+            if row["action"] == "submit_review":
+                work_intent = "review_only"
             con.execute("UPDATE jobs SET work_intent=?, updated_at=? WHERE id=?", (work_intent, now, job_id))
             self._log(con, job_id, row["work_key"], "intent_update", summary, None)
         return self.get(job_id)

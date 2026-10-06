@@ -121,6 +121,7 @@ def pull_request_review_requested_payload(
     pr_id: int = 1829195123,
     requested_reviewer: str = "giscebot",
     sender: str = "ecarreras",
+    title: str = "feat: enable guarded webhook canary ingestion",
 ) -> bytes:
     return json.dumps({
         "action": "review_requested",
@@ -128,7 +129,7 @@ def pull_request_review_requested_payload(
         "pull_request": {
             "id": pr_id,
             "number": 233,
-            "title": "feat: enable guarded webhook canary ingestion",
+            "title": title,
             "html_url": "https://github.com/gisce/github-agent-bridge/pull/233",
         },
         "requested_reviewer": {"login": requested_reviewer},
@@ -409,7 +410,9 @@ def test_webhook_canary_enqueues_pull_request_review_requested_for_configured_bo
         "botLogins": ["giscebot"],
         "actions": {"trustedAuto": ["submit_review"]},
     }))
-    payload = pull_request_review_requested_payload()
+    payload = pull_request_review_requested_payload(
+        title="fix(deps): bump source-map-js from 1.2.1 to 1.2.2 in /dashboard",
+    )
     config = DashboardConfig(
         db=tmp_path / "bridge.sqlite3", require_auth=False,
         webhook_secrets=(SECRET,), webhook_mode="canary",
@@ -430,6 +433,8 @@ def test_webhook_canary_enqueues_pull_request_review_requested_for_configured_bo
             "review_only",
             "gisce/github-agent-bridge#233",
         )
+        metadata = json.loads(con.execute("SELECT metadata_json FROM jobs").fetchone()[0])
+        assert metadata["intent_guardrail"] == "submit_review_read_only"
 
 
 def test_webhook_canary_ignores_pull_request_review_requested_for_other_reviewer(tmp_path):
