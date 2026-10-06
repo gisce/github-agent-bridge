@@ -341,6 +341,29 @@ def test_dashboard_serves_built_react_ui_with_existing_auth(tmp_path):
     assert "root" in response.text
 
 
+def test_dashboard_keeps_serving_static_bundle_while_package_files_are_replaced(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    static_dir = tmp_path / "static"
+    assets_dir = static_dir / "assets"
+    assets_dir.mkdir(parents=True)
+    (static_dir / "index.html").write_text("<!doctype html><div id=\"root\"></div>", encoding="utf-8")
+    (static_dir / "service-worker.js").write_text("const cache = 'v1';", encoding="utf-8")
+    (assets_dir / "app.js").write_text("window.appLoaded = true;", encoding="utf-8")
+    JobQueue(db)
+    app = create_app(DashboardConfig(db=db, static_dir=static_dir, require_auth=False))
+
+    (assets_dir / "app.js").unlink()
+    assets_dir.rmdir()
+    (static_dir / "service-worker.js").unlink()
+    (static_dir / "index.html").unlink()
+    static_dir.rmdir()
+
+    client = TestClient(app)
+    assert client.get("/").status_code == 200
+    assert client.get("/assets/app.js").text == "window.appLoaded = true;"
+    assert client.get("/service-worker.js").text == "const cache = 'v1';"
+
+
 def test_dashboard_serves_dedicated_job_frontend_route(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     static_dir = tmp_path / "static"
