@@ -1495,7 +1495,10 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     @app.post("/api/web-push/subscriptions")
     async def api_web_push_subscribe(request: Request, profile: dict[str, Any] = Depends(current_profile)) -> dict[str, Any]:
         if not config.web_push_public_key:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="web_push_not_configured")
+            return JSONResponse(
+                {"detail": "web_push_not_configured"},
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         try:
             payload = await request.json()
         except json.JSONDecodeError as exc:
