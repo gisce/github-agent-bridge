@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.71.7 (2026-10-06)
+
+### Bug Fixes
+
+- Avoid reporting disabled web push to Sentry
+  ([`39dcdea`](https://github.com/gisce/github-agent-bridge/commit/39dcdea4e4bb7e2b1af2d8ec7fc3745702a2e805))
+
+
 ## v0.71.6 (2026-10-06)
 
 ### Bug Fixes
