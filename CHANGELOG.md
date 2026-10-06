@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.71.5 (2026-10-06)
+
+### Bug Fixes
+
+- Keep review requests read-only
+  ([`9672b83`](https://github.com/gisce/github-agent-bridge/commit/9672b839a5bd3920c1d8c1adbe75177062a2acb4))
+
+
 ## v0.71.4 (2026-10-06)
 
 ### Bug Fixes
