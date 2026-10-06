@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.71.6 (2026-10-06)
+
+### Bug Fixes
+
+- Keep dashboard bundle stable during upgrades
+  ([`19746cb`](https://github.com/gisce/github-agent-bridge/commit/19746cb50dc84fb139926b9ee00d36e344ca6628))
+
+
 ## v0.71.5 (2026-10-06)
 
 ### Bug Fixes
