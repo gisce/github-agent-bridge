@@ -48,6 +48,13 @@ def configure_sentry(*, service: str, env: dict[str, str] | None = None) -> dict
         "release": release,
         "environment": environment,
         "send_default_pii": False,
+        # FastAPI/Starlette HTTP exceptions are deliberate responses. Operational
+        # failures remain visible through their API response and audit record;
+        # reporting them as unhandled errors creates duplicate Sentry incidents.
+        "ignore_errors": [
+            "fastapi.exceptions.HTTPException",
+            "starlette.exceptions.HTTPException",
+        ],
     }
     traces_sample_rate = _sample_rate(values, SENTRY_TRACES_SAMPLE_RATE_ENV, "SENTRY_TRACES_SAMPLE_RATE")
     profiles_sample_rate = _sample_rate(values, SENTRY_PROFILES_SAMPLE_RATE_ENV, "SENTRY_PROFILES_SAMPLE_RATE")
