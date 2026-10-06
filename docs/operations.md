@@ -178,6 +178,29 @@ honored for compatibility, but prefer the `GITHUB_AGENT_BRIDGE_*` names in this
 service's env file. If a DSN is set without `sentry-sdk` installed, the bridge
 continues running without external error reporting.
 
+## Drain the executor for maintenance
+
+After all executor instances have been upgraded to a version with pause support,
+pause claims on the shared queue before an update window:
+
+```bash
+gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 \
+  pause-executor --reason "upgrade window"
+gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 status
+```
+
+Readers and webhooks still enqueue pending jobs. Running jobs are not stopped;
+wait until the `running` count reaches zero before restarting the executor.
+The pause survives executor restarts. Resume after the update and health checks:
+
+```bash
+gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 resume-executor
+```
+
+`gab update` still counts pending jobs as active, even while paused. For an
+update window with pending jobs, plan the package and service restart separately;
+do not assume `update --complete-pending` will restart the executor automatically.
+
 ## Safe update planning
 
 Use `gab update` to inspect a published release and decide which reloads are

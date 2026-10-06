@@ -446,6 +446,13 @@ class JobQueue:
         now = utc_now()
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
+            # Serialize the pause check with claims so a completed pause blocks later claims.
+            pause_row = con.execute(
+                "SELECT value FROM state WHERE key=?", (EXECUTOR_PAUSE_STATE_KEY,)
+            ).fetchone()
+            if pause_row and json.loads(pause_row["value"]).get("paused"):
+                con.commit()
+                return None
             intent_filter = ""
             args: list[object] = []
             if work_intents is not None:

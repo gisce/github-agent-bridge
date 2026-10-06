@@ -90,6 +90,19 @@ def test_executor_pause_state_round_trips_without_schema_change(tmp_path):
     assert q.executor_paused() is False
 
 
+def test_paused_queue_does_not_claim_pending_job(tmp_path):
+    q = JobQueue(tmp_path / "q.sqlite3")
+    q.pause_executor("upgrade window")
+    job, state = q.enqueue(notif(1, "<pause@github.com>", BODY1), policy())
+    assert state == "enqueued"
+
+    assert q.claim_next("worker") is None
+    assert q.get(job.id).status == "pending"
+
+    q.resume_executor()
+    assert q.claim_next("worker").id == job.id
+
+
 def test_connect_recreates_missing_parent_directory(tmp_path):
     q = JobQueue(tmp_path / "missing" / "q.sqlite3")
     for child in q.path.parent.iterdir():
