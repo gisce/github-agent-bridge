@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.72.0 (2026-10-06)
+
+### Features
+
+- Add executor worker heartbeats
+  ([`b4079be`](https://github.com/gisce/github-agent-bridge/commit/b4079be29bded94fbd28518ad827137b4c0e4bd9))
+
+
 ## v0.71.8 (2026-10-06)
 
 ### Bug Fixes
