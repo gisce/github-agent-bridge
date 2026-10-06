@@ -405,6 +405,20 @@ def test_claim_can_filter_by_work_intent(tmp_path):
     assert claimed.work_intent == "review_only"
 
 
+def test_submit_review_intent_cannot_be_elevated_after_enqueue(tmp_path):
+    q = JobQueue(tmp_path / "q.sqlite3")
+    job, _ = q.enqueue(notif(1, "<1@github.com>", BODY1), policy())
+    with q.connect() as con:
+        con.execute(
+            "UPDATE jobs SET action='submit_review', work_intent='review_only' WHERE id=?",
+            (job.id,),
+        )
+
+    updated = q.update_work_intent(job.id, "work_allowed", "classifier requested write access")
+
+    assert updated.work_intent == "review_only"
+
+
 def test_job_runs_preserve_each_attempt_across_requeue(tmp_path):
     q = JobQueue(tmp_path / "q.sqlite3")
     job, _ = q.enqueue(notif(1, "<1@github.com>", BODY1), policy())
