@@ -361,7 +361,9 @@ Timestamps stay stored and returned by the API in UTC, while the browser renders
 them in the viewer's local timezone from `Intl.DateTimeFormat`; hovering a
 rendered timestamp shows the UTC value.
 Production serves the static bundle from
-`src/github_agent_bridge/dashboard_static`.
+`src/github_agent_bridge/dashboard_static`. The dashboard process snapshots this
+bundle at startup so an in-place package upgrade cannot remove files from the
+currently running UI before the service restarts.
 
 Public webhook ingestion should use the separate
 `github-agent-bridge-webhook.socket` and `github-agent-bridge-webhook.service`.

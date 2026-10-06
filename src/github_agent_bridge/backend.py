@@ -7,11 +7,13 @@ from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 import json
 import os
+import shutil
 import secrets
 import shlex
 import sqlite3
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
 import threading
 import urllib.error
 import urllib.parse
@@ -456,6 +458,15 @@ def _redacted_headers() -> dict[str, str]:
     return {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
 
 
+def _snapshot_dashboard_static(static_dir: Path) -> tuple[Path, TemporaryDirectory | None]:
+    if not static_dir.is_dir():
+        return static_dir, None
+    snapshot = TemporaryDirectory(prefix="github-agent-bridge-dashboard-")
+    runtime_static_dir = Path(snapshot.name) / "dashboard_static"
+    shutil.copytree(static_dir, runtime_static_dir)
+    return runtime_static_dir, snapshot
+
+
 def _dashboard_public_url(request: Request) -> str:
     url, _ = _dashboard_public_url_with_source(request)
     return url
@@ -864,6 +875,7 @@ def create_webhook_app(config: DashboardConfig | None = None) -> FastAPI:
 def create_app(config: DashboardConfig | None = None) -> FastAPI:
     configure_sentry(service="dashboard")
     config = config or DashboardConfig()
+    runtime_static_dir, static_snapshot = _snapshot_dashboard_static(config.static_dir)
     shutdown_event = asyncio.Event()
 
     @asynccontextmanager
@@ -876,10 +888,11 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
 
     app = FastAPI(title="GitHub Agent Bridge Dashboard API", lifespan=lifespan)
     app.state.dashboard_config = config
+    app.state.dashboard_static_snapshot = static_snapshot
     app.state.dashboard_shutdown_event = shutdown_event
     ensure_webhook_schema = _webhook_schema_initializer(config)
 
-    assets_dir = config.static_dir / "assets"
+    assets_dir = runtime_static_dir / "assets"
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="dashboard-assets")
 
@@ -1328,7 +1341,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         }
 
     def dashboard_index() -> FileResponse:
-        index = config.static_dir / "index.html"
+        index = runtime_static_dir / "index.html"
         if not index.exists():
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="dashboard_ui_not_built")
         return FileResponse(index, headers=_redacted_headers())
@@ -1345,7 +1358,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         redirect = await require_dashboard_profile_or_login(request)
         if redirect is not None:
             return redirect
-        worker = config.static_dir / "service-worker.js"
+        worker = runtime_static_dir / "service-worker.js"
         if not worker.exists():
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="dashboard_service_worker_not_built")
         return FileResponse(worker, headers={**_redacted_headers(), "Service-Worker-Allowed": "/"})
