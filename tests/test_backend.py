@@ -6,6 +6,8 @@ import sqlite3
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from fastapi import HTTPException
+from fastapi.exception_handlers import http_exception_handler
 from fastapi.testclient import TestClient
 
 from github_agent_bridge import __version__
@@ -149,12 +151,20 @@ def test_dashboard_web_push_config_and_subscription_api(tmp_path):
 
 def test_dashboard_web_push_requires_public_key(tmp_path):
     app = create_app(DashboardConfig(db=tmp_path / "bridge.sqlite3", require_auth=False))
+    handled_exceptions = []
+
+    async def record_http_exception(request, exc):
+        handled_exceptions.append(exc)
+        return await http_exception_handler(request, exc)
+
+    app.add_exception_handler(HTTPException, record_http_exception)
     client = TestClient(app)
 
     response = client.post("/api/web-push/subscriptions", json={"endpoint": "https://push.example/sub/1", "keys": {"p256dh": "x", "auth": "y"}})
 
     assert response.status_code == 503
     assert response.json()["detail"] == "web_push_not_configured"
+    assert handled_exceptions == []
 
 
 def test_dashboard_autoupdate_state_requires_admin_profile(tmp_path):
