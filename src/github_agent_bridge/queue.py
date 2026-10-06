@@ -26,6 +26,7 @@ def load_schema() -> str:
 SCHEMA = load_schema()
 ACTIVE_STATUSES = ("pending", "running", "waiting_approval")
 COALESCE_STATUSES = ("pending", "waiting_approval")
+EXECUTOR_PAUSE_STATE_KEY = "executor_paused"
 ACK_RETRY_LIMIT = 2
 
 
@@ -445,6 +446,13 @@ class JobQueue:
         now = utc_now()
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
+            # Serialize the pause check with claims so a completed pause blocks later claims.
+            pause_row = con.execute(
+                "SELECT value FROM state WHERE key=?", (EXECUTOR_PAUSE_STATE_KEY,)
+            ).fetchone()
+            if pause_row and json.loads(pause_row["value"]).get("paused"):
+                con.commit()
+                return None
             intent_filter = ""
             args: list[object] = []
             if work_intents is not None:
@@ -939,6 +947,40 @@ class JobQueue:
         with self.connect() as con:
             row = con.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
             return row["value"] if row else default
+
+    def pause_executor(self, reason: str = "") -> None:
+        payload = {
+            "paused": True,
+            "reason": reason,
+            "updated_at": utc_now(),
+        }
+        self.set_state(EXECUTOR_PAUSE_STATE_KEY, json.dumps(payload, sort_keys=True))
+
+    def resume_executor(self) -> None:
+        payload = {
+            "paused": False,
+            "updated_at": utc_now(),
+        }
+        self.set_state(EXECUTOR_PAUSE_STATE_KEY, json.dumps(payload, sort_keys=True))
+
+    def executor_pause_state(self) -> dict[str, object]:
+        raw = self.get_state(EXECUTOR_PAUSE_STATE_KEY, "")
+        if not raw:
+            return {"paused": False}
+        try:
+            state = json.loads(raw)
+        except json.JSONDecodeError:
+            return {"paused": False, "error": "invalid_executor_pause_state"}
+        if not isinstance(state, dict):
+            return {"paused": False, "error": "invalid_executor_pause_state"}
+        return {
+            "paused": bool(state.get("paused")),
+            **({"reason": state["reason"]} if state.get("reason") else {}),
+            **({"updated_at": state["updated_at"]} if state.get("updated_at") else {}),
+        }
+
+    def executor_paused(self) -> bool:
+        return bool(self.executor_pause_state().get("paused"))
 
     def _log(self, con: sqlite3.Connection, job_id: int | None, work_key: str | None, phase: str, summary: str, detail: str | None) -> None:
         con.execute("INSERT INTO worklog(ts,job_id,work_key,phase,summary,detail) VALUES(?,?,?,?,?,?)", (utc_now(), job_id, work_key, phase, summary, detail))

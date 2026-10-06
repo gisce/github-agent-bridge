@@ -25,6 +25,7 @@ JOB_LIST_ORDER_SQL = """
     COALESCE(finished_at, started_at, updated_at, created_at) DESC,
     id DESC
 """
+EXECUTOR_PAUSE_STATE_KEY = "executor_paused"
 
 
 def readonly_connect(db: str | Path) -> sqlite3.Connection:
@@ -71,6 +72,22 @@ def completed_duration_seconds(start: str | None, end: str | None) -> int | None
 
 def row_get(row: sqlite3.Row, key: str, default: Any = None) -> Any:
     return row[key] if key in row.keys() else default
+
+
+def executor_pause_state_from_raw(raw: str | None) -> dict[str, object]:
+    if not raw:
+        return {"paused": False}
+    try:
+        state = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"paused": False, "error": "invalid_executor_pause_state"}
+    if not isinstance(state, dict):
+        return {"paused": False, "error": "invalid_executor_pause_state"}
+    return {
+        "paused": bool(state.get("paused")),
+        **({"reason": state["reason"]} if state.get("reason") else {}),
+        **({"updated_at": state["updated_at"]} if state.get("updated_at") else {}),
+    }
 
 
 def coerce_limit(value: int, maximum: int = 200) -> int:
@@ -206,7 +223,7 @@ def actor_where_clause(actor: str | None, *, has_trigger_actor: bool) -> tuple[s
 
 def inspect_db_read_only(db: str | Path) -> dict[str, Any]:
     path = Path(db).expanduser()
-    out: dict[str, Any] = {"db_path": str(path), "db_exists": path.exists()}
+    out: dict[str, Any] = {"db_path": str(path), "db_exists": path.exists(), "executor_pause": {"paused": False}}
     if not path.exists():
         return out
     with readonly_connect(path) as con:
@@ -223,6 +240,7 @@ def inspect_db_read_only(db: str | Path) -> dict[str, Any]:
             out["last_uid"] = state.get("last_uid")
             out["executor_process_tracking_id"] = state.get("executor_process_tracking_id")
             out["executor_worker_count"] = int(state.get("executor_worker_count") or 0)
+            out["executor_pause"] = executor_pause_state_from_raw(state.get(EXECUTOR_PAUSE_STATE_KEY))
         if table_exists(con, "worker_heartbeats"):
             heartbeats = []
             for row in con.execute(

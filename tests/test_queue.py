@@ -2,6 +2,7 @@ import sqlite3
 
 import pytest
 
+import github_agent_bridge.queue as queue_module
 from github_agent_bridge.models import GitHubContext, Notification
 from github_agent_bridge.queue import canonical_event_key
 from github_agent_bridge.intent_classifier import IntentClassification
@@ -68,6 +69,69 @@ def test_queue_expands_user_in_db_path(tmp_path, monkeypatch):
 
     assert (home / "state" / "q.sqlite3").exists()
     assert not (tmp_path / "~").exists()
+
+
+def test_executor_pause_state_round_trips_without_schema_change(tmp_path):
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    assert q.executor_pause_state() == {"paused": False}
+    assert q.executor_paused() is False
+
+    q.pause_executor("upgrade window")
+
+    paused = q.executor_pause_state()
+    assert paused["paused"] is True
+    assert paused["reason"] == "upgrade window"
+    assert paused["updated_at"]
+    assert q.executor_paused() is True
+
+    q.resume_executor()
+
+    assert q.executor_pause_state()["paused"] is False
+    assert q.executor_paused() is False
+
+
+def test_paused_queue_does_not_claim_pending_job(tmp_path):
+    q = JobQueue(tmp_path / "q.sqlite3")
+    q.pause_executor("upgrade window")
+    job, state = q.enqueue(notif(1, "<pause@github.com>", BODY1), policy())
+    assert state == "enqueued"
+
+    assert q.claim_next("worker") is None
+    assert q.get(job.id).status == "pending"
+
+    q.resume_executor()
+    assert q.claim_next("worker").id == job.id
+
+
+def test_claim_next_reads_pause_inside_claim_transaction(tmp_path, monkeypatch):
+    db = tmp_path / "q.sqlite3"
+    q = JobQueue(db)
+    job, state = q.enqueue(notif(1, "<pause-race@github.com>", BODY1), policy())
+    assert state == "enqueued"
+    q.pause_executor("upgrade window")
+
+    events = []
+    original_connect = queue_module.sqlite3.connect
+
+    class TracingConnection(queue_module.ClosingConnection):
+        def execute(self, sql, parameters=(), /):
+            normalized = " ".join(str(sql).split())
+            if normalized == "BEGIN IMMEDIATE":
+                events.append("begin_immediate")
+            elif normalized.startswith("SELECT value FROM state WHERE key="):
+                events.append("pause_state_read")
+            return super().execute(sql, parameters)
+
+    def tracing_connect(*args, **kwargs):
+        kwargs["factory"] = TracingConnection
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(queue_module.sqlite3, "connect", tracing_connect)
+
+    assert q.claim_next("worker") is None
+    assert events[:2] == ["begin_immediate", "pause_state_read"]
+    assert q.get(job.id).status == "pending"
 
 
 def test_connect_recreates_missing_parent_directory(tmp_path):

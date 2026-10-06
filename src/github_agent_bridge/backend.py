@@ -1402,7 +1402,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
 
     @app.get("/api/status")
     def api_status(request: Request, profile: dict[str, Any] = Depends(current_profile)) -> dict[str, Any]:
-        queue = JobQueue(config.db)
+        metrics = inspect_db_read_only(config.db)
         dashboard_url, dashboard_url_source = _dashboard_public_url_with_source(request)
         admin_actions = [
             "retry_job",
@@ -1417,7 +1417,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             "ping_webhook",
         ]
         if profile.get("is_admin"):
-            admin_actions.extend(["view_autoupdate_plan", "refresh_autoupdate_plan", "apply_autoupdate", "complete_autoupdate_reload"])
+            admin_actions.extend(["view_autoupdate_plan", "refresh_autoupdate_plan", "apply_autoupdate", "complete_autoupdate_reload", "pause_executor", "resume_executor"])
         return {
             "service": "github-agent-bridge-dashboard",
             "read_only": False,
@@ -1425,9 +1425,22 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             "dashboard_url_source": dashboard_url_source,
             "admin_actions": admin_actions,
             "webhook_configured": bool(config.webhook_secrets or config.webhook_secrets_by_owner) if profile.get("is_admin") else False,
-            "metrics": inspect_db_read_only(config.db),
-            "autoupdate": load_update_state(queue) if profile.get("is_admin") else {},
+            "metrics": metrics,
+            "autoupdate": load_update_state(JobQueue(config.db)) if profile.get("is_admin") else {},
+            "executor_pause": metrics.get("executor_pause", {"paused": False}),
         }
+
+    @app.post("/api/executor/pause")
+    def api_executor_pause(profile: dict[str, Any] = Depends(current_admin_profile)) -> dict[str, Any]:
+        queue = JobQueue(config.db)
+        queue.pause_executor(f"dashboard:{profile['login']}")
+        return {"executor_pause": queue.executor_pause_state()}
+
+    @app.post("/api/executor/resume")
+    def api_executor_resume(_: dict[str, Any] = Depends(current_admin_profile)) -> dict[str, Any]:
+        queue = JobQueue(config.db)
+        queue.resume_executor()
+        return {"executor_pause": queue.executor_pause_state()}
 
     @app.post("/api/autoupdate/refresh")
     def api_autoupdate_refresh(_: dict[str, Any] = Depends(current_admin_profile)) -> dict[str, Any]:
