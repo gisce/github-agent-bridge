@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.71.8 (2026-10-06)
+
+### Bug Fixes
+
+- Ignore handled HTTP errors in Sentry
+  ([`07434f8`](https://github.com/gisce/github-agent-bridge/commit/07434f87c5500cc17f1c0043d4b16fa0e9e3ee97))
+
+
 ## v0.71.7 (2026-10-06)
 
 ### Bug Fixes
