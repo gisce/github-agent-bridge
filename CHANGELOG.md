@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.73.0 (2026-10-06)
+
+### Bug Fixes
+
+- Keep status pause inspection read-only
+  ([`cdd3b64`](https://github.com/gisce/github-agent-bridge/commit/cdd3b6471e0acda8959c49666369969bfced29ee))
+
+- Serialize executor pause with job claims
+  ([`4ba0af6`](https://github.com/gisce/github-agent-bridge/commit/4ba0af6ebdbc0d5fa57011fbade43165e7393edf))
+
+### Features
+
+- Add executor pause mode
+  ([`aba36b4`](https://github.com/gisce/github-agent-bridge/commit/aba36b41af088f7c36b11aa586149bc92ec6f677))
+
+- Control executor pause from system dashboard
+  ([`645f3ee`](https://github.com/gisce/github-agent-bridge/commit/645f3ee870fbaabe317a0d051c3673cc6bafe412))
+
+
 ## v0.72.0 (2026-10-06)
 
 ### Features
