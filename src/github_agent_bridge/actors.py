@@ -110,14 +110,26 @@ def actor_endpoint(ctx: GitHubContext) -> str | None:
     return None
 
 
-def github_actor_details_for_context(ctx: GitHubContext, *, gh_bin: str | None = None) -> TriggerActor | None:
+def github_actor_details_for_context(
+    ctx: GitHubContext,
+    *,
+    gh_bin: str | None = None,
+    timeout: int = 5,
+) -> TriggerActor | None:
     gh_bin = gh_bin or default_gh_bin()
     endpoint = actor_endpoint(ctx)
     if endpoint is None:
         return None
     try:
-        proc = subprocess.run([gh_bin, "api", endpoint], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    except OSError:
+        proc = subprocess.run(
+            [gh_bin, "api", endpoint],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:
         return None

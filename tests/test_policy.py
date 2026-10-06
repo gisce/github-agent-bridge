@@ -1,3 +1,5 @@
+import json
+
 from github_agent_bridge.models import Notification
 from github_agent_bridge.parser import extract_github_context
 from github_agent_bridge.policy import Policy
@@ -211,6 +213,83 @@ def test_policy_from_file_loads_model_routes_and_resolution_order(tmp_path):
     assert route.thinking == "low"
 
 
+def test_model_routes_compose_partial_repo_default_with_global_specific_routes(tmp_path):
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(
+        """{
+          "modelRoutes": {
+            "default": {"model": "default-model", "thinking": "medium"},
+            "byAction": {
+              "sync_after_merge": {"model": "sync-model", "thinking": "low"}
+            },
+            "byComplexity": {
+              "mechanical": {"model": "mechanical-model", "thinking": "minimal"}
+            },
+            "byRepo": {
+              "gisce/github-agent-bridge": {
+                "default": {"thinking": "xhigh"}
+              }
+            }
+          }
+        }"""
+    )
+
+    policy = Policy.from_file(policy_file)
+
+    route = policy.model_route_for(
+        "gisce/github-agent-bridge", "reply_comment", "work_allowed"
+    )
+    assert route.model == "default-model"
+    assert route.thinking == "xhigh"
+
+    route = policy.model_route_for(
+        "gisce/github-agent-bridge", "sync_after_merge", "work_allowed"
+    )
+    assert route.model == "sync-model"
+    assert route.thinking == "low"
+
+    route = policy.model_route_for(
+        "gisce/github-agent-bridge", "reply_comment", "work_allowed", "mechanical"
+    )
+    assert route.model == "mechanical-model"
+    assert route.thinking == "minimal"
+
+
+def test_model_routes_compose_matching_rules_field_by_field(tmp_path):
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(
+        """{
+          "modelRoutes": {
+            "default": {"model": "default-model", "thinking": "medium"},
+            "byIntent": {
+              "review_only": {"model": "review-model"}
+            },
+            "byComplexity": {
+              "mechanical": {"thinking": "low"}
+            },
+            "byAction": {
+              "reply_comment": {"model": "comment-model"}
+            },
+            "byRepo": {
+              "gisce/erp": {
+                "byAction": {
+                  "reply_comment": {"thinking": "high"}
+                }
+              }
+            }
+          }
+        }"""
+    )
+
+    policy = Policy.from_file(policy_file)
+    route = policy.model_route_for(
+        "gisce/erp", "reply_comment", "review_only", "mechanical"
+    )
+
+    assert route.model == "comment-model"
+    assert route.thinking == "high"
+
+
 def test_policy_from_file_rejects_invalid_model_route_thinking(tmp_path):
     policy_file = tmp_path / "policy.json"
     policy_file.write_text('{"modelRoutes": {"byAction": {"sync_after_merge": {"thinking": "turbo"}}}}')
@@ -345,3 +424,26 @@ def test_workflow_run_failed_is_trusted_auto_by_default_not_auto():
 
     assert Policy(trusted_orgs={"gisce"}).decision(n, ctx, "workflow_run_failed") == "auto_trusted"
     assert Policy().decision(n, ctx, "workflow_run_failed") == "ask"
+
+
+def test_webhook_canary_scope_is_independent_from_imap_enabled_repos(tmp_path):
+    policy_file = tmp_path / "policy.json"
+    policy_file.write_text(json.dumps({
+        "trustedOrgs": ["gisce"],
+        "webhookCanaryRepos": ["gisce/github-agent-bridge"],
+    }))
+
+    policy = Policy.from_file(policy_file)
+    notification = Notification(
+        1,
+        "<x@github.com>",
+        "subj",
+        "notifications@github.com",
+        "https://github.com/gisce/erp/issues/1#issuecomment-2",
+        auth={"spf": True, "dkim": True, "dmarc": True},
+    )
+    context = extract_github_context(notification.body)
+
+    assert policy.webhook_canary_repos == {"gisce/github-agent-bridge"}
+    assert policy.enabled_repos == set()
+    assert policy.decision(notification, context, "reply_comment") == "auto_trusted"

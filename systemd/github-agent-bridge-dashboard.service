@@ -11,7 +11,7 @@ Environment=GITHUB_AGENT_BRIDGE_DASHBOARD_PORT=8765
 EnvironmentFile=-%h/.config/github-agent-bridge/env
 ExecStart=%h/.local/bin/github-agent-bridge-dashboard
 Restart=always
-RestartSec=5
+RestartSec=1
 
 [Install]
 WantedBy=default.target

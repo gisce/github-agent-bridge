@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -158,6 +159,59 @@ def test_capture_feedback_ignores_non_actionable_decisions(tmp_path):
     JobQueue(db)
 
     assert feedback.capture_feedback(db, notification(), context(), "archive_notification", "auto", "work_allowed") is False
+    assert feedback.list_events(db) == []
+
+
+def test_capture_feedback_keeps_archived_pull_request_reviews(tmp_path):
+    db = tmp_path / "q.sqlite3"
+    JobQueue(db)
+    ctx = GitHubContext(
+        ["https://github.com/gisce/erp/pull/1#pullrequestreview-99"],
+        "gisce/erp",
+        1,
+        review_id=99,
+        target_kind="review",
+    )
+    review = notification(
+        "Per a la propera, prova també desar, tornar a editar i tancar. "
+        "https://github.com/gisce/erp/pull/1#pullrequestreview-99"
+    )
+
+    assert feedback.capture_feedback(
+        db,
+        review,
+        ctx,
+        "archive_notification",
+        "auto",
+        "review_only",
+        trigger_actor="reviewer",
+    )
+
+    events = feedback.list_events(db, "repo:gisce/erp")
+    assert len(events) == 1
+    assert events[0]["github_context"]["review_id"] == 99
+    assert events[0]["context"]["bridge_action"] == "archive_notification"
+
+
+def test_capture_feedback_still_ignores_archived_review_comments(tmp_path):
+    db = tmp_path / "q.sqlite3"
+    JobQueue(db)
+    ctx = GitHubContext(
+        ["https://github.com/gisce/erp/pull/1#discussion_r99"],
+        "gisce/erp",
+        1,
+        review_comment_id=99,
+        target_kind="review_comment",
+    )
+
+    assert feedback.capture_feedback(
+        db,
+        notification(),
+        ctx,
+        "archive_notification",
+        "auto",
+        "review_only",
+    ) is False
     assert feedback.list_events(db) == []
 
 
@@ -398,6 +452,17 @@ def test_openclaw_json_payload_text_is_extracted():
     raw = '{"result":{"payloads":[{"text":"{\\\"is_feedback\\\":false,\\\"scope\\\":\\\"global\\\",\\\"type\\\":\\\"domain_context\\\",\\\"rule\\\":\\\"\\\",\\\"confidence\\\":0,\\\"reason\\\":\\\"shape test\\\"}"}]}}'
 
     assert feedback._extract_json_object(feedback._openclaw_text_from_json(raw))["reason"] == "shape test"
+
+
+def test_openclaw_top_level_payload_text_is_extracted():
+    raw = json.dumps(
+        {
+            "payloads": [{"text": '{"reason": "current shape"}', "mediaUrl": None}],
+            "meta": {"finalAssistantVisibleText": '{"reason": "current shape"}'},
+        }
+    )
+
+    assert feedback._extract_json_object(feedback._openclaw_text_from_json(raw))["reason"] == "current shape"
 
 
 def test_learning_prompt_uses_packaged_prompt_resource():

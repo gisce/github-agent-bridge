@@ -14,6 +14,7 @@ def test_sql_schema_is_packaged_resource_and_valid():
     tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {
         "jobs",
+        "job_runs",
         "coalesced_notifications",
         "state",
         "worklog",

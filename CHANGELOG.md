@@ -2,6 +2,271 @@
 
 <!-- version list -->
 
+## v0.71.2 (2026-10-06)
+
+### Bug Fixes
+
+- Classify repository webhook hooks correctly
+  ([`a029d30`](https://github.com/gisce/github-agent-bridge/commit/a029d30efc85d849f2dfe0b8ee78418e56fd4516))
+
+- **dashboard**: Complete Tailwind 4 migration
+  ([`27116e7`](https://github.com/gisce/github-agent-bridge/commit/27116e70957ded07508ea8c4e298684a926bcc4b))
+
+- **deps**: Bump postcss-selector-parser and tailwindcss in /dashboard
+  ([`32dbdd1`](https://github.com/gisce/github-agent-bridge/commit/32dbdd18a4bbc3da8daff74d55ede5c6dcb20f90))
+
+
+## v0.71.1 (2026-10-06)
+
+### Bug Fixes
+
+- **dashboard**: Show webhook dates in local time
+  ([`5223f97`](https://github.com/gisce/github-agent-bridge/commit/5223f979b76ff1e192a23fe9376c570c3c43c715))
+
+
+## v0.71.0 (2026-10-06)
+
+### Features
+
+- Trigger audited webhook pings
+  ([`df47c43`](https://github.com/gisce/github-agent-bridge/commit/df47c43f92215b155ca700527d288f860ca15d8a))
+
+
+## v0.70.0 (2026-10-06)
+
+### Features
+
+- Isolate socket-activated webhook ingress
+  ([`4fcabed`](https://github.com/gisce/github-agent-bridge/commit/4fcabedbed4646cccae2d4839b2d0bd5a5f08976))
+
+
+## v0.69.1 (2026-10-05)
+
+### Bug Fixes
+
+- Acknowledge queued jobs before dispatch
+  ([`b233b04`](https://github.com/gisce/github-agent-bridge/commit/b233b049f4a75d0592ec58350634853ce39d02d6))
+
+
+## v0.69.0 (2026-10-05)
+
+
+## v0.68.1 (2026-10-05)
+
+### Bug Fixes
+
+- Harden webhook review request handling
+  ([`abe67a3`](https://github.com/gisce/github-agent-bridge/commit/abe67a35ed2989bed8430599175c9e1dce036ba0))
+
+- Support webhook review requests
+  ([`4ac8bea`](https://github.com/gisce/github-agent-bridge/commit/4ac8bea7e8c2752bd8917df12866d2a75d39246e))
+
+
+## v0.68.0 (2026-10-05)
+
+
+## v0.67.2 (2026-10-05)
+
+### Bug Fixes
+
+- Guard webhook canary enqueue semantics
+  ([`f6904d4`](https://github.com/gisce/github-agent-bridge/commit/f6904d4789c48b663054a55c5879f40c4133a420))
+
+- Harden webhook canary rollout gates
+  ([`3fae7bc`](https://github.com/gisce/github-agent-bridge/commit/3fae7bc0fd758c1552a983a3515e1476ffdd6e72))
+
+
+## v0.67.1 (2026-10-05)
+
+### Bug Fixes
+
+- **dashboard**: Move update controls to system tab
+  ([`1abc43f`](https://github.com/gisce/github-agent-bridge/commit/1abc43f5bf8d87bef12796e8760444fa388c2344))
+
+
+## v0.67.0 (2026-10-05)
+
+### Bug Fixes
+
+- Classify failed webhook workflow runs
+  ([`e715f26`](https://github.com/gisce/github-agent-bridge/commit/e715f2644834916749b546d6f0edd7ccf0166d59))
+
+### Features
+
+- Enable guarded webhook canary ingestion
+  ([`095baaa`](https://github.com/gisce/github-agent-bridge/commit/095baaa5482fa73cfc4fb39052414fcdeb99478f))
+
+
+## v0.66.0 (2026-10-05)
+
+### Features
+
+- **policy**: Publish and validate JSON schema
+  ([`6bc2619`](https://github.com/gisce/github-agent-bridge/commit/6bc26191a239f0b904c8ca25172da4be0cf2c54f))
+
+
+## v0.65.0 (2026-10-05)
+
+### Features
+
+- **queue**: Persist per-attempt job runs
+  ([`57abdaa`](https://github.com/gisce/github-agent-bridge/commit/57abdaa173473652be4d837f78c0e76c2933a794))
+
+
+## v0.64.0 (2026-10-03)
+
+### Bug Fixes
+
+- Report stable webhook inventory totals
+  ([`524f0e3`](https://github.com/gisce/github-agent-bridge/commit/524f0e336b9072e90cc372133b1abf166fb165f8))
+
+### Features
+
+- Add webhook coverage gate observability
+  ([`7d7386e`](https://github.com/gisce/github-agent-bridge/commit/7d7386e9d4648b644e83e06683805579bf3151d1))
+
+### Refactoring
+
+- Share lazy scroll tables across dashboard
+  ([`f94a2d6`](https://github.com/gisce/github-agent-bridge/commit/f94a2d6a12f9c9271f0c8f3206ff228a1c8b0c70))
+
+
+## v0.63.1 (2026-10-03)
+
+### Bug Fixes
+
+- Make webhook monitoring operational
+  ([`85ade3d`](https://github.com/gisce/github-agent-bridge/commit/85ade3d4ebe26cc951f07ac6913c10a718d602ba))
+
+
+## v0.63.0 (2026-10-02)
+
+### Features
+
+- **dashboard**: Add webhook monitoring views
+  ([`0367a3f`](https://github.com/gisce/github-agent-bridge/commit/0367a3fa73a07ca863ae95f16b6879f71985a474))
+
+- **webhooks**: Expose monitoring data
+  ([`a4be314`](https://github.com/gisce/github-agent-bridge/commit/a4be314862b57ac815cf387b1eefe9424f5164bc))
+
+### Performance Improvements
+
+- **webhooks**: Split dashboard monitoring queries
+  ([`d13698e`](https://github.com/gisce/github-agent-bridge/commit/d13698ead46a81f65832f486a6c1c58cd19d9ab9))
+
+
+## v0.62.1 (2026-10-02)
+
+### Bug Fixes
+
+- Compose model route overrides
+  ([`83b3a28`](https://github.com/gisce/github-agent-bridge/commit/83b3a2848a43275e2ebb1b2eee89e4809ff155e2))
+
+
+## v0.62.0 (2026-10-02)
+
+### Bug Fixes
+
+- Harden webhook owner configuration
+  ([`b0a528b`](https://github.com/gisce/github-agent-bridge/commit/b0a528bacfe49a3e8f9e76bbb0889d9287bf9431))
+
+### Features
+
+- Add shadow GitHub webhook ingestion
+  ([`5b64134`](https://github.com/gisce/github-agent-bridge/commit/5b64134a18fb106163a1416aefadffb4ed08db1f))
+
+- Monitor webhook shadow ingestion
+  ([`4bc0b43`](https://github.com/gisce/github-agent-bridge/commit/4bc0b43008b230a521efe567217780a319836646))
+
+
+## v0.61.0 (2026-10-02)
+
+### Features
+
+- Add transport-independent event ingestion
+  ([`b8b48ad`](https://github.com/gisce/github-agent-bridge/commit/b8b48adffbc84cf42cc987e8709acac08f080ed8))
+
+
+## v0.60.11 (2026-10-01)
+
+### Bug Fixes
+
+- **deps**: Update dashboard dependencies
+  ([`c297216`](https://github.com/gisce/github-agent-bridge/commit/c29721682ed8d249d8421dca713baa5a4e08f667))
+
+### Chores
+
+- **deps**: Bump @vitest/mocker and vitest in /dashboard
+  ([#206](https://github.com/gisce/github-agent-bridge/pull/206),
+  [`6f4395f`](https://github.com/gisce/github-agent-bridge/commit/6f4395f63a8e3d575973780f1eb8bebc22d975a9))
+
+- **deps-dev**: Bump @babel/core from 7.29.0 to 7.29.7 in /dashboard
+  ([#223](https://github.com/gisce/github-agent-bridge/pull/223),
+  [`7f2956b`](https://github.com/gisce/github-agent-bridge/commit/7f2956bce384a588165d66f2b6b726c858607300))
+
+- **deps-dev**: Bump baseline-browser-mapping in /dashboard
+  ([#207](https://github.com/gisce/github-agent-bridge/pull/207),
+  [`d84e313`](https://github.com/gisce/github-agent-bridge/commit/d84e313721404e186720cb72da85123377c62f15))
+
+- **deps-dev**: Bump browserslist from 4.28.2 to 4.29.0 in /dashboard
+  ([#204](https://github.com/gisce/github-agent-bridge/pull/204),
+  [`ab2a630`](https://github.com/gisce/github-agent-bridge/commit/ab2a6306137d29194b5be8a10b69bd9ffac90f4f))
+
+- **deps-dev**: Bump postcss from 8.5.15 to 8.5.28 in /dashboard
+  ([#221](https://github.com/gisce/github-agent-bridge/pull/221),
+  [`ef2b735`](https://github.com/gisce/github-agent-bridge/commit/ef2b73556c352975f0f60a27ce19757969ed2f59))
+
+- **deps-dev**: Bump postcss-selector-parser in /dashboard
+  ([#208](https://github.com/gisce/github-agent-bridge/pull/208),
+  [`7049c62`](https://github.com/gisce/github-agent-bridge/commit/7049c62211115dcb41819765c85ffb3c21729d7e))
+
+
+## v0.60.10 (2026-10-01)
+
+### Bug Fixes
+
+- Handle addressed approved reviews
+  ([`893c3d0`](https://github.com/gisce/github-agent-bridge/commit/893c3d05ca832526998352fc90485fd6099faa63))
+
+### Chores
+
+- **deps**: Bump undici from 7.25.0 to 7.30.0 in /dashboard
+  ([#220](https://github.com/gisce/github-agent-bridge/pull/220),
+  [`104c92c`](https://github.com/gisce/github-agent-bridge/commit/104c92cd76f02a7bfd654183572411aab256cb9c))
+
+
+## v0.60.9 (2026-09-30)
+
+### Bug Fixes
+
+- Learn from archived pull request reviews
+  ([`bdfcfe8`](https://github.com/gisce/github-agent-bridge/commit/bdfcfe87006e20d46163768c81bd7c45938fc0f8))
+
+
+## v0.60.8 (2026-09-29)
+
+### Bug Fixes
+
+- Coalesce equivalent running notifications
+  ([`13b955e`](https://github.com/gisce/github-agent-bridge/commit/13b955ead13a0fa9f12ba8e816b4e77744dde84a))
+
+- Handle missing autoupdate executable
+  ([`8f18603`](https://github.com/gisce/github-agent-bridge/commit/8f1860316adc03bd5f4fb8b753ddf37f6989c00e))
+
+
+## v0.60.7 (2026-09-26)
+
+### Bug Fixes
+
+- Isolate intent classifier from gateway
+  ([`05c0651`](https://github.com/gisce/github-agent-bridge/commit/05c0651f2ba7427048158aeb9e02df9cdf74310d))
+
+### Documentation
+
+- Require OpenClaw concurrency headroom
+  ([`59cabb7`](https://github.com/gisce/github-agent-bridge/commit/59cabb790a9c423699c3810462ccba2562720c8b))
+
+
 ## v0.60.6 (2026-09-23)
 
 ### Bug Fixes

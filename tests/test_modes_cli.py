@@ -58,6 +58,32 @@ def test_review_reaction_targets_review_comments():
     assert any("pulls/comments/456/reactions" in " ".join(call) for call in client.calls)
 
 
+class EmptyReviewGitHubClient(RecordingGitHubClient):
+    def _run(self, args):
+        self.calls.append(args)
+
+        class Result:
+            returncode = 0
+            stdout = "[]" if args[-1].endswith("/comments") else "{}"
+            stderr = ""
+
+        return Result()
+
+
+def test_top_level_review_reaction_does_not_fall_back_to_pr_body():
+    client = EmptyReviewGitHubClient()
+    ctx = GitHubContext(
+        ["https://github.com/gisce/webclient/pull/4159#pullrequestreview-5376907763"],
+        "gisce/webclient",
+        4159,
+        review_id=5376907763,
+        target_kind="review",
+    )
+
+    assert client.react_eyes(ctx) is False
+    assert not any("issues/4159/reactions" in " ".join(call) for call in client.calls)
+
+
 def test_commit_comment_reaction_targets_commit_comment():
     client = RecordingGitHubClient()
     ctx = GitHubContext(

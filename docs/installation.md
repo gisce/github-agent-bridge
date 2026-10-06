@@ -230,6 +230,10 @@ cp systemd/github-agent-bridge-autoupdate.service ~/.config/systemd/user/
 cp systemd/github-agent-bridge-autoupdate.timer ~/.config/systemd/user/
 # Optional dashboard API for operator tooling:
 cp systemd/github-agent-bridge-dashboard.service ~/.config/systemd/user/
+# Recommended for public GitHub webhooks. The socket remains owned by systemd
+# while the small ingress process restarts.
+cp systemd/github-agent-bridge-webhook.service ~/.config/systemd/user/
+cp systemd/github-agent-bridge-webhook.socket ~/.config/systemd/user/
 
 systemctl --user daemon-reload
 systemctl --user enable --now github-agent-bridge.service
@@ -239,6 +243,7 @@ systemctl --user enable --now github-agent-bridge-feedback.timer
 systemctl --user enable --now github-agent-bridge-autoupdate.timer
 # Optional:
 # systemctl --user enable --now github-agent-bridge-dashboard.service
+# systemctl --user enable --now github-agent-bridge-webhook.socket
 ```
 
 The reader timer calls the packaged `github-agent-bridge-reader-run` console
@@ -292,6 +297,13 @@ Set `GITHUB_AGENT_BRIDGE_GITHUB_APP_ID` or
 configured on the GitHub App automatically. `GITHUB_AGENT_BRIDGE_WEB_PUSH_ICON_URL`
 can still override the notification icon with an explicit URL.
 
+When webhooks are enabled, start `github-agent-bridge-webhook.socket` and route
+the exact `/api/webhooks/github` path to `127.0.0.1:8766`. systemd owns the
+listening socket and keeps a backlog while `github-agent-bridge-webhook.service`
+is replaced, so dashboard restarts and short ingress restarts do not produce a
+connection-refused window. Do not enable the service directly; enabling the
+socket starts it on demand.
+
 When the dashboard is published through nginx, use the proxy settings from
 [`operations.md`](operations.md#dashboard-api-service) or start from
 [`nginx-dashboard.conf`](nginx-dashboard.conf). The example keeps live SSE
@@ -301,7 +313,10 @@ briefly unavailable.
 
 ```bash
 systemctl --user status github-agent-bridge-dashboard.service
+systemctl --user status github-agent-bridge-webhook.socket
+systemctl --user status github-agent-bridge-webhook.service
 curl http://127.0.0.1:8765/api/health
+curl http://127.0.0.1:8766/api/health
 ```
 
 ## Monitor health

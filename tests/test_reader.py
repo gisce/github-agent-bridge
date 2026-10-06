@@ -161,17 +161,17 @@ def test_fetch_once_retries_transient_enqueue_storage_failure(monkeypatch, tmp_p
             "@pilipilisbot https://github.com/gisce/erp/issues/42#issuecomment-99",
         ),
     })
-    original_enqueue = queue.enqueue
+    original_ingest = queue.ingest
     attempts = {"count": 0}
 
-    def fail_once_then_enqueue(notification, policy):
+    def fail_once_then_ingest(notification, policy, **kwargs):
         attempts["count"] += 1
         if attempts["count"] == 1:
             raise sqlite3.OperationalError("database is locked")
-        return original_enqueue(notification, policy)
+        return original_ingest(notification, policy, **kwargs)
 
     monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda *args: mailbox)
-    monkeypatch.setattr(queue, "enqueue", fail_once_then_enqueue)
+    monkeypatch.setattr(queue, "ingest", fail_once_then_ingest)
     monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
 
     reader = ImapReader(

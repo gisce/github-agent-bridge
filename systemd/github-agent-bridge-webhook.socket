@@ -1,0 +1,11 @@
+[Unit]
+Description=GitHub Agent Bridge webhook ingress socket
+
+[Socket]
+ListenStream=127.0.0.1:8766
+NoDelay=true
+KeepAlive=true
+Backlog=4096
+
+[Install]
+WantedBy=sockets.target

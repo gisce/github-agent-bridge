@@ -28,6 +28,18 @@ def test_extract_workflow_run_context():
     assert ctx.work_key == "gisce/github-agent-bridge/actions/runs/26325244472"
 
 
+def test_extract_commit_comment_context_from_github_anchor():
+    ctx = extract_github_context(
+        "https://github.com/gisce/erp/commit/abcdef123456#commitcomment-778899"
+    )
+
+    assert ctx.repo == "gisce/erp"
+    assert ctx.commit_sha == "abcdef123456"
+    assert ctx.commit_comment_id == 778899
+    assert ctx.target_kind == "commit_comment"
+    assert ctx.work_key == "gisce/erp@abcdef123456"
+
+
 def test_extract_pr_comment_context_before_workflow_run_link():
     ctx = extract_github_context(
         'Screenshot https://github.com/user-attachments/assets/5ac382c7-e004-429b-8e35-7feb3e8f9c6f"\n'

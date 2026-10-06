@@ -2,7 +2,8 @@ import sqlite3
 
 import pytest
 
-from github_agent_bridge.models import Notification
+from github_agent_bridge.models import GitHubContext, Notification
+from github_agent_bridge.queue import canonical_event_key
 from github_agent_bridge.intent_classifier import IntentClassification
 from github_agent_bridge.policy import FeedbackLearning, IntentClassifier, Policy
 from github_agent_bridge.queue import JobQueue
@@ -116,6 +117,121 @@ def test_enqueue_and_coalesce_same_work_key(tmp_path, monkeypatch):
     assert contexts[0].comment_id == 11
     assert job1.trigger_actor == "Edu"
     assert job1.trigger_actor_avatar_url == "https://github.com/Edu.png?size=80"
+
+
+def test_canonical_event_key_uses_immutable_comment_id_across_sources():
+    ctx = GitHubContext(
+        urls=["https://github.com/gisce/erp/issues/42#issuecomment-123"],
+        repo="gisce/erp",
+        issue_number=42,
+        comment_id=123,
+        target_kind="issue",
+    )
+
+    assert canonical_event_key("reply_comment", ctx, "email", "<mail@github.com>") == (
+        "issue_comment:created:gisce/erp:123"
+    )
+    assert canonical_event_key("reply_comment", ctx, "webhook", "delivery-1") == (
+        "issue_comment:created:gisce/erp:123"
+    )
+
+
+def test_canonical_event_key_falls_back_to_source_receipt_when_identity_is_uncertain():
+    ctx = GitHubContext(
+        urls=["https://github.com/gisce/erp/issues/42"],
+        repo="gisce/erp",
+        issue_number=42,
+        target_kind="issue",
+    )
+
+    assert canonical_event_key("mention", ctx, "email", "<mail@github.com>") == (
+        "email:<mail@github.com>"
+    )
+
+
+def test_ingest_records_receipt_and_event_and_deduplicates_same_event(tmp_path, monkeypatch):
+    monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    first, first_state = q.ingest(notif(1, "<first@github.com>", BODY1), policy())
+    duplicate = Notification(
+        uid=2,
+        message_id="<second@github.com>",
+        subject="Re: [gisce/erp] PR",
+        from_addr="Edu <notifications@github.com>",
+        body=BODY1,
+        auth={"spf": True, "dkim": True, "dmarc": True},
+    )
+    second, second_state = q.ingest(duplicate, policy())
+
+    assert first_state == "enqueued"
+    assert second_state == "duplicate"
+    assert second.id == first.id
+    with q.connect() as con:
+        receipts = con.execute(
+            "SELECT source_key,status,job_id FROM ingest_receipts ORDER BY id"
+        ).fetchall()
+        events = con.execute("SELECT event_key,job_id FROM github_events").fetchall()
+    assert [(row["source_key"], row["status"], row["job_id"]) for row in receipts] == [
+        ("<first@github.com>", "accepted", first.id),
+        ("<second@github.com>", "duplicate", first.id),
+    ]
+    assert len(events) == 1
+    assert events[0]["event_key"] == "issue_comment:created:gisce/erp:10"
+    assert events[0]["job_id"] == first.id
+
+
+def test_equivalent_open_issue_notification_coalesces_after_claim(tmp_path, monkeypatch):
+    monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
+    q = JobQueue(tmp_path / "q.sqlite3")
+    first = Notification(
+        uid=1,
+        message_id="<gisce/erp/issues/29307@github.com>",
+        subject="[gisce/erp] Example issue (Issue #29307)",
+        from_addr="polsala <notifications@github.com>",
+        body="@pilipilisbot was assigned\nhttps://github.com/gisce/erp/issues/29307",
+        auth={"spf": True, "dkim": True, "dmarc": True},
+    )
+    duplicate = Notification(
+        uid=2,
+        message_id="<gisce/erp/issue/29307/issue_event/32055234716@github.com>",
+        subject="Re: [gisce/erp] Example issue (Issue #29307)",
+        from_addr="polsala <notifications@github.com>",
+        body="@pilipilisbot was assigned\nhttps://github.com/gisce/erp/issues/29307#event-32055234716",
+        auth={"spf": True, "dkim": True, "dmarc": True},
+    )
+
+    job, state = q.enqueue(first, policy())
+    assert state == "enqueued"
+    assert q.claim_next("worker").id == job.id
+
+    coalesced, duplicate_state = q.enqueue(duplicate, policy())
+
+    assert duplicate_state == "coalesced"
+    assert coalesced.id == job.id
+    assert q.stats().get("pending", 0) == 0
+    stored = q.get(job.id)
+    assert stored.coalesced_count == 1
+    with q.connect() as con:
+        row = con.execute(
+            "SELECT message_id FROM coalesced_notifications WHERE job_id=?",
+            (job.id,),
+        ).fetchone()
+    assert row["message_id"] == duplicate.message_id
+
+
+def test_distinct_comment_remains_pending_while_same_work_key_is_running(tmp_path, monkeypatch):
+    monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
+    q = JobQueue(tmp_path / "q.sqlite3")
+    running, _ = q.enqueue(notif(1, "<1@github.com>", BODY1), policy())
+    assert q.claim_next("worker").id == running.id
+
+    followup, state = q.enqueue(notif(2, "<2@github.com>", BODY2), policy())
+
+    assert state == "enqueued"
+    assert followup.id != running.id
+    assert followup.status == "pending"
+    assert q.get(running.id).coalesced_count == 0
 
 
 def test_enqueue_stores_trigger_actor_and_coalesced_actor(tmp_path, monkeypatch):
@@ -302,6 +418,88 @@ def test_claim_can_filter_by_work_intent(tmp_path):
 
     assert claimed.id == review_job.id
     assert claimed.work_intent == "review_only"
+
+
+def test_job_runs_preserve_each_attempt_across_requeue(tmp_path):
+    q = JobQueue(tmp_path / "q.sqlite3")
+    job, _ = q.enqueue(notif(1, "<1@github.com>", BODY1), policy())
+    q.update_work_intent(job.id, "work_allowed", "implementation request")
+
+    first = q.claim_next("worker-1")
+    assert first is not None
+    assert q.requeue_running(first.id, "transient failure") is True
+    second = q.claim_next("worker-2")
+    assert second is not None
+    q.finish(second.id, "done", "completed")
+
+    with q.connect() as con:
+        runs = con.execute(
+            "SELECT * FROM job_runs WHERE job_id=? ORDER BY attempt",
+            (job.id,),
+        ).fetchall()
+
+    assert [run["attempt"] for run in runs] == [1, 2]
+    assert [run["result"] for run in runs] == ["requeued", "done"]
+    assert [run["worker_id"] for run in runs] == ["worker-1", "worker-2"]
+    assert all(run["started_at"] for run in runs)
+    assert all(run["finished_at"] for run in runs)
+    assert [run["session_id"] for run in runs] == [
+        f"github-agent-bridge-job-{job.id}-attempt-1",
+        f"github-agent-bridge-job-{job.id}-attempt-2",
+    ]
+
+
+def test_block_and_cancel_close_active_job_runs(tmp_path):
+    q = JobQueue(tmp_path / "q.sqlite3")
+    blocked, _ = q.enqueue(notif(1, "<1@github.com>", BODY1), policy())
+    cancelled, _ = q.enqueue(notif(2, "<2@github.com>", BODY_OTHER), policy())
+
+    assert q.claim_next("worker-1").id == blocked.id
+    assert q.block_running("executor stopped", "shutdown", job_ids=[blocked.id]) == [blocked.id]
+    assert q.claim_next("worker-2").id == cancelled.id
+    assert q.mark_cancelled(cancelled.id, actor="ecarreras", reason="obsolete") is not None
+
+    with q.connect() as con:
+        results = dict(
+            con.execute(
+                "SELECT job_id, result FROM job_runs WHERE job_id IN (?, ?)",
+                (blocked.id, cancelled.id),
+            ).fetchall()
+        )
+
+    assert results == {blocked.id: "blocked", cancelled.id: "cancelled"}
+
+
+def test_init_backfills_only_the_known_legacy_interval_as_estimated(tmp_path):
+    db = tmp_path / "q.sqlite3"
+    q = JobQueue(db)
+    job, _ = q.enqueue(notif(1, "<1@github.com>", BODY1), policy())
+    with q.connect() as con:
+        con.execute("DROP TABLE job_runs")
+        con.execute(
+            """UPDATE jobs
+            SET attempts=3, started_at=?, finished_at=?, metadata_json=?
+            WHERE id=?""",
+            (
+                "2026-09-01T10:00:00Z",
+                "2026-09-01T10:30:00Z",
+                '{"openclaw_session_id":"legacy-session"}',
+                job.id,
+            ),
+        )
+
+    JobQueue(db)
+    JobQueue(db)
+
+    with sqlite3.connect(db) as con:
+        con.row_factory = sqlite3.Row
+        runs = con.execute("SELECT * FROM job_runs WHERE job_id=?", (job.id,)).fetchall()
+
+    assert len(runs) == 1
+    assert runs[0]["attempt"] == 3
+    assert runs[0]["result"] == "historical"
+    assert runs[0]["session_id"] == "legacy-session"
+    assert runs[0]["is_estimated"] == 1
 
 
 def test_cancel_running_records_actor_reason_and_finish_preserves_cancellation(tmp_path):
@@ -627,6 +825,11 @@ def test_unlock_stale_can_limit_to_selected_running_jobs(tmp_path):
 
     assert q.get(job1.id).status == "running"
     assert q.get(job2.id).status == "pending"
+    with q.connect() as con:
+        assert con.execute(
+            "SELECT result FROM job_runs WHERE job_id=?",
+            (job2.id,),
+        ).fetchone()["result"] == "requeued"
 
 
 def test_block_running_can_limit_jobs_and_never_requeues(tmp_path):

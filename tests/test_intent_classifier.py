@@ -231,6 +231,29 @@ def test_classify_notification_with_llm_uses_isolated_session_id(monkeypatch):
         )
 
     session_ids = [cmd[cmd.index("--session-id") + 1] for cmd in calls]
+    assert all("--local" in cmd for cmd in calls)
     assert session_ids[0].startswith("intent-base-gisce-developer-")
     assert session_ids[1].startswith("intent-base-gisce-developer-")
     assert session_ids[0] != session_ids[1]
+
+
+def test_classify_notification_with_llm_reports_timeout_without_prompt(monkeypatch):
+    notif = notification("<1@github.com>", "@pilipilisbot review this")
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    try:
+        classify_notification_with_llm(
+            notif,
+            extract_github_context(notif.body),
+            ParserResult("reply_comment", "review_only"),
+            IntentClassifier(enabled=True, timeout=60),
+        )
+    except RuntimeError as exc:
+        assert str(exc) == "intent classifier timed out after 90s"
+        assert "Intent classifier prompt" not in str(exc)
+    else:
+        raise AssertionError("expected classifier timeout")

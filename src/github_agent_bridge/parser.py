@@ -168,7 +168,7 @@ def extract_github_context(body: str) -> GitHubContext:
         commit = re.search(r"github\.com/([^/]+/[^/]+)/commit/([0-9a-fA-F]+)", url)
         if commit:
             repo = commit.group(1).lower(); commit_sha = commit.group(2)
-            cc = re.search(r"#r(\d+)", url)
+            cc = re.search(r"#(?:r|commitcomment-)(\d+)", url)
             if cc:
                 commit_comment_id = int(cc.group(1)); target_kind = "commit_comment"; primary_url = url; break
             target_kind = "commit"

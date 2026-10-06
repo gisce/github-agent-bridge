@@ -36,10 +36,20 @@ DASHBOARD_PATH_PREFIXES = (
     "src/github_agent_bridge/dashboard_data.py",
     "src/github_agent_bridge/dashboard_static/",
 )
+WEBHOOK_PATH_PREFIXES = (
+    "src/github_agent_bridge/backend.py",
+    "src/github_agent_bridge/models.py",
+    "src/github_agent_bridge/parser.py",
+    "src/github_agent_bridge/policy.py",
+    "src/github_agent_bridge/queue.py",
+    "src/github_agent_bridge/sql/",
+    "src/github_agent_bridge/webhook.py",
+)
 SYSTEMD_PATH_PREFIXES = ("systemd/",)
 DEFAULT_SYSTEMD_UNITS = {
     "executor": "github-agent-bridge.service",
     "dashboard": "github-agent-bridge-dashboard.service",
+    "webhook": "github-agent-bridge-webhook.service",
     "reader": "github-agent-bridge-reader.timer",
     "monitor": "github-agent-bridge-monitor.timer",
     "feedback": "github-agent-bridge-feedback.timer",
@@ -70,7 +80,11 @@ class ReleaseInfo:
 
 
 def _default_runner(args: Sequence[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(list(args), cwd=cwd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    command = list(args)
+    try:
+        return subprocess.run(command, cwd=cwd, check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError as exc:
+        return subprocess.CompletedProcess(command, 127, "", str(exc))
 
 
 def _run_json(args: Sequence[str], cwd: Path | None, runner: CommandRunner) -> dict[str, Any]:
@@ -125,9 +139,15 @@ def classify_changed_files(files: Sequence[str]) -> dict[str, Any]:
     risky_files = [path for path in files if path.startswith(RISKY_PATH_PREFIXES)]
     migration_files = [path for path in files if path.startswith("src/github_agent_bridge/sql/") or "/migrations/" in path]
     dashboard_files = [path for path in files if path.startswith(DASHBOARD_PATH_PREFIXES)]
+    webhook_files = [path for path in files if path.startswith(WEBHOOK_PATH_PREFIXES)]
     systemd_files = [path for path in files if path.startswith(SYSTEMD_PATH_PREFIXES)]
-    dashboard_only = bool(files) and len(dashboard_files) == len(files)
-    risk = "dashboard_only" if dashboard_only else "executor_or_shared"
+    dashboard_only = bool(files) and len(dashboard_files) == len(files) and not webhook_files
+    webhook_only = bool(files) and len(webhook_files) == len(files) and not dashboard_files and not risky_files
+    api_only = bool(files) and all(
+        path.startswith(DASHBOARD_PATH_PREFIXES) or path.startswith(WEBHOOK_PATH_PREFIXES)
+        for path in files
+    ) and not risky_files
+    risk = "dashboard_only" if dashboard_only else "webhook_only" if webhook_only else "api_only" if api_only else "executor_or_shared"
     if migration_files:
         risk = "migration_required"
     elif risky_files:
@@ -139,6 +159,9 @@ def classify_changed_files(files: Sequence[str]) -> dict[str, Any]:
     return {
         "risk": risk,
         "dashboard_only": dashboard_only,
+        "webhook_only": webhook_only,
+        "api_only": api_only,
+        "webhook_files": webhook_files,
         "risky_files": risky_files,
         "migration_files": migration_files,
         "systemd_files": systemd_files,
@@ -164,15 +187,25 @@ def plan_systemd_actions(decision: str, classification: dict[str, Any], *, units
 
     if decision == "stage_dashboard_reload":
         immediate.append(action("try-restart", "dashboard", "dashboard-only update can reload independently"))
+    elif decision == "stage_webhook_reload":
+        immediate.append(action("try-restart", "webhook", "webhook ingress update can reload independently"))
+    elif decision == "stage_api_reload":
+        immediate.append(action("try-restart", "dashboard", "dashboard API update can reload independently"))
+        immediate.append(action("try-restart", "webhook", "webhook ingress update can reload independently"))
     elif decision == "stage_defer_executor_reload":
         immediate.append(action("try-restart", "dashboard", "dashboard can refresh while executor jobs finish"))
+        if classification.get("webhook_files"):
+            immediate.append(action("try-restart", "webhook", "webhook ingress can refresh independently"))
         deferred.append(action("restart", "executor", "executor/shared update waits for active queue to drain"))
     elif decision == "stage_full_reload":
         immediate.append(action("try-restart", "dashboard", "refresh dashboard after package update"))
+        if classification.get("webhook_files"):
+            immediate.append(action("try-restart", "webhook", "refresh webhook ingress after package update"))
         immediate.append(action("restart", "executor", "queue is quiet, executor reload is allowed"))
     elif decision == "defer_migration":
         deferred.append(action("restart", "executor", "schema migration must wait for active queue to drain"))
         deferred.append(action("try-restart", "dashboard", "dashboard refresh waits for migration window"))
+        deferred.append(action("try-restart", "webhook", "webhook ingress refresh waits for migration window"))
 
     if daemon_reload:
         affected_units = sorted(
@@ -182,6 +215,7 @@ def plan_systemd_actions(decision: str, classification: dict[str, Any], *, units
                 for key, filename in (
                     ("executor", "github-agent-bridge.service"),
                     ("dashboard", "github-agent-bridge-dashboard.service"),
+                    ("webhook", "github-agent-bridge-webhook.service"),
                     ("reader", "github-agent-bridge-reader.timer"),
                     ("monitor", "github-agent-bridge-monitor.timer"),
                     ("feedback", "github-agent-bridge-feedback.timer"),
@@ -738,6 +772,11 @@ def plan_update(
         blocked_reason = "active_jobs_block_migration"
     elif classification["dashboard_only"]:
         decision = "stage_dashboard_reload"
+        dashboard_restart_allowed = True
+    elif classification["webhook_only"]:
+        decision = "stage_webhook_reload"
+    elif classification["api_only"]:
+        decision = "stage_api_reload"
         dashboard_restart_allowed = True
     elif active_total:
         decision = "stage_defer_executor_reload"

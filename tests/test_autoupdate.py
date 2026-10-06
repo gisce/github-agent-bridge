@@ -4,11 +4,14 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from github_agent_bridge.autoupdate import (
     _model_smoke_postcheck,
     apply_update_plan,
     complete_pending_reload,
     default_install_command,
+    latest_release,
     load_update_state,
     plan_systemd_actions,
     plan_update,
@@ -17,6 +20,11 @@ from github_agent_bridge.autoupdate import (
 from github_agent_bridge.models import Notification
 from github_agent_bridge.policy import Policy
 from github_agent_bridge.queue import JobQueue
+
+
+def test_latest_release_reports_missing_gh_as_runtime_error():
+    with pytest.raises(RuntimeError, match=r"No such file or directory.*missing-gh"):
+        latest_release("gisce/github-agent-bridge", gh_bin="/missing-gh")
 
 
 def completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
@@ -146,6 +154,46 @@ def test_dashboard_only_update_can_stage_while_jobs_are_active(tmp_path, monkeyp
             "unit": "github-agent-bridge-dashboard.service",
             "reason": "dashboard-only update can reload independently",
         }
+    ]
+
+
+def test_webhook_only_update_restarts_only_ingress(tmp_path, monkeypatch):
+    monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+
+    plan = plan_update(
+        db,
+        repo_dir=tmp_path,
+        installed_version="1.2.3",
+        runner=release_runner("v1.2.4", ["src/github_agent_bridge/webhook.py"]),
+    )
+
+    assert plan["decision"] == "stage_webhook_reload"
+    assert plan["classification"]["webhook_only"] is True
+    assert plan["service_plan"]["immediate"] == [{
+        "command": "try-restart",
+        "unit": "github-agent-bridge-webhook.service",
+        "reason": "webhook ingress update can reload independently",
+    }]
+
+
+def test_shared_dashboard_and_ingress_update_restarts_both_apis(tmp_path, monkeypatch):
+    monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+
+    plan = plan_update(
+        db,
+        repo_dir=tmp_path,
+        installed_version="1.2.3",
+        runner=release_runner("v1.2.4", ["src/github_agent_bridge/backend.py"]),
+    )
+
+    assert plan["decision"] == "stage_api_reload"
+    assert [item["unit"] for item in plan["service_plan"]["immediate"]] == [
+        "github-agent-bridge-dashboard.service",
+        "github-agent-bridge-webhook.service",
     ]
 
 

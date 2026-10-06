@@ -70,7 +70,12 @@ class ImapReader:
                 if is_github_notification_message(msg, from_addr):
                     n = Notification(uid=uid, message_id=message_id, subject=subject, from_addr=from_addr, body=extract_body_text(msg), auth=parse_auth_results(msg))
                     try:
-                        self.queue.enqueue(n, self.policy)
+                        self.queue.ingest(
+                            n,
+                            self.policy,
+                            source="email",
+                            source_key=n.message_id,
+                        )
                     except sqlite3.Error:
                         raise
                     except Exception as exc:

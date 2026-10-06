@@ -162,9 +162,11 @@ class GitHubClient:
         if not review:
             return False
         state = (review.get("state") or "").upper()
-        if state == "APPROVED":
-            return True
         body = (review.get("body") or "").lower()
+        login = self.current_login()
+        addressed_to_agent = bool(login and re.search(rf"(?<![A-Za-z0-9-])@{re.escape(login.lower())}(?![A-Za-z0-9-])", body))
+        if state == "APPROVED" and not addressed_to_agent:
+            return True
         non_actionable_markers = (
             "generated no new comments",
             "wasn't able to review any files",
@@ -403,6 +405,10 @@ class GitHubClient:
                     if comment_id:
                         ok = self._run(["api", "-X", "POST", f"repos/{repo}/pulls/comments/{comment_id}/reactions", "-f", f"content={content}", "-H", "Accept: application/vnd.github+json"]).returncode == 0 and ok
                 return ok
+            # GitHub has no reaction endpoint for a top-level pull request
+            # review. Do not silently react to the PR body instead: that makes
+            # the acknowledgement appear unrelated to the triggering review.
+            return False
         if not issue:
             return False
         return self._run(["api", "-X", "POST", f"repos/{repo}/issues/{issue}/reactions", "-f", f"content={content}", "-H", "Accept: application/vnd.github+json"]).returncode == 0

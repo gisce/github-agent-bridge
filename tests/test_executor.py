@@ -338,6 +338,48 @@ def test_coalesced_notifications_are_reacted_to_before_dispatch(tmp_path):
     assert 2 in github.eye_comment_ids
 
 
+def test_pending_job_is_acknowledged_before_a_worker_claims_it(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_comment(queue)
+    github = FakeGitHub(assigned=False, mentioned=True)
+    pool = ExecutorPool(queue, Policy(trusted_orgs={"gisce"}), RecordingDispatcher(), github=github)
+
+    assert pool.acknowledge_one() is True
+
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "pending"
+    assert stored.attempts == 0
+    assert github.eye_comment_ids == [1]
+    assert queue.acknowledgement_ok(job.id) is True
+
+
+def test_worker_does_not_repeat_a_successful_queued_acknowledgement(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    enqueue_pr_comment(queue)
+    github = FakeGitHub(assigned=False, mentioned=True)
+    pool = ExecutorPool(queue, Policy(trusted_orgs={"gisce"}), RecordingDispatcher(), github=github)
+
+    assert pool.acknowledge_one() is True
+    assert pool.work_one("worker-test") is True
+
+    assert github.eye_comment_ids == [1]
+
+
+def test_failed_queued_acknowledgement_is_retried_once_by_worker(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    enqueue_pr_comment(queue)
+    github = FakeGitHub(assigned=False, mentioned=True)
+    github.react_eyes = lambda ctx: False
+    pool = ExecutorPool(queue, Policy(trusted_orgs={"gisce"}), RecordingDispatcher(), github=github)
+
+    assert pool.acknowledge_one() is True
+    github.react_eyes = lambda ctx: True
+    assert pool.work_one("worker-test") is True
+
+    assert queue.acknowledgement_ok(1) is True
+
+
 def test_bot_authored_pr_review_comment_keeps_review_only_without_explicit_write_request(tmp_path):
     queue = JobQueue(tmp_path / "bridge.sqlite3")
     enqueue_pr_comment(queue)

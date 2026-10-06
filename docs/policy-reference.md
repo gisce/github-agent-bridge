@@ -2,6 +2,14 @@
 
 `policy.json` controls which GitHub notifications the bridge trusts, which repositories are in scope, which actions are automatic, where OpenClaw agent work is delivered, which operating posture the agent uses, whether the optional LLM intent classifier is enabled, and whether feedback learning is captured.
 
+The machine-readable JSON Schema lives at [`src/github_agent_bridge/policy.schema.json`](../src/github_agent_bridge/policy.schema.json). Before restarting the service, validate an edited policy with:
+
+```bash
+gab validate-policy --policy ~/.config/github-agent-bridge/policy.json
+```
+
+Schema errors include the offending dotted path and reject unknown fields. Validation also applies runtime semantic checks, including referenced prompt override files.
+
 ## Quick map
 
 ```mermaid
@@ -106,6 +114,7 @@ gab --policy ~/.config/github-agent-bridge/policy.json enqueue-comment-url ...
 | `trustedRepos` | array of strings | `[]` | Exact `owner/repo` names trusted for `trustedAuto` actions. Case-insensitive. |
 | `trustedOrgs` | array of strings | `[]` | GitHub org/user names trusted for all repos under that owner. Case-insensitive. |
 | `enabledRepos` | array of strings | `[]` | Optional hard allowlist/canary scope. If non-empty, all repos not listed here are denied before other checks. Case-insensitive. |
+| `webhookCanaryRepos` | array of strings | `[]` | Explicit webhook dual-ingest allowlist. Empty means no webhook delivery may enqueue. It does not narrow IMAP scope. |
 | `repoRoutes` | object | `{}` | Exact per-repo delivery routes. Takes precedence over `orgRoutes`. |
 | `orgRoutes` | object | `{}` | Per-owner delivery routes used when no `repoRoutes` entry matches. |
 | `repoRoles` | object | `{}` | Exact per-repo operating role. Takes precedence over `orgRoles`. |
@@ -248,6 +257,23 @@ Result:
 | `another-org/another-repo` | `deny`. |
 
 This is the preferred key for staged rollout from the legacy inbox worker to the bridge.
+
+## `webhookCanaryRepos`
+
+Independent fail-closed allowlist for webhook dual ingestion:
+
+```json
+{
+  "trustedOrgs": ["your-org"],
+  "enabledRepos": [],
+  "webhookCanaryRepos": ["your-org/your-repo"]
+}
+```
+
+`enabledRepos` still applies to every transport. `webhookCanaryRepos` adds a
+second check only to webhook ingestion, so selecting one webhook canary does
+not deny IMAP notifications from the rest of the trusted scope. Events from
+configured `botLogins` are observed but never enqueued through the webhook.
 
 ## `repoRoutes` and `orgRoutes`
 
@@ -699,19 +725,21 @@ configured default behavior.
 }
 ```
 
-Resolution order is deterministic:
+Matching routes are composed in deterministic order, from broad defaults to
+specific overrides:
 
-1. repo + action
-2. repo + intent
-3. repo default
-4. global action
-5. global intent
-6. global default
-7. no override
+1. global default
+2. repo default
+3. global intent, complexity, then action
+4. repo intent, complexity, then action
 
-Each route is an object with optional `model` and `thinking` fields. A route can
-set only one field; the bridge appends only the flags that are configured on the
-selected route. Supported `thinking` values are `off`, `minimal`, `low`,
+Each route is an object with optional `model` and `thinking` fields. Every
+matching route overrides only the fields it defines, so a repo default such as
+`{"thinking": "xhigh"}` keeps the inherited model and still allows global
+action or complexity rules to select cheaper settings. Repo-specific action,
+complexity, and intent rules remain the final and most specific overrides. The
+bridge appends only the flags configured in the composed result. Supported
+`thinking` values are `off`, `minimal`, `low`,
 `medium`, `high`, `xhigh`, `adaptive`, and `max`; invalid values fail policy
 load with a clear error. Use provider-qualified model IDs such as
 `openai/gpt-5.4-mini`; bare model names can resolve to a different provider
@@ -732,6 +760,12 @@ Agents must also apply the comment value rule before posting: comment only when 
 ## Intent classifier
 
 `intentClassifier` controls an optional enqueue-time LLM classifier for trusted GitHub comments and reviews. It is disabled by default; when enabled, the bridge calls OpenClaw with the packaged `prompt_rules/intent_classifier.md` prompt or `promptOverrides.rules.intent_classifier`, expects JSON output, and uses the result only when confidence is high enough. Low-confidence, invalid, timed-out, or failed classifier calls fall back to the deterministic parser result.
+
+Classifier calls use `openclaw agent --local`, isolating enqueue-time routing
+from gateway concurrency, event-loop stalls, and gateway SQLite locks. Normal
+executor, feedback-learning, and interactive gateway calls still need suitable
+OpenClaw concurrency headroom; see
+[`operations.md`](operations.md#openclaw-concurrency-headroom).
 
 The classifier returns structured semantics: whether the event is addressed to the configured agent, the requested action, the work intent, write permission, and the scope of any requested state change. Results not addressed to the configured agent are normalized to `archive_notification` + `review_only`. Results that request `work_allowed` without `write_permission=state_change_allowed` are normalized back to `review_only`.
 

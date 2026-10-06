@@ -19,6 +19,8 @@ class BridgeUnit:
 BRIDGE_UNITS = [
     BridgeUnit("executor", "service", "GITHUB_AGENT_BRIDGE_EXECUTOR_UNIT", "github-agent-bridge.service"),
     BridgeUnit("dashboard", "service", "GITHUB_AGENT_BRIDGE_DASHBOARD_UNIT", "github-agent-bridge-dashboard.service"),
+    BridgeUnit("webhook", "service", "GITHUB_AGENT_BRIDGE_WEBHOOK_UNIT", "github-agent-bridge-webhook.service"),
+    BridgeUnit("webhook", "socket", "GITHUB_AGENT_BRIDGE_WEBHOOK_SOCKET_UNIT", "github-agent-bridge-webhook.socket"),
     BridgeUnit("reader", "service", "GITHUB_AGENT_BRIDGE_READER_SERVICE_UNIT", "github-agent-bridge-reader.service"),
     BridgeUnit("reader", "timer", "GITHUB_AGENT_BRIDGE_READER_TIMER_UNIT", "github-agent-bridge-reader.timer"),
     BridgeUnit("monitor", "service", "GITHUB_AGENT_BRIDGE_MONITOR_SERVICE_UNIT", "github-agent-bridge-monitor.service"),

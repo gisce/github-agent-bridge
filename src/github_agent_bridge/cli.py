@@ -23,7 +23,7 @@ from .monitor import MonitorThresholds, monitor, report_json
 from .mcp import authenticate_token, create_token, list_tokens, revoke_token, serve_stdio
 from .observability import DEFAULT_PROCESS_SAMPLE_RETENTION_SECONDS, configure_sentry
 from .parser import decode_header_value, extract_body_text, is_github_notification_message, parse_auth_results
-from .policy import Policy
+from .policy import Policy, validate_policy_file
 from .queue import JobQueue
 from .reader import ImapConfig, ImapReader, imap_mailbox_arg
 
@@ -87,6 +87,16 @@ def notification_from_comment_url(url: str, gh_bin: str = "gh", message_id_prefi
 def cmd_init_db(args: argparse.Namespace) -> int:
     JobQueue(args.db)
     print(f"initialized {args.db}")
+    return 0
+
+
+def cmd_validate_policy(args: argparse.Namespace) -> int:
+    try:
+        validate_policy_file(args.policy)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"invalid policy: {exc}", file=sys.stderr)
+        return 1
+    print(f"valid policy: {Path(args.policy).expanduser()}")
     return 0
 
 
@@ -443,6 +453,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--policy", default=None)
     sub = p.add_subparsers(required=True)
     s = sub.add_parser("init-db"); s.set_defaults(func=cmd_init_db)
+    s = sub.add_parser("validate-policy", help="validate a policy file against the published schema")
+    s.add_argument("--policy", required=True)
+    s.set_defaults(func=cmd_validate_policy)
     s = sub.add_parser("enqueue-json"); s.add_argument("file"); s.set_defaults(func=cmd_enqueue_json)
     s = sub.add_parser("enqueue-comment-url", help="fetch a GitHub issue/PR comment URL and enqueue it as a trusted notification")
     s.add_argument("url")

@@ -1,10 +1,10 @@
 [project]
 name = "github-agent-bridge"
-version = "0.60.6"
+version = "0.71.2"
 description = "GitHub notification to OpenClaw agent bridge for Pilipilis"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["pywebpush>=2.0"]
+dependencies = ["jsonschema>=4.18", "pywebpush>=2.0"]
 
 [project.optional-dependencies]
 dashboard = ["fastapi>=0.110", "uvicorn>=0.29"]
@@ -15,6 +15,7 @@ test = ["pytest>=8", "fastapi>=0.110", "httpx>=0.27", "uvicorn>=0.29"]
 gab = "github_agent_bridge.cli:main"
 github-agent-bridge = "github_agent_bridge.cli:main"
 github-agent-bridge-dashboard = "github_agent_bridge.backend:main"
+github-agent-bridge-webhook = "github_agent_bridge.backend:webhook_main"
 github-agent-bridge-reader-run = "github_agent_bridge.reader_run:main"
 github-agent-bridge-monitor-alert = "github_agent_bridge.monitor_alert:main"
 github-agent-bridge-autoupdate-run = "github_agent_bridge.autoupdate_run:main"

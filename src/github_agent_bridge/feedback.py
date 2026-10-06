@@ -21,6 +21,20 @@ FEEDBACK_DECISIONS = {"auto_trusted", "ask"}
 PROMPT_RULES_PACKAGE = "github_agent_bridge.prompt_rules"
 
 
+def is_feedback_candidate(ctx: GitHubContext, action: str, decision: str) -> bool:
+    if decision in FEEDBACK_DECISIONS and action in ACTIONABLE_FEEDBACK_ACTIONS:
+        return True
+    # A pull request review can contain reusable feedback even when the intent
+    # classifier correctly decides that it does not ask the agent to act.
+    # Capture it for the feedback classifier without dispatching a job.
+    return (
+        ctx.review_id is not None
+        and ctx.target_kind == "review"
+        and action == "archive_notification"
+        and decision == "auto"
+    )
+
+
 def load_prompt_rule(name: str) -> str:
     return resources.files(PROMPT_RULES_PACKAGE).joinpath(name).read_text(encoding="utf-8").strip() + "\n"
 
@@ -74,7 +88,7 @@ def capture_feedback(
     This deliberately does not synthesize rules. The bridge records auditable
     evidence; only curated rows in feedback_rules are injected into agents.
     """
-    if decision not in FEEDBACK_DECISIONS or action not in ACTIONABLE_FEEDBACK_ACTIONS:
+    if not is_feedback_candidate(ctx, action, decision):
         return False
 
     repo = ctx.repo or "unknown/repo"
@@ -204,6 +218,11 @@ def _openclaw_text_from_json(raw: str) -> str:
         value = data.get(key)
         if isinstance(value, str) and value.strip():
             return value
+    payloads = data.get("payloads")
+    if isinstance(payloads, list):
+        for payload in payloads:
+            if isinstance(payload, dict) and isinstance(payload.get("text"), str) and payload["text"].strip():
+                return payload["text"]
     if isinstance(data.get("result"), dict):
         payloads = data["result"].get("payloads")
         if isinstance(payloads, list):

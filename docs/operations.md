@@ -69,6 +69,33 @@ GITHUB_AGENT_BRIDGE_WORKERS=2
 GITHUB_AGENT_BRIDGE_WORK_INTENT=review_only
 ```
 
+### OpenClaw concurrency headroom
+
+The executor workers run long OpenClaw agent turns, while feedback learning and
+interactive operations make shorter calls through the gateway. These gateway
+calls consume OpenClaw's global agent concurrency, so
+`agents.defaults.maxConcurrent` should be **greater than** the bridge worker
+count. Otherwise four busy workers can fill a four-slot OpenClaw queue and
+starve other gateway work.
+
+The enqueue-time intent classifier is deliberately different: the bridge calls
+`openclaw agent --local` for an isolated one-shot classification. This keeps the
+reader independent from gateway queue saturation, event-loop stalls, and
+gateway SQLite lock contention. Classifier calls are sequential in the reader,
+so they do not add another pool of concurrent bridge jobs.
+
+For the standard four-worker deployment, use eight OpenClaw slots:
+
+```bash
+openclaw config set agents.defaults.maxConcurrent 8 --strict-json
+openclaw config validate
+```
+
+Keep `GITHUB_AGENT_BRIDGE_WORKERS=4`; the extra OpenClaw slots are headroom for
+feedback and interactive operations, not additional bridge jobs. As a minimum
+sizing rule use `maxConcurrent >= workers + 2`; eight is the recommended value
+for four workers when feedback learning and interactive use are active.
+
 Reader timer job:
 
 ```bash
@@ -314,6 +341,12 @@ a job URL to open the dashboard with that job's session, worklog, activity feed
 and GitHub links selected. The UI is a Vite + React + TypeScript app styled with
 Tailwind and operational components, using TanStack Query for API state and
 Recharts for percentile charts.
+Webhook administrators can request a configuration refresh from a hook detail
+page. This runs `gh api --method POST <validated-ping-path>` under the dashboard
+service identity, so `gh auth status` must report an account with organization
+or repository webhook write permission. Each request and result is retained in
+`webhook_hook_actions`; raw CLI errors are audited but are not returned to the
+browser.
 The process activity API and dashboard distinguish live executor process state,
 persisted process activity, semantic job progress, and visible transcript/output
 progress so operators can tell whether a running job is merely alive or actually
@@ -329,6 +362,16 @@ them in the viewer's local timezone from `Intl.DateTimeFormat`; hovering a
 rendered timestamp shows the UTC value.
 Production serves the static bundle from
 `src/github_agent_bridge/dashboard_static`.
+
+Public webhook ingestion should use the separate
+`github-agent-bridge-webhook.socket` and `github-agent-bridge-webhook.service`.
+The ingress app exposes only `GET /api/health` and
+`POST /api/webhooks/github`; dashboard, OAuth, monitoring and administration
+routes are deliberately absent. systemd owns `127.0.0.1:8766` and passes file
+descriptor 3 to Uvicorn, retaining queued TCP connections across short process
+restarts. Consequently a dashboard/UI deployment does not interrupt webhook
+delivery, and an ingress deployment has no connection-refused gap while the
+service is replaced.
 When VAPID keys are configured and the dashboard is exposed over HTTPS, signed-in
 users can enable the header bell control. The executor sends final `done` and
 `blocked` job notifications through those browser push subscriptions for the
@@ -452,12 +495,38 @@ before it is returned to the authenticated dashboard. The process activity panel
 uses persisted process samples for a compact CPU history line chart when monitor
 samples exist, and falls back to the live executor snapshot otherwise.
 
+### Run history and runtime accounting
+
+Every successful queue claim creates a `job_runs` row with its own attempt,
+worker, OpenClaw session id, and start time. Every transition out of `running`
+closes that run with a finish time and a `done`, `blocked`, `requeued`, or
+`cancelled` result. The `started_at` and `finished_at` columns on `jobs` remain a
+compatibility summary of the current or latest attempt; runtime metrics use
+completed `job_runs` as their source of truth.
+
+`GET /api/metrics/summary` assigns a completed run to the dashboard-local day
+that contains the largest share of its elapsed runtime. A tie is assigned to the
+local start day, and monthly totals are derived from that selected day. Runtime
+is measured in UTC elapsed seconds, so DST changes do not add or lose execution
+time. The response retains the legacy `jobs` count fields as aliases for run
+counts and also returns explicit `runs`, `work_runs`, and `review_runs` fields.
+
+Schema initialization backfills at most one recoverable interval per legacy
+job. That row has result `historical` and `is_estimated=1`; earlier attempts are
+not reconstructed from the old aggregate fields. Run rows have the same
+retention lifecycle as their parent job and are removed by `ON DELETE CASCADE`
+when that job is deleted. They are not independently age-pruned because doing
+so would silently rewrite historical usage totals; deployments should apply any
+future job-retention policy to `jobs`, which also bounds run storage.
+
 When publishing the dashboard through nginx, disable buffering for the proxied
 dashboard location so SSE events flush immediately. Also intercept upstream
 restart errors so browser users see a short auto-refreshing maintenance page
 instead of nginx's generic "Bad Gateway" response while the dashboard service is
 restarting. A complete example is available in
 [`nginx-dashboard.conf`](nginx-dashboard.conf).
+The example routes the exact webhook path to the socket-activated ingress on
+port 8766 before the generic dashboard location.
 
 ```nginx
 location / {

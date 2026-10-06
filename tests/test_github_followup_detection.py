@@ -114,6 +114,29 @@ def test_approved_review_is_non_actionable():
     assert github.is_non_actionable_review(ctx) is True
 
 
+def test_approved_review_addressed_to_agent_is_actionable():
+    ctx = GitHubContext(
+        urls=["https://github.com/gisce/webclient/pull/4159#pullrequestreview-5376907763"],
+        repo="gisce/webclient",
+        issue_number=4159,
+        review_id=5376907763,
+    )
+    github = RecordingGitHubClient(
+        {
+            ("api", "user", "--jq", ".login"): "giscebot\n",
+            ("api", "repos/gisce/webclient/pulls/4159/reviews/5376907763"): json.dumps(
+                {
+                    "state": "APPROVED",
+                    "body": "@giscebot remember to run the TypeScript typecheck before approving.",
+                    "submitted_at": "2026-10-01T08:38:47Z",
+                }
+            ),
+        }
+    )
+
+    assert github.is_non_actionable_review(ctx) is False
+
+
 def test_visible_followup_for_issue_comment_returns_newest_bot_comment_after_trigger():
     ctx = GitHubContext(
         urls=["https://github.com/gisce/github-agent-bridge/pull/13#issuecomment-4524715895"],

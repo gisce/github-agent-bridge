@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from importlib.resources import files
 from pathlib import Path
+
+from jsonschema import Draft202012Validator
 
 from .models import GitHubContext, Notification
 
@@ -25,6 +28,20 @@ ALLOWED_PROMPT_RULES = {
 }
 DEFAULT_REPO_ROLE = "contributor"
 DEFAULT_BOT_LOGINS = frozenset({"pilipilisbot"})
+
+
+def validate_policy_file(path: str | Path) -> None:
+    policy_path = Path(path).expanduser()
+    data = json.loads(policy_path.read_text(encoding="utf-8"))
+    schema = json.loads(files("github_agent_bridge").joinpath("policy.schema.json").read_text(encoding="utf-8"))
+    errors = sorted(Draft202012Validator(schema).iter_errors(data), key=lambda error: list(error.absolute_path))
+    if errors:
+        details = []
+        for error in errors:
+            location = ".".join(str(part) for part in error.absolute_path) or "<root>"
+            details.append(f"{location}: {error.message}")
+        raise ValueError("policy schema validation failed:\n" + "\n".join(details))
+    Policy.from_file(policy_path)
 
 
 def complexity_from_metadata(metadata: dict | None) -> str:
@@ -59,6 +76,14 @@ class ModelRoute:
         if self.thinking:
             parts.append(f"thinking={self.thinking}")
         return " ".join(parts) if parts else "OpenClaw default model route"
+
+    def overlay(self, override: ModelRoute | None) -> ModelRoute:
+        if override is None:
+            return self
+        return ModelRoute(
+            model=override.model if override.model is not None else self.model,
+            thinking=override.thinking if override.thinking is not None else self.thinking,
+        )
 
 
 @dataclass(frozen=True)
@@ -127,6 +152,7 @@ class Policy:
     trusted_repos: set[str] = field(default_factory=set)
     trusted_orgs: set[str] = field(default_factory=set)
     enabled_repos: set[str] = field(default_factory=set)
+    webhook_canary_repos: set[str] = field(default_factory=set)
     auto_actions: set[str] = field(default_factory=lambda: {"archive_notification"})
     ask_actions: set[str] = field(default_factory=lambda: {"reply_comment", "open_issue", "docs_update", "content_change"})
     trusted_auto_actions: set[str] = field(default_factory=lambda: {"reply_comment", "open_issue", "submit_review", "sync_after_merge", "workflow_run_failed"})
@@ -306,6 +332,7 @@ class Policy:
             trusted_repos={r.lower() for r in data.get("trustedRepos", [])},
             trusted_orgs={o.lower() for o in data.get("trustedOrgs", [])},
             enabled_repos={r.lower() for r in data.get("enabledRepos", [])},
+            webhook_canary_repos={r.lower() for r in data.get("webhookCanaryRepos", [])},
             auto_actions=set(actions.get("auto", ["archive_notification"])),
             ask_actions=set(actions.get("ask", ["reply_comment", "open_issue", "docs_update", "content_change"])),
             trusted_auto_actions=set(actions.get("trustedAuto", ["reply_comment", "open_issue", "submit_review", "sync_after_merge", "workflow_run_failed"])),
@@ -370,19 +397,14 @@ class Policy:
         if complexity_key not in ALLOWED_COMPLEXITIES:
             complexity_key = "substantive"
         repo_routes = self.model_routes.by_repo.get(repo_key)
+        route = ModelRoute().overlay(self.model_routes.default)
         if repo_routes:
-            route = (
-                repo_routes.by_action.get(action_key)
-                or repo_routes.by_complexity.get(complexity_key)
-                or repo_routes.by_intent.get(intent_key)
-                or repo_routes.default
-            )
-            if route:
-                return route
-        return (
-            self.model_routes.by_action.get(action_key)
-            or self.model_routes.by_complexity.get(complexity_key)
-            or self.model_routes.by_intent.get(intent_key)
-            or self.model_routes.default
-            or ModelRoute()
-        )
+            route = route.overlay(repo_routes.default)
+        route = route.overlay(self.model_routes.by_intent.get(intent_key))
+        route = route.overlay(self.model_routes.by_complexity.get(complexity_key))
+        route = route.overlay(self.model_routes.by_action.get(action_key))
+        if repo_routes:
+            route = route.overlay(repo_routes.by_intent.get(intent_key))
+            route = route.overlay(repo_routes.by_complexity.get(complexity_key))
+            route = route.overlay(repo_routes.by_action.get(action_key))
+        return route

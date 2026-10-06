@@ -4,12 +4,15 @@ import argparse
 import asyncio
 import base64
 from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime, timedelta
 import json
 import os
 import secrets
 import shlex
 import sqlite3
+import subprocess
 import sys
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -53,8 +56,10 @@ from .monitor import monitor
 from .mcp import MCPServer, authenticate_token, create_token, list_tokens, revoke_token, update_token_owner
 from .observability import configure_sentry, list_alerts, recent_process_samples
 from .queue import JobQueue
+from .policy import Policy
 from .systemd_status import allowed_unit_names, stream_journal_lines, systemd_status
 from .web_push import delete_subscription, save_subscription, subscription_status
+from .webhook import persist_shadow_delivery, verify_signature, webhook_notification
 
 
 DEFAULT_HOST = os.getenv("GITHUB_AGENT_BRIDGE_DASHBOARD_HOST", "127.0.0.1")
@@ -67,6 +72,23 @@ GITHUB_USER_URL = "https://api.github.com/user"
 GITHUB_TEAMS_URL = "https://api.github.com/user/teams"
 PROJECT_REPOSITORY_URL = "https://github.com/gisce/github-agent-bridge"
 SESSION_VERSION = 1
+WEBHOOK_TIMESERIES_MAX_DAYS = 366
+WEBHOOK_TIMESERIES_MAX_HOURLY_DAYS = 31
+WEBHOOK_COVERAGE_EVENT_GLOBS = (
+    "issue_comment:created:*",
+    "pull_request_review_comment:created:*",
+    "pull_request_review:created:*",
+    "commit_comment:created:*",
+    "workflow_run:workflow_run_failed:*",
+)
+
+
+def _expand_systemd_home_specifier(value: str) -> str:
+    if value == "%h":
+        return str(Path.home())
+    if value.startswith("%h/"):
+        return str(Path.home() / value[3:])
+    return value
 
 
 def _knowledge_actor(item: dict[str, Any]) -> str:
@@ -97,6 +119,178 @@ def _mark_manageable_knowledge(items: list[dict[str, Any]], profile: dict[str, A
     return [{**item, "can_manage": _knowledge_item_owned_by(item, login)} for item in items]
 
 
+def _parse_webhook_datetime(value: str, parameter: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid_{parameter}_datetime",
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _webhook_datetime_value(value: datetime) -> str:
+    return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _webhook_coverage_predicate(column: str) -> str:
+    return "(" + " OR ".join(f"{column} GLOB '{pattern}'" for pattern in WEBHOOK_COVERAGE_EVENT_GLOBS) + ")"
+
+
+def _webhook_coverage_window(
+    con: sqlite3.Connection,
+    *,
+    retention_days: int,
+    grace_seconds: int,
+) -> tuple[str, str]:
+    end = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+    start = end - timedelta(days=retention_days)
+    first = con.execute("SELECT MIN(created_at) FROM webhook_shadow_receipts").fetchone()[0]
+    if first:
+        start = max(start, _parse_webhook_datetime(str(first), "webhook_created_at"))
+    if start > end:
+        start = end
+    return _webhook_datetime_value(start), _webhook_datetime_value(end)
+
+
+def _encode_webhook_delivery_cursor(created_at: str, delivery_id: str) -> str:
+    payload = json.dumps([created_at, delivery_id], separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_webhook_delivery_cursor(cursor: str) -> tuple[str, str]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_cursor") from exc
+    if not (
+        isinstance(payload, list)
+        and len(payload) == 2
+        and all(isinstance(value, str) and value for value in payload)
+    ):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_cursor")
+    return payload[0], payload[1]
+
+
+def _webhook_admin_url(target_type: str, target: str, hook_id: str) -> str | None:
+    if target_type == "organization" and target and target != "unknown":
+        return f"https://github.com/organizations/{urllib.parse.quote(target, safe='')}/settings/hooks/{urllib.parse.quote(hook_id, safe='')}"
+    if target_type == "repository" and "/" in target:
+        owner, repository = target.split("/", 1)
+        return (
+            f"https://github.com/{urllib.parse.quote(owner, safe='')}/"
+            f"{urllib.parse.quote(repository, safe='')}/settings/hooks/{urllib.parse.quote(hook_id, safe='')}"
+        )
+    return None
+
+
+def _webhook_hook_status(row: sqlite3.Row) -> str:
+    if not row["active"]:
+        return "inactive"
+    if row["last_event_at"]:
+        return "receiving"
+    if row["last_ping_at"]:
+        return "quiet"
+    return "never_seen"
+
+
+def _webhook_hook_payload(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": row["hook_id"],
+        "target": row["target"],
+        "target_type": row["target_type"],
+        "name": row["name"],
+        "active": bool(row["active"]),
+        "events": json.loads(row["events_json"] or "[]"),
+        "content_type": row["content_type"],
+        "ssl_verify": None if row["insecure_ssl"] is None else not bool(row["insecure_ssl"]),
+        "delivery_url": row["delivery_url"],
+        "github_api_url": row["github_api_url"],
+        "ping_url": row["ping_url"],
+        "deliveries_url": row["deliveries_url"],
+        "github_created_at": row["github_created_at"],
+        "github_updated_at": row["github_updated_at"],
+        "last_ping_at": row["last_ping_at"],
+        "last_event_at": row["last_event_at"],
+        "last_delivery_id": row["last_delivery_id"],
+        "last_event_name": row["last_event_name"],
+        "last_action": row["last_action"],
+        "last_repository": row["last_repository"],
+        "last_result": row["last_result"],
+        "status": _webhook_hook_status(row),
+        "admin_url": _webhook_admin_url(row["target_type"], row["target"], row["hook_id"]),
+    }
+
+
+def _webhook_delivery_payload(row: sqlite3.Row) -> dict[str, Any]:
+    hook = None
+    if row["hook_id"]:
+        hook = {
+            "id": row["hook_id"],
+            "target": row["hook_target"],
+            "target_type": row["hook_target_type"],
+            "admin_url": (
+                _webhook_admin_url(row["hook_target_type"], row["hook_target"], row["hook_id"])
+                if row["hook_target"] and row["hook_target_type"] else None
+            ),
+        }
+    return {
+        "delivery_id": row["delivery_id"],
+        "hook_id": row["hook_id"],
+        "hook": hook,
+        "event_name": row["event_name"],
+        "action": row["action"],
+        "event_key": row["event_key"],
+        "repository": row["repository"],
+        "status": row["status"],
+        "enqueue_status": row["enqueue_status"],
+        "job_id": row["job_id"],
+        "duplicate_count": row["duplicate_count"],
+        "created_at": row["created_at"],
+    }
+
+
+def _webhook_ping_endpoint(row: sqlite3.Row) -> str:
+    hook_id = str(row["hook_id"])
+    target = str(row["target"])
+    if row["target_type"] == "organization":
+        path = f"/orgs/{urllib.parse.quote(target, safe='')}/hooks/{urllib.parse.quote(hook_id, safe='')}/pings"
+    elif row["target_type"] == "repository" and target.count("/") == 1:
+        owner, repository = target.split("/", 1)
+        path = (
+            f"/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repository, safe='')}"
+            f"/hooks/{urllib.parse.quote(hook_id, safe='')}/pings"
+        )
+    else:
+        raise ValueError("webhook_ping_target_invalid")
+    parsed = urllib.parse.urlparse(str(row["ping_url"] or ""))
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "api.github.com"
+        or parsed.path != path
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("webhook_ping_url_invalid")
+    return path
+
+
+def _request_webhook_ping(endpoint: str, *, gh_bin: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [gh_bin, "api", "--method", "POST", endpoint],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=15,
+    )
+
+
 class DashboardConfig:
     def __init__(
         self,
@@ -114,6 +308,14 @@ class DashboardConfig:
         static_dir: str | Path | None = None,
         public_url: str | None = None,
         web_push_public_key: str | None = None,
+        webhook_secrets: tuple[str, ...] | None = None,
+        webhook_secrets_by_owner: dict[str, tuple[str, ...]] | None = None,
+        webhook_max_bytes: int | None = None,
+        webhook_retention_days: int | None = None,
+        webhook_coverage_grace_seconds: int | None = None,
+        webhook_mode: str | None = None,
+        webhook_policy: str | Path | None = None,
+        webhook_primary_ack: bool | None = None,
     ) -> None:
         self.db = Path(db).expanduser()
         self.secret_key = secret_key or os.getenv("GITHUB_AGENT_BRIDGE_DASHBOARD_SECRET_KEY", "")
@@ -128,6 +330,39 @@ class DashboardConfig:
         self.static_dir = Path(static_dir or os.getenv("GITHUB_AGENT_BRIDGE_DASHBOARD_STATIC_DIR", Path(__file__).with_name("dashboard_static"))).expanduser()
         self.public_url = (public_url if public_url is not None else os.getenv("GITHUB_AGENT_BRIDGE_DASHBOARD_PUBLIC_URL", "")).rstrip("/")
         self.web_push_public_key = web_push_public_key if web_push_public_key is not None else os.getenv("GITHUB_AGENT_BRIDGE_WEB_PUSH_VAPID_PUBLIC_KEY", "")
+        self.webhook_secrets = webhook_secrets if webhook_secrets is not None else tuple(
+            value for value in (
+                os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_SECRET", ""),
+                os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_PREVIOUS_SECRET", ""),
+            ) if value
+        )
+        self.webhook_secrets_by_owner = webhook_secrets_by_owner if webhook_secrets_by_owner is not None else _webhook_secrets_by_owner_env()
+        self.webhook_max_bytes = webhook_max_bytes or int(os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_MAX_BYTES", "1048576"))
+        self.webhook_retention_days = webhook_retention_days or int(os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_RETENTION_DAYS", "30"))
+        self.webhook_coverage_grace_seconds = max(
+            0,
+            (
+                webhook_coverage_grace_seconds
+                if webhook_coverage_grace_seconds is not None
+                else int(os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_COVERAGE_GRACE_SECONDS", "600"))
+            ),
+        )
+        self.webhook_mode = (webhook_mode or os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_MODE", "shadow")).lower()
+        if self.webhook_mode not in {"shadow", "canary", "primary"}:
+            raise ValueError("GITHUB_AGENT_BRIDGE_WEBHOOK_MODE must be shadow, canary, or primary")
+        policy_value = _expand_systemd_home_specifier(
+            str(webhook_policy or os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_POLICY", ""))
+        )
+        self.webhook_policy = Path(policy_value).expanduser() if policy_value else None
+        if self.webhook_mode in {"canary", "primary"} and self.webhook_policy is None:
+            raise ValueError("GITHUB_AGENT_BRIDGE_WEBHOOK_POLICY is required in canary or primary mode")
+        self.webhook_primary_ack = (
+            webhook_primary_ack
+            if webhook_primary_ack is not None
+            else os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_PRIMARY_ACK", "").lower() in {"1", "true", "yes"}
+        )
+        if self.webhook_mode == "primary" and not self.webhook_primary_ack:
+            raise ValueError("primary webhook mode requires GITHUB_AGENT_BRIDGE_WEBHOOK_PRIMARY_ACK=true")
 
     @property
     def oauth_ready(self) -> bool:
@@ -147,6 +382,27 @@ def _csv_env(name: str) -> set[str]:
     return {part.strip().lower() for part in raw.split(",") if part.strip()}
 
 
+def _webhook_secrets_by_owner_env() -> dict[str, tuple[str, ...]]:
+    raw = os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_SECRETS_BY_OWNER", "")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("GITHUB_AGENT_BRIDGE_WEBHOOK_SECRETS_BY_OWNER must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("GITHUB_AGENT_BRIDGE_WEBHOOK_SECRETS_BY_OWNER must be a JSON object")
+    result: dict[str, tuple[str, ...]] = {}
+    for owner, values in parsed.items():
+        if not isinstance(owner, str) or not owner.strip() or not isinstance(values, list):
+            raise ValueError("webhook owner secrets must map owner names to JSON arrays")
+        owner_secrets = tuple(value for value in values if isinstance(value, str) and value)
+        if not owner_secrets or len(owner_secrets) != len(values):
+            raise ValueError("each webhook owner must have one or more non-empty string secrets")
+        result[owner.strip().lower()] = owner_secrets
+    return result
+
+
 def _env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
@@ -155,6 +411,7 @@ def _autoupdate_systemd_units() -> dict[str, str]:
     return {
         "executor": _env("GITHUB_AGENT_BRIDGE_EXECUTOR_UNIT", "github-agent-bridge.service"),
         "dashboard": _env("GITHUB_AGENT_BRIDGE_DASHBOARD_UNIT", "github-agent-bridge-dashboard.service"),
+        "webhook": _env("GITHUB_AGENT_BRIDGE_WEBHOOK_UNIT", "github-agent-bridge-webhook.service"),
         "reader": _env("GITHUB_AGENT_BRIDGE_READER_TIMER_UNIT", "github-agent-bridge-reader.timer"),
         "monitor": _env("GITHUB_AGENT_BRIDGE_MONITOR_TIMER_UNIT", "github-agent-bridge-monitor.timer"),
         "feedback": _env("GITHUB_AGENT_BRIDGE_FEEDBACK_TIMER_UNIT", "github-agent-bridge-feedback.timer"),
@@ -486,6 +743,124 @@ def _is_admin(config: DashboardConfig, login: str, token: str | None = None) -> 
     return False
 
 
+def _webhook_schema_initializer(config: DashboardConfig):
+    lock = threading.Lock()
+    ready = False
+
+    def ensure() -> None:
+        nonlocal ready
+        if ready:
+            return
+        with lock:
+            if not ready:
+                JobQueue(config.db)
+                ready = True
+
+    return ensure
+
+
+async def _receive_github_webhook(
+    request: Request,
+    config: DashboardConfig,
+    ensure_webhook_schema,
+) -> dict[str, Any]:
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="application_json_required")
+    delivery_id = request.headers.get("x-github-delivery", "").strip()
+    event_name = request.headers.get("x-github-event", "").strip()
+    hook_id = request.headers.get("x-github-hook-id", "").strip() or None
+    signature = request.headers.get("x-hub-signature-256", "").strip()
+    if not delivery_id or not event_name:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="github_headers_required")
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > config.webhook_max_bytes:
+                raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="payload_too_large")
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_content_length")
+    raw_payload = await request.body()
+    if len(raw_payload) > config.webhook_max_bytes:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="payload_too_large")
+    try:
+        payload = json.loads(raw_payload)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_json")
+    repository = payload.get("repository") if isinstance(payload, dict) else None
+    full_name = repository.get("full_name") if isinstance(repository, dict) else None
+    owner = str(full_name or "").partition("/")[0].lower()
+    if config.webhook_secrets_by_owner:
+        webhook_secrets = config.webhook_secrets_by_owner.get(owner, ())
+        if not webhook_secrets:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="repository_owner_not_allowed")
+    else:
+        webhook_secrets = config.webhook_secrets
+    if not verify_signature(raw_payload, signature, webhook_secrets):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_signature")
+    ensure_webhook_schema()
+    enqueue_status = None
+    job_id = None
+    if config.webhook_mode in {"canary", "primary"}:
+        policy = Policy.from_file(config.webhook_policy)
+        repo = str(full_name or "").lower()
+        sender = payload.get("sender") if isinstance(payload.get("sender"), dict) else {}
+        sender_login = str(sender.get("login") or "").lower()
+        if config.webhook_mode == "canary" and repo not in policy.webhook_canary_repos:
+            enqueue_status = "outside_canary"
+        elif sender_login in policy.bot_logins:
+            enqueue_status = "ignored_bot"
+        else:
+            notification = webhook_notification(
+                event_name,
+                delivery_id,
+                payload,
+                bot_logins=policy.bot_logins,
+            )
+            if notification is None:
+                enqueue_status = "ignored"
+            else:
+                job, enqueue_status = JobQueue(config.db).ingest(
+                    notification, policy, source="webhook", source_key=delivery_id,
+                )
+                job_id = job.id if job else None
+    receipt = persist_shadow_delivery(
+        config.db,
+        delivery_id=delivery_id,
+        event_name=event_name,
+        raw_payload=raw_payload,
+        hook_id=hook_id,
+        retention_days=config.webhook_retention_days,
+        enqueue_status=enqueue_status,
+        job_id=job_id,
+    )
+    response = {
+        "mode": config.webhook_mode,
+        "status": receipt.status,
+        "event_key": receipt.event_key,
+    }
+    if config.webhook_mode != "shadow":
+        response.update({"enqueue_status": enqueue_status, "job_id": job_id})
+    return response
+
+
+def create_webhook_app(config: DashboardConfig | None = None) -> FastAPI:
+    configure_sentry(service="webhook-ingress")
+    config = config or DashboardConfig()
+    ensure_webhook_schema = _webhook_schema_initializer(config)
+    app = FastAPI(title="GitHub Agent Bridge Webhook Ingress")
+    app.state.dashboard_config = config
+
+    @app.get("/api/health")
+    def health() -> dict[str, Any]:
+        return {"ok": True, "service": "github-agent-bridge-webhook-ingress"}
+
+    @app.post("/api/webhooks/github")
+    async def github_webhook(request: Request) -> dict[str, Any]:
+        return await _receive_github_webhook(request, config, ensure_webhook_schema)
+
+    return app
+
+
 def create_app(config: DashboardConfig | None = None) -> FastAPI:
     configure_sentry(service="dashboard")
     config = config or DashboardConfig()
@@ -502,6 +877,8 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     app = FastAPI(title="GitHub Agent Bridge Dashboard API", lifespan=lifespan)
     app.state.dashboard_config = config
     app.state.dashboard_shutdown_event = shutdown_event
+    ensure_webhook_schema = _webhook_schema_initializer(config)
+
     assets_dir = config.static_dir / "assets"
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="dashboard-assets")
@@ -566,6 +943,390 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             "read_only": False,
         }
 
+    @app.post("/api/webhooks/github")
+    async def github_webhook_shadow(request: Request) -> dict[str, Any]:
+        return await _receive_github_webhook(request, config, ensure_webhook_schema)
+
+    @app.get("/api/webhooks/github/status")
+    @app.get("/api/webhooks/github/summary")
+    def github_webhook_shadow_summary(_: dict[str, Any] = Depends(current_admin_profile)) -> dict[str, Any]:
+        ensure_webhook_schema()
+        with sqlite3.connect(config.db) as con:
+            con.row_factory = sqlite3.Row
+            window_start, window_end = _webhook_coverage_window(
+                con,
+                retention_days=config.webhook_retention_days,
+                grace_seconds=config.webhook_coverage_grace_seconds,
+            )
+            receipt = con.execute(
+                "SELECT COALESCE(SUM(CASE WHEN status='observed' THEN 1 ELSE 0 END),0) observed,"
+                "COALESCE(SUM(CASE WHEN status='unsupported' THEN 1 ELSE 0 END),0) unsupported,"
+                "COALESCE(SUM(duplicate_count),0) duplicate_deliveries FROM webhook_shadow_receipts"
+            ).fetchone()
+            coverage = con.execute(
+                "WITH email_events AS ("
+                " SELECT event_key,MIN(created_at) created_at FROM ingest_receipts"
+                f" WHERE source='email' AND julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_webhook_coverage_predicate('event_key')}"
+                " GROUP BY event_key"
+                "), webhook_events AS ("
+                " SELECT event_key,MIN(created_at) created_at FROM webhook_shadow_receipts"
+                f" WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_webhook_coverage_predicate('event_key')}"
+                " GROUP BY event_key"
+                ") SELECT"
+                " (SELECT COUNT(*) FROM email_events) imap_events,"
+                " (SELECT COUNT(*) FROM webhook_events) webhook_events,"
+                " (SELECT COUNT(*) FROM email_events JOIN webhook_events USING(event_key)) both_events,"
+                " (SELECT AVG(ABS((julianday(w.created_at)-julianday(i.created_at))*86400000.0))"
+                "  FROM email_events i JOIN webhook_events w USING(event_key)) match_delay_ms",
+                (window_start, window_end, window_start, window_end),
+            ).fetchone()
+            inventory = con.execute(
+                "SELECT (SELECT COUNT(*) FROM webhook_hooks) hooks,"
+                "(SELECT COUNT(*) FROM webhook_shadow_receipts) deliveries"
+            ).fetchone()
+            enqueue = {
+                str(row["enqueue_status"]): int(row["count"])
+                for row in con.execute(
+                    "SELECT enqueue_status,COUNT(*) count FROM webhook_shadow_receipts "
+                    "WHERE enqueue_status IS NOT NULL GROUP BY enqueue_status"
+                )
+            }
+        counts = {
+            name: count
+            for name, count in (("observed", receipt["observed"]), ("unsupported", receipt["unsupported"]))
+            if count
+        }
+        return {
+            "mode": config.webhook_mode,
+            "configured": bool(config.webhook_secrets or config.webhook_secrets_by_owner),
+            "receipts": counts,
+            "duplicate_deliveries": receipt["duplicate_deliveries"],
+            "cross_source_matches": coverage["both_events"],
+            "enqueue": enqueue,
+            "totals": {"hooks": inventory["hooks"], "deliveries": inventory["deliveries"]},
+            "coverage": {
+                "both": coverage["both_events"],
+                "imap_only": max(coverage["imap_events"] - coverage["both_events"], 0),
+                "webhook_only": max(coverage["webhook_events"] - coverage["both_events"], 0),
+                "imap_eligible": coverage["imap_events"],
+                "ratio": (
+                    coverage["both_events"] / coverage["imap_events"]
+                    if coverage["imap_events"] else None
+                ),
+                "mean_match_delay_ms": (
+                    round(coverage["match_delay_ms"], 1)
+                    if coverage["match_delay_ms"] is not None else None
+                ),
+                "window_start": window_start,
+                "window_end": window_end,
+                "grace_seconds": config.webhook_coverage_grace_seconds,
+            },
+        }
+
+    @app.get("/api/webhooks/github/exceptions")
+    def github_webhook_shadow_exceptions(
+        limit: int = Query(50, ge=1, le=100),
+        _: dict[str, Any] = Depends(current_admin_profile),
+    ) -> dict[str, Any]:
+        """Return bounded, actionable shadow divergences without loading all receipts."""
+        ensure_webhook_schema()
+        with sqlite3.connect(config.db) as con:
+            con.row_factory = sqlite3.Row
+            window_start, window_end = _webhook_coverage_window(
+                con,
+                retention_days=config.webhook_retention_days,
+                grace_seconds=config.webhook_coverage_grace_seconds,
+            )
+            rows = con.execute(
+                "WITH email_events AS ("
+                " SELECT event_key,source_key,created_at FROM ingest_receipts"
+                f" WHERE source='email' AND julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_webhook_coverage_predicate('event_key')}"
+                "), webhook_events AS ("
+                " SELECT event_key,delivery_id,created_at,repository FROM webhook_shadow_receipts"
+                f" WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_webhook_coverage_predicate('event_key')}"
+                "), candidates AS ("
+                " SELECT 'imap_only' kind,i.event_key,i.source_key reference,i.created_at,NULL repository "
+                " FROM email_events i WHERE NOT EXISTS ("
+                "  SELECT 1 FROM webhook_events w WHERE w.event_key=i.event_key"
+                " ) UNION ALL "
+                " SELECT 'webhook_only',w.event_key,w.delivery_id,w.created_at,w.repository "
+                " FROM webhook_events w WHERE NOT EXISTS ("
+                "  SELECT 1 FROM email_events i WHERE i.event_key=w.event_key"
+                " ) UNION ALL "
+                " SELECT 'unmatchable',NULL,w.delivery_id,w.created_at,w.repository "
+                " FROM webhook_shadow_receipts w WHERE w.event_key IS NULL"
+                " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
+                ") SELECT kind,event_key,reference,created_at,repository FROM candidates "
+                "ORDER BY created_at DESC LIMIT ?",
+                (
+                    window_start, window_end, window_start, window_end,
+                    window_start, window_end, limit,
+                ),
+            ).fetchall()
+        return {
+            "exceptions": [dict(row) for row in rows],
+            "window_start": window_start,
+            "window_end": window_end,
+            "grace_seconds": config.webhook_coverage_grace_seconds,
+        }
+
+    @app.get("/api/webhooks/github/timeseries")
+    def github_webhook_shadow_timeseries(
+        from_value: str | None = Query(None, alias="from"),
+        to_value: str | None = Query(None, alias="to"),
+        bucket: str = Query("day", pattern="^(hour|day)$"),
+        _: dict[str, Any] = Depends(current_admin_profile),
+    ) -> dict[str, Any]:
+        ensure_webhook_schema()
+        end = _parse_webhook_datetime(to_value, "to") if to_value else datetime.now(UTC)
+        default_days = min(config.webhook_retention_days, WEBHOOK_TIMESERIES_MAX_DAYS)
+        start = _parse_webhook_datetime(from_value, "from") if from_value else end - timedelta(days=default_days)
+        maximum = WEBHOOK_TIMESERIES_MAX_HOURLY_DAYS if bucket == "hour" else WEBHOOK_TIMESERIES_MAX_DAYS
+        if start >= end:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_time_range")
+        if end - start > timedelta(days=maximum):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="time_range_too_large")
+        start_value = _webhook_datetime_value(start)
+        end_value = _webhook_datetime_value(end)
+        bucket_expression = "substr(created_at,1,13) || ':00:00Z'" if bucket == "hour" else "substr(created_at,1,10)"
+        with sqlite3.connect(config.db) as con:
+            rows = con.execute(
+                f"SELECT {bucket_expression}, "
+                "SUM(CASE WHEN status='observed' THEN 1 ELSE 0 END), "
+                "SUM(duplicate_count), SUM(CASE WHEN status='unsupported' THEN 1 ELSE 0 END) "
+                "FROM webhook_shadow_receipts WHERE created_at>=? AND created_at<? "
+                "GROUP BY 1 ORDER BY 1",
+                (start_value, end_value),
+            ).fetchall()
+        return {
+            "from": start_value,
+            "to": end_value,
+            "bucket": bucket,
+            "points": [
+                {"bucket": row[0], "observed": row[1], "duplicate": row[2], "unsupported": row[3]}
+                for row in rows
+            ],
+        }
+
+    @app.get("/api/webhooks/github/hooks")
+    def github_webhook_shadow_hooks(
+        limit: int = Query(50, ge=1, le=100),
+        cursor: str | None = Query(None),
+        _: dict[str, Any] = Depends(current_admin_profile),
+    ) -> dict[str, Any]:
+        ensure_webhook_schema()
+        where = ""
+        parameters: list[Any] = []
+        if cursor:
+            cursor_updated_at, cursor_hook_id = _decode_webhook_delivery_cursor(cursor)
+            where = "WHERE updated_at<? OR (updated_at=? AND hook_id<?)"
+            parameters.extend((cursor_updated_at, cursor_updated_at, cursor_hook_id))
+        parameters.append(limit + 1)
+        with sqlite3.connect(config.db) as con:
+            con.row_factory = sqlite3.Row
+            hook_rows = con.execute(
+                "SELECT hook_id,target,target_type,name,active,events_json,content_type,insecure_ssl,delivery_url,"
+                "github_api_url,ping_url,deliveries_url,github_created_at,github_updated_at,last_ping_at,last_event_at,"
+                "last_delivery_id,last_event_name,last_action,last_repository,last_result,updated_at "
+                f"FROM webhook_hooks {where} ORDER BY updated_at DESC,hook_id DESC LIMIT ?",
+                parameters,
+            ).fetchall()
+        page = hook_rows[:limit]
+        next_cursor = None
+        if len(hook_rows) > limit and page:
+            next_cursor = _encode_webhook_delivery_cursor(page[-1]["updated_at"], page[-1]["hook_id"])
+        return {
+            "hooks": [_webhook_hook_payload(row) for row in page],
+            "next_cursor": next_cursor,
+        }
+
+    @app.get("/api/webhooks/github/hooks/{hook_id}")
+    def github_webhook_shadow_hook_detail(
+        hook_id: str,
+        _: dict[str, Any] = Depends(current_admin_profile),
+    ) -> dict[str, Any]:
+        ensure_webhook_schema()
+        with sqlite3.connect(config.db) as con:
+            con.row_factory = sqlite3.Row
+            hook = con.execute(
+                "SELECT hook_id,target,target_type,name,active,events_json,content_type,insecure_ssl,delivery_url,"
+                "github_api_url,ping_url,deliveries_url,github_created_at,github_updated_at,last_ping_at,last_event_at,"
+                "last_delivery_id,last_event_name,last_action,last_repository,last_result,updated_at "
+                "FROM webhook_hooks WHERE hook_id=?",
+                (hook_id,),
+            ).fetchone()
+            if hook is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="webhook_hook_not_found")
+            stats = con.execute(
+                "SELECT COUNT(*) deliveries,COALESCE(SUM(duplicate_count),0) duplicates,"
+                "SUM(CASE WHEN status='unsupported' THEN 1 ELSE 0 END) unsupported "
+                "FROM webhook_shadow_receipts WHERE hook_id=?",
+                (hook_id,),
+            ).fetchone()
+            recent = con.execute(
+                "SELECT r.delivery_id,r.hook_id,r.event_name,r.action,r.event_key,r.repository,r.status,"
+                "r.enqueue_status,r.job_id,"
+                "r.duplicate_count,r.created_at,h.target hook_target,h.target_type hook_target_type "
+                "FROM webhook_shadow_receipts r LEFT JOIN webhook_hooks h ON h.hook_id=r.hook_id "
+                "WHERE r.hook_id=? ORDER BY r.created_at DESC,r.delivery_id DESC LIMIT 20",
+                (hook_id,),
+            ).fetchall()
+            recent_actions = con.execute(
+                "SELECT id,action,actor,status,detail,created_at,completed_at "
+                "FROM webhook_hook_actions WHERE hook_id=? ORDER BY created_at DESC,id DESC LIMIT 10",
+                (hook_id,),
+            ).fetchall()
+        return {
+            "hook": _webhook_hook_payload(hook),
+            "stats": {
+                "deliveries": stats["deliveries"],
+                "duplicates": stats["duplicates"],
+                "unsupported": stats["unsupported"] or 0,
+            },
+            "recent_deliveries": [_webhook_delivery_payload(row) for row in recent],
+            "recent_actions": [dict(row) for row in recent_actions],
+        }
+
+    @app.post("/api/webhooks/github/hooks/{hook_id}/ping")
+    def github_webhook_hook_ping(
+        hook_id: str,
+        profile: dict[str, Any] = Depends(current_admin_profile),
+    ) -> dict[str, Any]:
+        ensure_webhook_schema()
+        created_at = datetime.now(UTC).isoformat()
+        with sqlite3.connect(config.db) as con:
+            con.row_factory = sqlite3.Row
+            hook = con.execute(
+                "SELECT hook_id,target,target_type,ping_url FROM webhook_hooks WHERE hook_id=?",
+                (hook_id,),
+            ).fetchone()
+            if hook is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="webhook_hook_not_found")
+            try:
+                endpoint = _webhook_ping_endpoint(hook)
+            except ValueError as exc:
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+            cursor = con.execute(
+                "INSERT INTO webhook_hook_actions(hook_id,action,actor,status,created_at) VALUES(?,?,?,?,?)",
+                (hook_id, "ping", str(profile["login"]), "requested", created_at),
+            )
+            action_id = int(cursor.lastrowid)
+            con.commit()
+
+        def finish(action_status: str, detail: str) -> None:
+            with sqlite3.connect(config.db) as con:
+                con.execute(
+                    "UPDATE webhook_hook_actions SET status=?,detail=?,completed_at=? WHERE id=?",
+                    (action_status, detail[:1000], datetime.now(UTC).isoformat(), action_id),
+                )
+                con.commit()
+
+        try:
+            result = _request_webhook_ping(endpoint, gh_bin=_env("GITHUB_AGENT_BRIDGE_GH_BIN", "gh"))
+        except FileNotFoundError as exc:
+            finish("failed", "gh executable not found")
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="github_cli_unavailable") from exc
+        except subprocess.TimeoutExpired as exc:
+            finish("failed", "GitHub ping request timed out")
+            raise HTTPException(status_code=status.HTTP_504_GATEWAY_TIMEOUT, detail="github_webhook_ping_timeout") from exc
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or f"gh exited {result.returncode}"
+            finish("failed", detail)
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="github_webhook_ping_failed")
+        finish("succeeded", "GitHub accepted the ping request")
+        return {
+            "action_id": action_id,
+            "hook_id": hook_id,
+            "status": "succeeded",
+            "detail": "GitHub accepted the ping request; configuration will refresh when delivery arrives.",
+        }
+
+    @app.get("/api/webhooks/github/deliveries")
+    def github_webhook_shadow_deliveries(
+        limit: int = Query(50, ge=1, le=100),
+        cursor: str | None = Query(None),
+        hook_id: str | None = Query(None),
+        event_name: str | None = Query(None),
+        repository: str | None = Query(None),
+        result: str | None = Query(None),
+        enqueue_status: str | None = Query(None),
+        _: dict[str, Any] = Depends(current_admin_profile),
+    ) -> dict[str, Any]:
+        ensure_webhook_schema()
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if cursor:
+            cursor_created_at, cursor_delivery_id = _decode_webhook_delivery_cursor(cursor)
+            clauses.append("(r.created_at<? OR (r.created_at=? AND r.delivery_id<?))")
+            parameters.extend((cursor_created_at, cursor_created_at, cursor_delivery_id))
+        for column, value in (
+            ("r.hook_id", hook_id),
+            ("r.event_name", event_name),
+            ("r.repository", repository),
+            ("r.status", result),
+            ("r.enqueue_status", enqueue_status),
+        ):
+            if value:
+                clauses.append(f"{column}=?")
+                parameters.append(value)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        parameters.append(limit + 1)
+        with sqlite3.connect(config.db) as con:
+            con.row_factory = sqlite3.Row
+            delivery_rows = con.execute(
+                "SELECT r.delivery_id,r.hook_id,r.event_name,r.action,r.event_key,r.repository,r.status,"
+                "r.enqueue_status,r.job_id,"
+                "r.duplicate_count,r.created_at,h.target hook_target,h.target_type hook_target_type "
+                f"FROM webhook_shadow_receipts r LEFT JOIN webhook_hooks h ON h.hook_id=r.hook_id {where} "
+                "ORDER BY r.created_at DESC,r.delivery_id DESC LIMIT ?",
+                parameters,
+            ).fetchall()
+        page = delivery_rows[:limit]
+        next_cursor = None
+        if len(delivery_rows) > limit and page:
+            next_cursor = _encode_webhook_delivery_cursor(page[-1]["created_at"], page[-1]["delivery_id"])
+        return {
+            "deliveries": [_webhook_delivery_payload(row) for row in page],
+            "next_cursor": next_cursor,
+        }
+
+    @app.get("/api/webhooks/github/deliveries/{delivery_id}")
+    def github_webhook_delivery_detail(
+        delivery_id: str,
+        _: dict[str, Any] = Depends(current_admin_profile),
+    ) -> dict[str, Any]:
+        ensure_webhook_schema()
+        with sqlite3.connect(config.db) as con:
+            con.row_factory = sqlite3.Row
+            row = con.execute(
+                "SELECT r.delivery_id,r.hook_id,r.event_name,r.action,r.event_key,r.repository,r.status,"
+                "r.enqueue_status,r.duplicate_count,r.created_at,r.payload_hash,r.payload_json,"
+                "h.target hook_target,h.target_type hook_target_type,"
+                "j.id job_id,j.work_key job_work_key,j.status job_status,j.action job_action,"
+                "j.decision job_decision,j.work_intent job_work_intent,j.updated_at job_updated_at "
+                "FROM webhook_shadow_receipts r "
+                "LEFT JOIN webhook_hooks h ON h.hook_id=r.hook_id "
+                "LEFT JOIN ingest_receipts i ON i.source='webhook' AND i.source_key=r.delivery_id "
+                "LEFT JOIN jobs j ON j.id=COALESCE(r.job_id,i.job_id) WHERE r.delivery_id=?",
+                (delivery_id,),
+            ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="webhook_delivery_not_found")
+        payload = json.loads(row["payload_json"]) if row["payload_json"] else None
+        job = None
+        if row["job_id"] is not None:
+            job = {
+                "id": row["job_id"], "work_key": row["job_work_key"], "status": row["job_status"],
+                "action": row["job_action"], "decision": row["job_decision"],
+                "work_intent": row["job_work_intent"], "updated_at": row["job_updated_at"],
+            }
+        return {
+            "delivery": _webhook_delivery_payload(row),
+            "payload_hash": row["payload_hash"],
+            "payload": payload,
+            "job": job,
+        }
+
     def dashboard_index() -> FileResponse:
         index = config.static_dir / "index.html"
         if not index.exists():
@@ -618,6 +1379,14 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             return redirect
         return dashboard_index()
 
+    @app.get("/webhooks")
+    @app.get("/webhooks/{webhook_path:path}")
+    async def dashboard_webhooks(request: Request, webhook_path: str = "") -> Response:
+        redirect = await require_dashboard_profile_or_login(request)
+        if redirect is not None:
+            return redirect
+        return dashboard_index()
+
     @app.get("/api/status")
     def api_status(request: Request, profile: dict[str, Any] = Depends(current_profile)) -> dict[str, Any]:
         queue = JobQueue(config.db)
@@ -632,6 +1401,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             "delete_knowledge_rule",
             "create_mcp_token",
             "revoke_mcp_token",
+            "ping_webhook",
         ]
         if profile.get("is_admin"):
             admin_actions.extend(["view_autoupdate_plan", "refresh_autoupdate_plan", "apply_autoupdate", "complete_autoupdate_reload"])
@@ -641,6 +1411,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             "dashboard_url": dashboard_url,
             "dashboard_url_source": dashboard_url_source,
             "admin_actions": admin_actions,
+            "webhook_configured": bool(config.webhook_secrets or config.webhook_secrets_by_owner) if profile.get("is_admin") else False,
             "metrics": inspect_db_read_only(config.db),
             "autoupdate": load_update_state(queue) if profile.get("is_admin") else {},
         }
@@ -1092,24 +1863,38 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
 app = create_app()
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser(*, ingress: bool = False) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=Path(sys.argv[0]).name)
     parser.add_argument("--db", default=os.getenv("GITHUB_AGENT_BRIDGE_DASHBOARD_DB", os.getenv("GITHUB_AGENT_BRIDGE_DB", DEFAULT_DB)))
-    parser.add_argument("--host", default=DEFAULT_HOST)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--no-auth", action="store_true", help="disable auth for isolated local development only")
+    parser.add_argument("--host", default=os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_HOST", DEFAULT_HOST) if ingress else DEFAULT_HOST)
+    parser.add_argument("--port", type=int, default=int(os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_PORT", "8766")) if ingress else DEFAULT_PORT)
+    parser.add_argument("--fd", type=int, help="serve an inherited systemd socket file descriptor")
+    if not ingress:
+        parser.add_argument("--no-auth", action="store_true", help="disable auth for isolated local development only")
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+def _serve_uvicorn(application: FastAPI, args: argparse.Namespace) -> int:
     try:
         import uvicorn
     except ImportError:
         print("uvicorn is required; install github-agent-bridge[dashboard]", file=sys.stderr)
         return 2
-    uvicorn.run(create_app(DashboardConfig(db=args.db, require_auth=not args.no_auth)), host=args.host, port=args.port)
+    if args.fd is not None:
+        uvicorn.run(application, fd=args.fd)
+    else:
+        uvicorn.run(application, host=args.host, port=args.port)
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return _serve_uvicorn(create_app(DashboardConfig(db=args.db, require_auth=not args.no_auth)), args)
+
+
+def webhook_main(argv: list[str] | None = None) -> int:
+    args = build_parser(ingress=True).parse_args(argv)
+    return _serve_uvicorn(create_webhook_app(DashboardConfig(db=args.db)), args)
 
 
 if __name__ == "__main__":

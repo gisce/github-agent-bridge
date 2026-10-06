@@ -1,0 +1,17 @@
+[Unit]
+Description=GitHub Agent Bridge webhook ingress
+Requires=github-agent-bridge-webhook.socket
+After=network-online.target github-agent-bridge-webhook.socket
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=GITHUB_AGENT_BRIDGE_DASHBOARD_DB=%h/.local/state/github-agent-bridge/bridge.sqlite3
+EnvironmentFile=-%h/.config/github-agent-bridge/env
+Sockets=github-agent-bridge-webhook.socket
+ExecStart=%h/.local/bin/github-agent-bridge-webhook --fd 3
+Restart=on-failure
+RestartSec=500ms
+
+[Install]
+WantedBy=default.target

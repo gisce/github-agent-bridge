@@ -82,6 +82,30 @@ class ExecutorPool:
             self.stop_event.wait(self.config.heartbeat_interval_seconds)
         self._record_worker_heartbeat(worker_id)
 
+    def acknowledge_one(self, job_id: int | None = None) -> bool:
+        acknowledgement = self.queue.claim_acknowledgement(job_id)
+        if acknowledgement is None:
+            return False
+        acknowledgement_id, acknowledged_job_id, ctx = acknowledgement
+        try:
+            ok = self.github.react_eyes(ctx)
+            self.queue.finish_acknowledgement(acknowledgement_id, ok)
+        except Exception as exc:
+            ok = False
+            self.queue.finish_acknowledgement(acknowledgement_id, False, f"{type(exc).__name__}: {exc}")
+        self.queue.add_worklog(
+            acknowledged_job_id,
+            "acknowledged" if ok else "acknowledgement_failed",
+            "GitHub 👀 reaction added" if ok else "GitHub 👀 reaction failed",
+            ctx.short_url,
+        )
+        return True
+
+    def acknowledge_job(self, job_id: int) -> bool:
+        while self.acknowledge_one(job_id):
+            pass
+        return self.queue.acknowledgement_ok(job_id)
+
     def work_one(self, worker_id: str | None = None) -> bool:
         worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
         self._set_worker_state(worker_id, "claiming")
@@ -103,14 +127,14 @@ class ExecutorPool:
             assigned_to_bot = self.github.is_assigned_to_current_user(job.context)
             authored_by_bot = self.github.is_pull_request_authored_by_current_user(job.context)
             if job.action == "reply_comment" and job.context.review_id and self.github.is_non_actionable_review(job.context):
-                reaction_ok = self.react_eyes_for_job_contexts(job)
+                reaction_ok = self.acknowledge_job(job.id)
                 ack_ok = self.github.react_ack_no_comment(job.context)
                 summary = "non-actionable review; skipped dispatch"
                 detail = f"eyes={reaction_ok} ack={ack_ok}"
                 self.queue.finish(job.id, "done", summary, detail)
                 return True
             if job.action == "reply_comment" and job.context.comment_id and not assigned_to_bot and not self.github.issue_comment_addresses_current_user(job.context):
-                reaction_ok = self.react_eyes_for_job_contexts(job)
+                reaction_ok = self.acknowledge_job(job.id)
                 ack_ok = self.github.react_ack_no_comment(job.context)
                 summary = "comment not addressed to bot and bot not assigned; skipped dispatch"
                 detail = f"eyes={reaction_ok} ack={ack_ok}"
@@ -124,7 +148,7 @@ class ExecutorPool:
                     "review_only retained; assignment/authorship alone does not grant write permission",
                     reason,
                 )
-            reaction_ok = self.react_eyes_for_job_contexts(job)
+            reaction_ok = self.acknowledge_job(job.id)
             self.queue.add_session_event(job.id, "dispatch_started", "OpenClaw agent dispatch started", f"reaction_ok={reaction_ok}")
             complexity = complexity_from_metadata(job.metadata)
             model_route = self.policy.model_route_for(job.repo, job.action, job.work_intent, complexity)
@@ -242,17 +266,10 @@ class ExecutorPool:
         output = f"{result.stdout}\n{result.stderr}\n{result.detail}".lower()
         return "transcript compaction failed" in output or "turn prefix summarization failed" in output
 
-    def react_eyes_for_job_contexts(self, job) -> bool:
-        contexts = [job.context, *self.queue.coalesced_contexts(job.id)]
-        ok = True
-        seen = set()
-        for ctx in contexts:
-            key = (ctx.repo, ctx.issue_number, ctx.comment_id, ctx.review_comment_id, ctx.review_id)
-            if key in seen:
-                continue
-            seen.add(key)
-            ok = self.github.react_eyes(ctx) and ok
-        return ok
+    def _acknowledgement_loop(self) -> None:
+        while not self.stop_event.is_set():
+            if not self.acknowledge_one():
+                time.sleep(self.config.idle_sleep_seconds)
 
     def _loop(self, worker_id: str) -> None:
         while not self.stop_event.is_set():
@@ -328,6 +345,7 @@ class ExecutorPool:
                 "orphaned running job recovered at executor startup",
                 "No prior executor process owns this running job. It was blocked, not auto-requeued, to avoid duplicate external actions.",
             )
+            self.queue.recover_acknowledgements()
             self.queue.set_state("executor_process_tracking_id", self.executor_id)
             self.queue.set_state("executor_worker_count", str(worker_count))
             for worker_id in worker_ids:
@@ -337,15 +355,15 @@ class ExecutorPool:
                 threading.Thread(target=self._heartbeat_loop, args=(worker_id,), daemon=True)
                 for worker_id in worker_ids
             ]
-            for thread in heartbeat_threads:
-                thread.start()
-            threads = [
+            worker_threads = [
                 threading.Thread(target=self._run_worker, args=(worker_id,), daemon=False)
                 for worker_id in worker_ids
             ]
+            acknowledgement_thread = threading.Thread(target=self._acknowledgement_loop, daemon=False)
+            threads = [*heartbeat_threads, *worker_threads, acknowledgement_thread]
             for thread in threads:
                 thread.start()
-            while any(thread.is_alive() for thread in threads):
+            while any(thread.is_alive() for thread in worker_threads):
                 time.sleep(0.5)
         except KeyboardInterrupt:
             self._request_shutdown()
