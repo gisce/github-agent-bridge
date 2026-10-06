@@ -108,6 +108,9 @@ class ExecutorPool:
 
     def work_one(self, worker_id: str | None = None) -> bool:
         worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
+        if self.queue.executor_paused():
+            self._set_worker_state(worker_id, "paused")
+            return False
         self._set_worker_state(worker_id, "claiming")
         job = self.queue.claim_next(worker_id, self.config.work_intents)
         if not job:

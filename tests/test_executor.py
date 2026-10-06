@@ -275,6 +275,21 @@ def test_skipped_job_does_not_emit_completion_push(tmp_path, monkeypatch):
     assert notifications == []
 
 
+def test_paused_executor_does_not_claim_pending_jobs(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_comment(queue)
+    queue.pause_executor("upgrade window")
+    dispatcher = RecordingDispatcher()
+
+    pool = ExecutorPool(queue, Policy(trusted_orgs={"gisce"}), dispatcher, github=FakeGitHub(assigned=True), config=ExecutorConfig(run_once=True))
+
+    assert pool.work_one("worker-test") is False
+    assert dispatcher.jobs == []
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "pending"
+
+
 def test_executor_records_selected_model_route_session_event(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     queue = JobQueue(db)

@@ -70,6 +70,26 @@ def test_queue_expands_user_in_db_path(tmp_path, monkeypatch):
     assert not (tmp_path / "~").exists()
 
 
+def test_executor_pause_state_round_trips_without_schema_change(tmp_path):
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    assert q.executor_pause_state() == {"paused": False}
+    assert q.executor_paused() is False
+
+    q.pause_executor("upgrade window")
+
+    paused = q.executor_pause_state()
+    assert paused["paused"] is True
+    assert paused["reason"] == "upgrade window"
+    assert paused["updated_at"]
+    assert q.executor_paused() is True
+
+    q.resume_executor()
+
+    assert q.executor_pause_state()["paused"] is False
+    assert q.executor_paused() is False
+
+
 def test_connect_recreates_missing_parent_directory(tmp_path):
     q = JobQueue(tmp_path / "missing" / "q.sqlite3")
     for child in q.path.parent.iterdir():

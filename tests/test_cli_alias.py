@@ -18,6 +18,27 @@ def test_feedback_rules_cli_lists_rules(tmp_path, capsys):
     assert '"rules": []' in captured.out
 
 
+def test_pause_resume_executor_cli_updates_queue_state(tmp_path, capsys):
+    db = tmp_path / "q.sqlite3"
+    JobQueue(db)
+
+    cli.main(["--db", str(db), "pause-executor", "--reason", "upgrade window"])
+    paused = capsys.readouterr().out
+    assert '"paused": true' in paused
+    assert '"reason": "upgrade window"' in paused
+    assert JobQueue(db).executor_paused() is True
+
+    cli.main(["--db", str(db), "status"])
+    status = capsys.readouterr().out
+    assert '"executor_pause"' in status
+    assert '"paused": true' in status
+
+    cli.main(["--db", str(db), "resume-executor"])
+    resumed = capsys.readouterr().out
+    assert '"paused": false' in resumed
+    assert JobQueue(db).executor_paused() is False
+
+
 def test_rules_cli_renders_applicable_rules_as_prompt_text(tmp_path, capsys):
     db = tmp_path / "q.sqlite3"
     JobQueue(db)

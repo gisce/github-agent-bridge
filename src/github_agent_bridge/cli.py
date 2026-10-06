@@ -224,7 +224,22 @@ def job_dict(job):
 
 def cmd_status(args: argparse.Namespace) -> int:
     metrics = inspect_db_read_only(args.db)
-    print(json.dumps({"stats": metrics.get("counts", {}), "oldest_pending_age_seconds": metrics.get("oldest_pending_age_seconds")}, ensure_ascii=False, indent=2))
+    queue = JobQueue(args.db)
+    print(json.dumps({"stats": metrics.get("counts", {}), "oldest_pending_age_seconds": metrics.get("oldest_pending_age_seconds"), "executor_pause": queue.executor_pause_state()}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_pause_executor(args: argparse.Namespace) -> int:
+    queue = JobQueue(args.db)
+    queue.pause_executor(args.reason or "")
+    print(json.dumps({"executor_pause": queue.executor_pause_state()}, ensure_ascii=False))
+    return 0
+
+
+def cmd_resume_executor(args: argparse.Namespace) -> int:
+    queue = JobQueue(args.db)
+    queue.resume_executor()
+    print(json.dumps({"executor_pause": queue.executor_pause_state()}, ensure_ascii=False))
     return 0
 
 
@@ -483,6 +498,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--gh-bin", default="gh"); s.add_argument("--channel", default=os.getenv("GITHUB_AGENT_BRIDGE_DEFAULT_CHANNEL", "telegram")); s.add_argument("--to", default=os.getenv("GITHUB_AGENT_BRIDGE_DEFAULT_TO", ""))
     s.set_defaults(func=cmd_run)
     s = sub.add_parser("status"); s.set_defaults(func=cmd_status)
+    s = sub.add_parser("pause-executor", help="pause claiming new pending jobs while still allowing enqueue")
+    s.add_argument("--reason", default="", help="operator-visible reason for the pause")
+    s.set_defaults(func=cmd_pause_executor)
+    s = sub.add_parser("resume-executor", help="resume claiming pending jobs")
+    s.set_defaults(func=cmd_resume_executor)
     s = sub.add_parser("jobs"); s.add_argument("--status"); s.add_argument("--limit", type=int, default=20); s.set_defaults(func=cmd_jobs)
     s = sub.add_parser("retry"); s.add_argument("job_id", type=int); s.set_defaults(func=cmd_retry)
     s = sub.add_parser("dismiss"); s.add_argument("job_id", type=int); s.add_argument("--reason", required=True); s.set_defaults(func=cmd_dismiss)
