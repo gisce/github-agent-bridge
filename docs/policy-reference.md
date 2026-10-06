@@ -759,12 +759,13 @@ Agents must also apply the comment value rule before posting: comment only when 
 
 ## Intent classifier
 
-`intentClassifier` controls an optional enqueue-time LLM classifier for trusted GitHub comments and reviews. It is disabled by default; when enabled, the bridge calls OpenClaw with the packaged `prompt_rules/intent_classifier.md` prompt or `promptOverrides.rules.intent_classifier`, expects JSON output, and uses the result only when confidence is high enough. Low-confidence, invalid, timed-out, or failed classifier calls fall back to the deterministic parser result.
+`intentClassifier` controls an optional enqueue-time LLM classifier for trusted GitHub comments and reviews. It is disabled by default; when enabled, the bridge calls OpenClaw with the packaged `prompt_rules/intent_classifier.md` prompt or `promptOverrides.rules.intent_classifier`, expects JSON output, and uses the result only when confidence is high enough. Low-confidence, invalid, timed-out, or failed webhook comment/review classifier calls fall back to `review_only`; email ingestion keeps the deterministic parser result for backward compatibility.
 
-Classifier calls use `openclaw agent --local`, isolating enqueue-time routing
-from gateway concurrency, event-loop stalls, and gateway SQLite locks. Normal
-executor, feedback-learning, and interactive gateway calls still need suitable
-OpenClaw concurrency headroom; see
+Classifier calls use `openclaw agent exec`, avoiding the long-lived Gateway
+session path for enqueue-time routing. The bridge retries once, limits classifier
+subprocess concurrency, and treats failure as `review_only` for webhook
+comments/reviews. Normal executor, feedback-learning, and interactive gateway
+calls still need suitable OpenClaw concurrency headroom; see
 [`operations.md`](operations.md#openclaw-concurrency-headroom).
 
 The classifier returns structured semantics: whether the event is addressed to the configured agent, the requested action, the work intent, write permission, and the scope of any requested state change. Results not addressed to the configured agent are normalized to `archive_notification` + `review_only`. Results that request `work_allowed` without `write_permission=state_change_allowed` are normalized back to `review_only`.
@@ -794,7 +795,7 @@ Example:
 | `minConfidence` | number | `0.75` | Minimum classifier confidence required before replacing the deterministic parser action/work-intent result. |
 | `onlyWhenParserDefaulted` | boolean | `true` | Run the classifier for conservative comment/review classifications and for bot-mentioned comments even when the parser saw implementation-looking language. Set to `false` to let the classifier arbitrate all eligible trusted GitHub comments and reviews. |
 | `openclawBin` | string | `openclaw` | OpenClaw executable used for classifier subprocess calls. |
-| `sessionId` | string | `github-agent-bridge-intent` | Base session id prefix for classifier calls. The bridge derives an isolated per-event session id from this value plus routed agent and GitHub notification/context data. |
+| `sessionId` | string | `github-agent-bridge-intent` | Backward-compatible setting retained for older deployments. Current classifier execution uses `openclaw agent exec` and does not rely on a long-lived OpenClaw session id. |
 | `timeout` | integer | `60` | Maximum seconds to wait for one classifier call before falling back to parser behavior. |
 
 The classifier runs before policy decision mapping, but it does not grant trust or bypass authorization. Source trust, `enabledRepos`, `actions`, `trustedRepos`, `trustedOrgs`, routes, roles, and the final `Policy.decision` checks still apply after classification.

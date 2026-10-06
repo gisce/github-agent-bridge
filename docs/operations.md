@@ -79,10 +79,11 @@ count. Otherwise four busy workers can fill a four-slot OpenClaw queue and
 starve other gateway work.
 
 The enqueue-time intent classifier is deliberately different: the bridge calls
-`openclaw agent --local` for an isolated one-shot classification. This keeps the
-reader independent from gateway queue saturation, event-loop stalls, and
-gateway SQLite lock contention. Classifier calls are sequential in the reader,
-so they do not add another pool of concurrent bridge jobs.
+`openclaw agent exec` for a one-shot classification. This avoids depending on
+the long-lived Gateway session path for the permission decision. The bridge
+limits classifier subprocess concurrency, retries once, and treats webhook
+comment/review classifier failure as `review_only`, so a classifier outage cannot
+elevate webhook work to `work_allowed`.
 
 For the standard four-worker deployment, use eight OpenClaw slots:
 

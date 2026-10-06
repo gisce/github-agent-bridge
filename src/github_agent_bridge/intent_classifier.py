@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,9 @@ ALLOWED_WRITE_PERMISSIONS = {"none", "state_change_allowed"}
 ALLOWED_COMPLEXITIES = {"mechanical", "substantive"}
 INTENT_CLASSIFIER_PROMPT = load_prompt_rule("intent_classifier.md")
 COMMENT_TARGET_KINDS = {"issue_comment", "review_comment", "commit_comment", "review"}
+INTENT_CLASSIFIER_CONCURRENCY = 2
+INTENT_CLASSIFIER_ATTEMPTS = 2
+_INTENT_CLASSIFIER_SEMAPHORE = threading.BoundedSemaphore(INTENT_CLASSIFIER_CONCURRENCY)
 
 
 @dataclass(frozen=True)
@@ -199,47 +203,57 @@ def classify_notification_with_llm(
     agent: str | None = None,
     prompt_template: str | None = None,
 ) -> IntentClassification:
+    prompt = build_intent_prompt(n, ctx, parser_result, prompt_template, policy=policy, agent=agent)
     cmd = [
         cfg.openclaw_bin,
         "agent",
-        "--local",
+        "exec",
         "--json",
-        "--session-id",
-        intent_session_id(cfg.session_id, n, ctx, agent),
         "--timeout",
         str(cfg.timeout),
         "--thinking",
         cfg.thinking,
-        "--message",
-        build_intent_prompt(n, ctx, parser_result, prompt_template, policy=policy, agent=agent),
+        "--message-file",
+        "-",
     ]
-    if agent:
-        cmd.extend(["--agent", agent])
     if cfg.model:
         cmd.extend(["--model", cfg.model])
     env = os.environ.copy()
     openclaw_dir = os.path.dirname(cfg.openclaw_bin)
     if openclaw_dir:
         env["PATH"] = openclaw_dir + os.pathsep + env.get("PATH", "")
-    try:
-        proc = subprocess.run(
-            cmd,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=cfg.timeout + 30,
-            env=env,
-        )
-    except subprocess.TimeoutExpired as exc:
-        # TimeoutExpired.__str__ contains the complete command and prompt, so
-        # metadata truncation hides the useful part of the failure.
-        detail = exc.stderr or exc.stdout or ""
-        if isinstance(detail, bytes):
-            detail = detail.decode(errors="replace")
-        suffix = f": {compact(detail, 300)}" if detail.strip() else ""
-        raise RuntimeError(f"intent classifier timed out after {cfg.timeout + 30}s{suffix}") from exc
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"openclaw exited {proc.returncode}")
-    text = _openclaw_text_from_json(proc.stdout)
-    return normalize_result(_extract_json_object(text), cfg.min_confidence)
+    errors: list[str] = []
+    with _INTENT_CLASSIFIER_SEMAPHORE:
+        for attempt in range(1, INTENT_CLASSIFIER_ATTEMPTS + 1):
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    input=prompt,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=cfg.timeout + 30,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired as exc:
+                # TimeoutExpired.__str__ contains the complete command and prompt, so
+                # metadata truncation hides the useful part of the failure.
+                detail = exc.stderr or exc.stdout or ""
+                if isinstance(detail, bytes):
+                    detail = detail.decode(errors="replace")
+                suffix = f": {compact(detail, 300)}" if detail.strip() else ""
+                errors.append(f"attempt {attempt}: timed out after {cfg.timeout + 30}s{suffix}")
+                continue
+            if proc.returncode != 0:
+                errors.append(
+                    f"attempt {attempt}: "
+                    + compact(proc.stderr.strip() or proc.stdout.strip() or f"openclaw exited {proc.returncode}", 300)
+                )
+                continue
+            try:
+                text = _openclaw_text_from_json(proc.stdout)
+                return normalize_result(_extract_json_object(text), cfg.min_confidence)
+            except Exception as exc:
+                errors.append(f"attempt {attempt}: {compact(str(exc), 300)}")
+    raise RuntimeError("intent classifier failed after retries: " + " | ".join(errors))

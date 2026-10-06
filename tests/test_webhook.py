@@ -288,7 +288,7 @@ def test_webhook_canary_enqueues_enabled_actionable_repository_once(tmp_path):
         "status": "pending",
         "action": "reply_comment",
         "decision": "auto_trusted",
-        "work_intent": "work_allowed",
+        "work_intent": "review_only",
         "updated_at": detail["job"]["updated_at"],
     }
     with sqlite3.connect(config.db) as con:

@@ -184,11 +184,11 @@ def test_normalize_result_requires_write_permission_for_work_allowed():
     assert result.work_intent == "review_only"
 
 
-def test_classify_notification_with_llm_uses_isolated_session_id(monkeypatch):
+def test_classify_notification_with_llm_uses_agent_exec_with_stdin_prompt(monkeypatch):
     calls = []
 
     def fake_run(cmd, **kwargs):
-        calls.append(cmd)
+        calls.append((cmd, kwargs))
         return subprocess.CompletedProcess(
             cmd,
             0,
@@ -230,11 +230,10 @@ def test_classify_notification_with_llm_uses_isolated_session_id(monkeypatch):
             prompt_template="Event JSON:\n{event_json}\n",
         )
 
-    session_ids = [cmd[cmd.index("--session-id") + 1] for cmd in calls]
-    assert all("--local" in cmd for cmd in calls)
-    assert session_ids[0].startswith("intent-base-gisce-developer-")
-    assert session_ids[1].startswith("intent-base-gisce-developer-")
-    assert session_ids[0] != session_ids[1]
+    assert [cmd[:4] for cmd, _ in calls] == [["/tmp/openclaw", "agent", "exec", "--json"]] * 2
+    assert all("--message-file" in cmd and "-" in cmd for cmd, _ in calls)
+    assert all("Event JSON:" in kwargs["input"] for _, kwargs in calls)
+    assert calls[0][1]["input"] != calls[1][1]["input"]
 
 
 def test_classify_notification_with_llm_reports_timeout_without_prompt(monkeypatch):
@@ -253,7 +252,53 @@ def test_classify_notification_with_llm_reports_timeout_without_prompt(monkeypat
             IntentClassifier(enabled=True, timeout=60),
         )
     except RuntimeError as exc:
-        assert str(exc) == "intent classifier timed out after 90s"
+        assert str(exc) == (
+            "intent classifier failed after retries: attempt 1: timed out after 90s | "
+            "attempt 2: timed out after 90s"
+        )
         assert "Intent classifier prompt" not in str(exc)
     else:
         raise AssertionError("expected classifier timeout")
+
+
+def test_classify_notification_with_llm_retries_once(monkeypatch):
+    notif = notification("<1@github.com>", "@pilipilisbot review this")
+    calls = 0
+
+    def fake_run(cmd, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(cmd, 1, "", "temporary failure")
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            json.dumps({
+                "result": {
+                    "payloads": [{
+                        "text": json.dumps({
+                            "addressed_to_agent": True,
+                            "action": "reply_comment",
+                            "work_intent": "review_only",
+                            "write_permission": "none",
+                            "confidence": 0.95,
+                            "reason": "Review requested.",
+                        })
+                    }]
+                }
+            }),
+            "",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = classify_notification_with_llm(
+        notif,
+        extract_github_context(notif.body),
+        ParserResult("reply_comment", "review_only"),
+        IntentClassifier(enabled=True, timeout=60),
+    )
+
+    assert calls == 2
+    assert result.applied is True
+    assert result.work_intent == "review_only"

@@ -786,6 +786,94 @@ def test_enqueue_falls_back_when_llm_intent_classifier_errors(tmp_path, monkeypa
     assert "classifier unavailable" in job.metadata["intent_classifier"]["error"]
 
 
+def test_webhook_comment_classifier_error_downgrades_parser_work_allowed(tmp_path, monkeypatch):
+    def fake_classify(n, ctx, parser_result, cfg, **kwargs):
+        raise RuntimeError("classifier unavailable")
+
+    monkeypatch.setattr("github_agent_bridge.queue.classify_notification_with_llm", fake_classify)
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = q.ingest(
+        notif(
+            1,
+            "<webhook-error@github.com>",
+            "@pilipilisbot implementa això https://github.com/gisce/erp/pull/1#issuecomment-10",
+        ),
+        intent_policy(),
+        source="webhook",
+        source_key="delivery-1",
+    )
+
+    assert state == "enqueued"
+    assert job.action == "reply_comment"
+    assert job.metadata["intent_classifier"]["parser"] == {"action": "reply_comment", "work_intent": "work_allowed"}
+    assert job.work_intent == "review_only"
+    assert job.metadata["intent_guardrail"] == "webhook_classifier_required_read_only"
+
+
+def test_webhook_comment_low_confidence_downgrades_parser_work_allowed(tmp_path, monkeypatch):
+    def fake_classify(n, ctx, parser_result, cfg, **kwargs):
+        return IntentClassification(
+            action="reply_comment",
+            work_intent="work_allowed",
+            confidence=0.4,
+            reason="Unsure.",
+            applied=False,
+            addressed_to_agent=True,
+            write_permission="state_change_allowed",
+        )
+
+    monkeypatch.setattr("github_agent_bridge.queue.classify_notification_with_llm", fake_classify)
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = q.ingest(
+        notif(
+            1,
+            "<webhook-low-confidence@github.com>",
+            "@pilipilisbot implementa això https://github.com/gisce/erp/pull/1#issuecomment-10",
+        ),
+        intent_policy(min_confidence=0.75),
+        source="webhook",
+        source_key="delivery-2",
+    )
+
+    assert state == "enqueued"
+    assert job.work_intent == "review_only"
+    assert job.metadata["intent_classifier"]["llm"]["applied"] is False
+    assert job.metadata["intent_guardrail"] == "webhook_classifier_required_read_only"
+
+
+def test_webhook_comment_high_confidence_classifier_can_allow_work(tmp_path, monkeypatch):
+    def fake_classify(n, ctx, parser_result, cfg, **kwargs):
+        return IntentClassification(
+            action="reply_comment",
+            work_intent="work_allowed",
+            confidence=0.91,
+            reason="User asks for implementation.",
+            applied=True,
+            addressed_to_agent=True,
+            write_permission="state_change_allowed",
+        )
+
+    monkeypatch.setattr("github_agent_bridge.queue.classify_notification_with_llm", fake_classify)
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = q.ingest(
+        notif(
+            1,
+            "<webhook-applied@github.com>",
+            "@pilipilisbot implementa això https://github.com/gisce/erp/pull/1#issuecomment-10",
+        ),
+        intent_policy(min_confidence=0.75),
+        source="webhook",
+        source_key="delivery-3",
+    )
+
+    assert state == "enqueued"
+    assert job.work_intent == "work_allowed"
+    assert job.metadata["intent_classifier"]["llm"]["applied"] is True
+
+
 def test_enqueue_skips_llm_intent_classifier_when_disabled(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr("github_agent_bridge.queue.classify_notification_with_llm", lambda *args, **kwargs: calls.append(args) or None)
