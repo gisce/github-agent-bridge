@@ -2,6 +2,15 @@
 
 <!-- version list -->
 
+## v0.76.1 (2026-10-07)
+
+### Bug Fixes
+
+- Allow quiet migration updates from dashboard
+  ([#276](https://github.com/gisce/github-agent-bridge/pull/276),
+  [`3e751de`](https://github.com/gisce/github-agent-bridge/commit/3e751de5de39881533b1ffe53d85eb6d7cb2be54))
+
+
 ## v0.76.0 (2026-10-07)
 
 
