@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.74.0 (2026-10-07)
+
+### Features
+
+- Add versioned SQLite migrations
+  ([`4256c41`](https://github.com/gisce/github-agent-bridge/commit/4256c413ade386630a448c5484fb9dff109cbce8))
+
+
 ## v0.73.2 (2026-10-07)
 
 ### Bug Fixes
