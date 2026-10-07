@@ -1,6 +1,8 @@
 import threading
 import time
 
+import pytest
+
 from github_agent_bridge.dispatch import GitHubClient, OpenClawDispatcher, RunMode
 from github_agent_bridge.models import GitHubContext, Job
 from github_agent_bridge.policy import ModelRoute, ModelRoutes, Policy
@@ -23,6 +25,36 @@ def test_live_github_command_handles_missing_gh_binary():
     assert result.returncode == 127
     assert result.stdout == ""
     assert "definitely-not-present" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [
+        (0, '{"merged_at":"2026-10-07T07:37:33Z"}', True),
+        (0, '{"merged_at":null}', False),
+        (1, "", None),
+        (0, "not-json", None),
+    ],
+)
+def test_pull_request_merged_is_tristate(returncode, stdout, expected):
+    client = GitHubClient()
+
+    class Result:
+        stderr = ""
+
+        def __init__(self):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    client._run = lambda args: Result()
+    ctx = GitHubContext(
+        ["https://github.com/gisce/github-agent-bridge/pull/268"],
+        "gisce/github-agent-bridge",
+        268,
+        target_kind="issue",
+    )
+
+    assert client.pull_request_merged(ctx) is expected
 
 
 class RecordingGitHubClient(GitHubClient):

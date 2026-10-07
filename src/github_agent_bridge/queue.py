@@ -186,6 +186,9 @@ class JobQueue:
         if action == "submit_review":
             intent = "review_only"
             metadata["intent_guardrail"] = "submit_review_read_only"
+        elif action == "sync_after_merge":
+            intent = "review_only"
+            metadata["intent_guardrail"] = "sync_after_merge_read_only"
         decision = policy.decision(n, ctx, action)
         status = {"auto": "done", "ask": "waiting_approval", "deny": "denied"}.get(decision, "pending")
         now = utc_now()

@@ -994,6 +994,37 @@ def test_enqueue_skips_llm_intent_classifier_when_disabled(tmp_path, monkeypatch
     assert calls == []
 
 
+def test_enqueue_merge_issue_event_forces_review_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "github_agent_bridge.actors.github_actor_details_for_context",
+        lambda ctx, *, gh_bin="gh": None,
+    )
+    notification = Notification(
+        uid=10417,
+        message_id="<gisce/github-agent-bridge/pull/268/issue_event/32668850070@github.com>",
+        subject="Re: [gisce/github-agent-bridge] fix: allow updates with paused pending jobs (PR #268)",
+        from_addr="ecarreras <notifications@github.com>",
+        body=(
+            "Merged #268 into main.\n\n"
+            "https://github.com/gisce/github-agent-bridge/pull/268#event-32668850070\n"
+            "You are receiving this because you were assigned."
+        ),
+        auth={"spf": True, "dkim": True, "dmarc": True},
+    )
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = q.enqueue(
+        notification,
+        Policy(trusted_orgs={"gisce"}, bot_logins={"giscebot"}),
+    )
+
+    assert state == "enqueued"
+    assert job is not None
+    assert job.action == "sync_after_merge"
+    assert job.work_intent == "review_only"
+    assert job.metadata["intent_guardrail"] == "sync_after_merge_read_only"
+
+
 def test_enqueue_workflow_run_failed_notification(tmp_path):
     body = "Run failed: https://github.com/gisce/erp/actions/runs/26325244472"
     n = Notification(uid=1, message_id="<run@github.com>", subject="[gisce/erp] Run failed: tests - main", from_addr="Edu <notifications@github.com>", body=body, auth={"spf": True, "dkim": True, "dmarc": True})

@@ -104,6 +104,27 @@ def test_merge_message_id_is_sync_after_merge():
     )
 
 
+def test_merge_issue_event_without_actor_is_sync_after_merge_despite_assignment_footer():
+    subject = "Re: [gisce/github-agent-bridge] fix: allow updates with paused pending jobs (PR #268)"
+    body = (
+        "Merged #268 into main.\n\n"
+        "-- \n"
+        "Reply to this email directly or view it on GitHub:\n"
+        "https://github.com/gisce/github-agent-bridge/pull/268#event-32668850070\n"
+        "You are receiving this because you were assigned."
+    )
+
+    assert (
+        classify_github_action(
+            subject,
+            body,
+            {"giscebot"},
+            message_id="<gisce/github-agent-bridge/pull/268/issue_event/32668850070@github.com>",
+        )
+        == "sync_after_merge"
+    )
+
+
 def test_sentry_pr_comment_after_merge_is_not_sync_after_merge():
     subject = "Re: [gisce/erp] Bloquear ejecuciones duplicadas de cron (PR #28088)"
     body = (

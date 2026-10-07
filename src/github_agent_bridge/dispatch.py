@@ -446,6 +446,22 @@ class GitHubClient:
         author = data.get("user") if isinstance(data, dict) else None
         return isinstance(author, dict) and author.get("login") == login
 
+    def pull_request_merged(self, ctx: GitHubContext) -> bool | None:
+        """Return the live merge state, or ``None`` when it cannot be verified."""
+        repo, issue = ctx.repo, ctx.issue_number
+        if not repo or not issue:
+            return None
+        result = self._run(["api", f"repos/{repo}/pulls/{issue}"])
+        if result.returncode != 0:
+            return None
+        try:
+            data = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict) or "merged_at" not in data:
+            return None
+        return data["merged_at"] is not None
+
     def react_eyes(self, ctx: GitHubContext) -> bool:
         return self.react(ctx, "eyes")
 
