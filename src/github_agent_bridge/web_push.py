@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -12,14 +11,15 @@ from typing import Any, Callable
 from .actors import normalize_github_login
 from .models import utc_now
 from .queue import JobQueue
+from .persistence import WebPushRepository, WebPushSubscription
 
 PushSender = Callable[[dict[str, Any], dict[str, Any]], None]
 _APP_ICON_CACHE: dict[str, str | None] = {}
 
 
-def _connect(db: str | Path) -> sqlite3.Connection:
+def _repository(db: str | Path) -> WebPushRepository:
     queue = JobQueue(db)
-    return queue.connect()
+    return WebPushRepository(queue.database)
 
 
 def _validate_subscription(subscription: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -38,49 +38,30 @@ def save_subscription(db: str | Path, user_login: str, subscription: dict[str, A
         raise ValueError("user_login_required")
     endpoint, payload = _validate_subscription(subscription)
     now = utc_now()
-    with _connect(db) as con:
-        con.execute(
-            """
-            INSERT INTO web_push_subscriptions(user_login, endpoint, subscription_json, created_at, updated_at, disabled_at, last_error)
-            VALUES(?,?,?,?,?,?,?)
-            ON CONFLICT(endpoint) DO UPDATE SET
-              user_login=excluded.user_login,
-              subscription_json=excluded.subscription_json,
-              updated_at=excluded.updated_at,
-              disabled_at=NULL,
-              last_error=NULL
-            """,
-            (login, endpoint, json.dumps(payload, sort_keys=True), now, now, None, None),
-        )
-        row = con.execute("SELECT * FROM web_push_subscriptions WHERE endpoint=?", (endpoint,)).fetchone()
-    return _subscription_row(row)
+    return _repository(db).save(login, endpoint, payload, now).to_dict()
 
 
 def delete_subscription(db: str | Path, user_login: str, endpoint: str) -> bool:
     login = normalize_github_login(user_login).lower()
-    with _connect(db) as con:
-        cur = con.execute(
-            "UPDATE web_push_subscriptions SET disabled_at=?, updated_at=? WHERE user_login=? AND endpoint=? AND disabled_at IS NULL",
-            (utc_now(), utc_now(), login, endpoint),
-        )
-    return bool(cur.rowcount)
+    now = utc_now()
+    return _repository(db).disable(login, endpoint, now)
 
 
 def subscription_status(db: str | Path, user_login: str) -> dict[str, Any]:
     login = normalize_github_login(user_login).lower()
-    with _connect(db) as con:
-        rows = con.execute(
-            """
-            SELECT id, endpoint, updated_at, last_success_at, last_error
-            FROM web_push_subscriptions
-            WHERE user_login=? AND disabled_at IS NULL
-            ORDER BY updated_at DESC
-            """,
-            (login,),
-        ).fetchall()
+    subscriptions = _repository(db).active_for_user(login)
     return {
-        "enabled": bool(rows),
-        "subscriptions": [dict(row) for row in rows],
+        "enabled": bool(subscriptions),
+        "subscriptions": [
+            {
+                "id": subscription.id,
+                "endpoint": subscription.endpoint,
+                "updated_at": subscription.updated_at,
+                "last_success_at": subscription.last_success_at,
+                "last_error": subscription.last_error,
+            }
+            for subscription in subscriptions
+        ],
     }
 
 
@@ -115,13 +96,13 @@ def notify_job_completion(
     for row in subscriptions:
         attempted += 1
         try:
-            push(json.loads(row["subscription_json"]), payload)
+            push(row.subscription, payload)
         except Exception as exc:
             failed += 1
-            _mark_delivery(db, int(row["id"]), error=str(exc)[:500])
+            _mark_delivery(db, row.id, error=str(exc)[:500])
         else:
             sent += 1
-            _mark_delivery(db, int(row["id"]))
+            _mark_delivery(db, row.id)
     return {"recipients": recipients, "attempted": attempted, "sent": sent, "failed": failed}
 
 
@@ -140,20 +121,10 @@ def _recipient_logins(actors: list[str]) -> list[str]:
     return recipients
 
 
-def _active_subscriptions(db: str | Path, recipients: list[str]) -> list[sqlite3.Row]:
-    if not recipients:
-        return []
-    placeholders = ",".join("?" for _ in recipients)
-    with _connect(db) as con:
-        return con.execute(
-            f"""
-            SELECT *
-            FROM web_push_subscriptions
-            WHERE disabled_at IS NULL AND lower(user_login) IN ({placeholders})
-            ORDER BY updated_at DESC
-            """,
-            tuple(recipients),
-        ).fetchall()
+def _active_subscriptions(
+    db: str | Path, recipients: list[str]
+) -> list[WebPushSubscription]:
+    return _repository(db).active_for_recipients(recipients)
 
 
 def _job_completion_payload(
@@ -264,21 +235,4 @@ def _send_web_push(subscription: dict[str, Any], payload: dict[str, Any]) -> Non
 
 
 def _mark_delivery(db: str | Path, subscription_id: int, error: str | None = None) -> None:
-    now = utc_now()
-    with _connect(db) as con:
-        if error:
-            con.execute("UPDATE web_push_subscriptions SET updated_at=?, last_error=? WHERE id=?", (now, error, subscription_id))
-        else:
-            con.execute("UPDATE web_push_subscriptions SET updated_at=?, last_success_at=?, last_error=NULL WHERE id=?", (now, now, subscription_id))
-
-
-def _subscription_row(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "id": row["id"],
-        "user_login": row["user_login"],
-        "endpoint": row["endpoint"],
-        "updated_at": row["updated_at"],
-        "last_success_at": row["last_success_at"],
-        "last_error": row["last_error"],
-        "disabled_at": row["disabled_at"],
-    }
+    _repository(db).mark_delivery(subscription_id, utc_now(), error)
