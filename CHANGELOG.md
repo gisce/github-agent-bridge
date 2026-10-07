@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.73.1 (2026-10-07)
+
+### Bug Fixes
+
+- Back off repeated IMAP abort retries
+  ([`1e09b20`](https://github.com/gisce/github-agent-bridge/commit/1e09b2085a3f2db801c3d807e1a5e139fe8ab568))
+
+
 ## v0.73.0 (2026-10-06)
 
 ### Bug Fixes
