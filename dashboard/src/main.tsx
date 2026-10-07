@@ -1619,7 +1619,7 @@ function AutoupdateNotice({
   const migrationCount = state.classification?.migration_files?.length ?? 0;
   const riskyCount = state.classification?.risky_files?.length ?? 0;
   const canComplete = Boolean(state.executor_reload_pending && state.dashboard_applied_at && onCompletePending);
-  const canApply = Boolean(onApply && migrationCount === 0);
+  const canApply = Boolean(onApply && (migrationCount === 0 || activeTotal === 0));
 
   return (
     <section className="rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-950 shadow-sm" aria-label="Update available">

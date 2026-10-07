@@ -1289,6 +1289,22 @@ describe("autoupdate notice", () => {
     expect(screen.queryByRole("button", { name: /apply update/i })).not.toBeInTheDocument();
   });
 
+  it("shows apply update for migrations once the active queue is quiet", () => {
+    render(
+      <AutoupdateNotice
+        state={{
+          ...updateState,
+          queue: { active_counts: { running: 0 }, active_total: 0 },
+          classification: { ...updateState.classification, migration_files: ["src/github_agent_bridge/sql/2.sql"] },
+        }}
+        isAdmin={true}
+        onApply={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: /apply update/i })).toBeInTheDocument();
+  });
+
   it("does not offer completion before the update has been applied", () => {
     render(<AutoupdateNotice state={{ ...updateState, dashboard_applied_at: undefined }} isAdmin={true} onCompletePending={vi.fn()} />);
 
