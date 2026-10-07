@@ -172,6 +172,31 @@ class ExecutorPool:
             return True
         dispatched = False
         try:
+            if self._requires_open_pr_revalidation(job):
+                merged = self.github.pull_request_merged(job.context)
+                if merged is None:
+                    self._finish(
+                        job,
+                        "blocked",
+                        "pull request state revalidation failed",
+                        "could not revalidate pull request state before dispatching repository work",
+                    )
+                    return True
+                if merged:
+                    reaction_ok = self.acknowledge_job(job.id)
+                    self.queue.add_session_event(
+                        job.id,
+                        "stale_pr_event",
+                        "merged pull request no longer accepts queued repository work",
+                        f"reaction_ok={reaction_ok}; {job.context.short_url}",
+                    )
+                    self.queue.finish(
+                        job.id,
+                        "done",
+                        "stale work event for merged pull request; skipped dispatch",
+                        job.context.short_url,
+                    )
+                    return True
             assigned_to_bot = self.github.is_assigned_to_current_user(job.context)
             authored_by_bot = self.github.is_pull_request_authored_by_current_user(job.context)
             if job.action == "reply_comment" and job.context.review_id and self.github.is_non_actionable_review(job.context):
@@ -181,11 +206,31 @@ class ExecutorPool:
                 detail = f"eyes={reaction_ok} ack={ack_ok}"
                 self.queue.finish(job.id, "done", summary, detail)
                 return True
-            if job.action == "reply_comment" and job.context.comment_id and not assigned_to_bot and not self.github.issue_comment_addresses_current_user(job.context):
+            feedback_target = any((
+                job.context.comment_id,
+                job.context.review_comment_id,
+                job.context.review_id,
+                job.context.commit_comment_id,
+            ))
+            if (
+                feedback_target
+                and not assigned_to_bot
+                and not authored_by_bot
+                and not self.github.event_addresses_current_user(job.context)
+            ):
                 reaction_ok = self.acknowledge_job(job.id)
                 ack_ok = self.github.react_ack_no_comment(job.context)
-                summary = "comment not addressed to bot and bot not assigned; skipped dispatch"
-                detail = f"eyes={reaction_ok} ack={ack_ok}"
+                summary = "feedback not actionable for bot; skipped dispatch"
+                detail = (
+                    "bot was not addressed, assigned, or the pull request author; "
+                    f"eyes={reaction_ok} ack={ack_ok}"
+                )
+                self.queue.add_session_event(
+                    job.id,
+                    "non_actionable_feedback",
+                    summary,
+                    detail,
+                )
                 self.queue.finish(job.id, "done", summary, detail)
                 return True
             if job.action == "reply_comment" and job.work_intent == "review_only" and (assigned_to_bot or authored_by_bot):
@@ -271,6 +316,15 @@ class ExecutorPool:
         except Exception as exc:
             self._finish(job, "blocked", f"executor exception: {type(exc).__name__}", str(exc), notify_completion=dispatched)
         return True
+
+    @staticmethod
+    def _requires_open_pr_revalidation(job) -> bool:
+        if job.action != "open_issue" or job.context.target_kind != "issue":
+            return False
+        if not job.repo or not job.thread:
+            return False
+        pull_path = f"github.com/{job.repo}/pull/{job.thread}"
+        return any(pull_path in url.lower() for url in job.context.urls)
 
     def _finish(
         self,

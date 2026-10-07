@@ -93,11 +93,42 @@ def non_actionable_issue_comment_payload(*, comment_id: int = 5948901951) -> byt
     }).encode()
 
 
+def bot_authored_pull_request_issue_comment_payload(
+    *, comment_id: int = 5948901952
+) -> bytes:
+    return json.dumps({
+        "action": "created",
+        "repository": {"full_name": "gisce/github-agent-bridge"},
+        "issue": {
+            "number": 272,
+            "title": "fix: classify merged pull request notifications safely",
+            "html_url": "https://github.com/gisce/github-agent-bridge/pull/272",
+            "user": {"login": "giscebot"},
+            "assignees": [],
+            "pull_request": {
+                "url": "https://api.github.com/repos/gisce/github-agent-bridge/pulls/272",
+            },
+        },
+        "comment": {
+            "id": comment_id,
+            "body": "Please fix this regression.",
+            "html_url": (
+                "https://github.com/gisce/github-agent-bridge/pull/272"
+                f"#issuecomment-{comment_id}"
+            ),
+        },
+        "sender": {"login": "ecarreras"},
+    }).encode()
+
+
 def pull_request_review_payload(
     *,
     state: str,
     review_id: int = 4815162342,
     sender: str = "pilipilisbot",
+    body: str = "Please address this.",
+    pr_author: str = "giscebot",
+    assignees: tuple[str, ...] = (),
 ) -> bytes:
     return json.dumps({
         "action": "submitted",
@@ -106,11 +137,13 @@ def pull_request_review_payload(
             "number": 233,
             "title": "feat: enable guarded webhook canary ingestion",
             "html_url": "https://github.com/gisce/github-agent-bridge/pull/233",
+            "user": {"login": pr_author},
+            "assignees": [{"login": login} for login in assignees],
         },
         "review": {
             "id": review_id,
             "state": state,
-            "body": "Please address this.",
+            "body": body,
             "html_url": f"https://github.com/gisce/github-agent-bridge/pull/233#pullrequestreview-{review_id}",
         },
         "sender": {"login": sender},
@@ -135,6 +168,25 @@ def pull_request_review_requested_payload(
         },
         "requested_reviewer": {"login": requested_reviewer},
         "sender": {"login": sender},
+    }).encode()
+
+
+def pull_request_closed_payload(*, merged: bool, number: int = 272) -> bytes:
+    return json.dumps({
+        "action": "closed",
+        "repository": {"full_name": "gisce/github-agent-bridge"},
+        "pull_request": {
+            "id": 4702691021,
+            "number": number,
+            "title": "fix: classify merged pull request notifications safely",
+            "html_url": f"https://github.com/gisce/github-agent-bridge/pull/{number}",
+            "merged": merged,
+            "merged_at": "2026-10-07T09:00:00Z" if merged else None,
+            "base": {"ref": "main"},
+            "user": {"login": "giscebot"},
+            "assignees": [],
+        },
+        "sender": {"login": "ecarreras"},
     }).encode()
 
 
@@ -570,6 +622,40 @@ def test_webhook_canary_does_not_claim_non_actionable_comment_before_email(tmp_p
         ).fetchone()[0] == "email"
 
 
+def test_webhook_canary_enqueues_issue_comment_on_bot_authored_pull_request(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.trigger_actor_details_from_notification",
+        lambda notification: None,
+    )
+    payload = bot_authored_pull_request_issue_comment_payload()
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=canary_policy(tmp_path),
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(
+            payload,
+            delivery="bot-authored-pr-issue-comment",
+            event="issue_comment",
+        ),
+    )
+
+    assert response.json()["enqueue_status"] == "enqueued"
+    job = JobQueue(config.db).get(response.json()["job_id"])
+    assert job is not None
+    assert job.action == "reply_comment"
+    assert job.work_intent == "work_allowed"
+    assert job.metadata["feedback_actionability"] == "pr_authored_by_bot"
+
+
 def test_webhook_canary_ignores_repo_outside_webhook_canary_repos(tmp_path):
     policy = canary_policy(tmp_path)
     policy.write_text(json.dumps({
@@ -933,6 +1019,171 @@ def test_webhook_canary_enqueues_actionable_pull_request_review_states(tmp_path,
         assert response.json()["enqueue_status"] in {"enqueued", "duplicate"}
     with sqlite3.connect(config.db) as con:
         assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+
+
+def test_webhook_canary_ignores_unaddressed_review_on_someone_elses_pr(tmp_path):
+    payload = pull_request_review_payload(
+        state="changes_requested",
+        review_id=5439481624,
+        sender="lcbautista",
+        body=(
+            "Mou-lo tot a un modul `gisceov_distri_ab`, tot el que sigui OV de "
+            "distri d'AB, que vagi a aquest modul."
+        ),
+        pr_author="hperezgisce",
+        assignees=("hperezgisce",),
+    )
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=canary_policy(tmp_path),
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(
+            payload,
+            delivery="review-unaddressed",
+            event="pull_request_review",
+        ),
+    )
+
+    assert response.json()["enqueue_status"] == "ignored"
+    with sqlite3.connect(config.db) as con:
+        assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_webhook_canary_enqueues_review_that_mentions_configured_bot(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.trigger_actor_details_for_enqueue",
+        lambda notification, ctx: None,
+    )
+    payload = pull_request_review_payload(
+        state="changes_requested",
+        review_id=5439481625,
+        sender="lcbautista",
+        body="@giscebot mou-lo a `gisceov_distri_ab`.",
+        pr_author="hperezgisce",
+        assignees=("hperezgisce",),
+    )
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=canary_policy(tmp_path),
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(
+            payload,
+            delivery="review-addressed",
+            event="pull_request_review",
+        ),
+    )
+
+    assert response.json()["enqueue_status"] == "enqueued"
+
+
+def test_webhook_canary_enqueues_merged_pull_request_as_read_only_cleanup(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.trigger_actor_details_for_enqueue",
+        lambda notification, ctx: None,
+    )
+    policy = canary_policy(tmp_path)
+    policy.write_text(json.dumps({
+        "trustedOrgs": ["gisce"],
+        "webhookCanaryRepos": ["gisce/github-agent-bridge"],
+        "botLogins": ["giscebot"],
+        "actions": {"trustedAuto": ["sync_after_merge"]},
+    }))
+    payload = pull_request_closed_payload(merged=True)
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=policy,
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(
+            payload,
+            delivery="pr-272-merged",
+            event="pull_request",
+        ),
+    )
+
+    assert response.json()["enqueue_status"] == "enqueued"
+    assert response.json()["event_key"] == (
+        "pull_request:merged:gisce/github-agent-bridge:272"
+    )
+    email_job, email_status = JobQueue(config.db).enqueue(
+        Notification(
+            uid=272,
+            message_id=(
+                "<gisce/github-agent-bridge/pull/272/merged@github.com>"
+            ),
+            subject=(
+                "Re: [gisce/github-agent-bridge] fix: classify merged pull "
+                "request notifications safely (PR #272)"
+            ),
+            from_addr="notifications@github.com",
+            body=(
+                "Merged #272 into main.\n\n"
+                "https://github.com/gisce/github-agent-bridge/pull/272"
+            ),
+            auth={"spf": True, "dkim": True, "dmarc": True},
+        ),
+        Policy.from_file(policy),
+    )
+
+    assert email_status == "duplicate"
+    assert email_job is not None
+    assert email_job.id == response.json()["job_id"]
+    with sqlite3.connect(config.db) as con:
+        assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+        assert con.execute(
+            "SELECT action,work_intent,work_key FROM jobs"
+        ).fetchone() == (
+            "sync_after_merge",
+            "review_only",
+            "gisce/github-agent-bridge#272",
+        )
+
+
+def test_webhook_canary_ignores_closed_unmerged_pull_request(tmp_path):
+    payload = pull_request_closed_payload(merged=False)
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=canary_policy(tmp_path),
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(
+            payload,
+            delivery="pr-272-closed",
+            event="pull_request",
+        ),
+    )
+
+    assert response.json()["enqueue_status"] == "ignored"
+    with sqlite3.connect(config.db) as con:
+        assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
 
 
 def test_dashboard_config_expands_systemd_home_specifier_for_webhook_policy(tmp_path, monkeypatch):

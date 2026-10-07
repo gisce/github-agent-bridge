@@ -284,6 +284,22 @@ def test_canonical_event_key_falls_back_to_source_receipt_when_identity_is_uncer
     )
 
 
+def test_canonical_event_key_deduplicates_merge_across_email_and_webhook():
+    ctx = GitHubContext(
+        ["https://github.com/gisce/github-agent-bridge/pull/272"],
+        "gisce/github-agent-bridge",
+        272,
+        target_kind="issue",
+    )
+
+    assert canonical_event_key(
+        "sync_after_merge", ctx, "email", "<merge-mail@github.com>"
+    ) == "pull_request:merged:gisce/github-agent-bridge:272"
+    assert canonical_event_key(
+        "sync_after_merge", ctx, "webhook", "pr-272-merged"
+    ) == "pull_request:merged:gisce/github-agent-bridge:272"
+
+
 def test_ingest_records_receipt_and_event_and_deduplicates_same_event(tmp_path, monkeypatch):
     monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
     q = JobQueue(tmp_path / "q.sqlite3")
@@ -925,6 +941,70 @@ def test_enqueue_can_apply_llm_intent_classifier_to_review_comments(tmp_path, mo
     assert job.work_intent == "work_allowed"
 
 
+def test_enqueue_cannot_downgrade_changes_requested_on_bot_authored_pr(
+    tmp_path, monkeypatch
+):
+    def fake_classify(n, ctx, parser_result, cfg, **kwargs):
+        return IntentClassification(
+            action="archive_notification",
+            work_intent="review_only",
+            confidence=0.99,
+            reason="The reviewer does not mention the bot.",
+            applied=True,
+            addressed_to_agent=False,
+            write_permission="none",
+        )
+
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.classify_notification_with_llm", fake_classify
+    )
+    notification = Notification(
+        uid=None,
+        message_id="<changes-requested@github.com>",
+        subject="Re: [gisce/github-agent-bridge] fix: webhook actionability (PR #272)",
+        from_addr="pilipilisbot <notifications@github.com>",
+        body=(
+            "Please defer ambiguous PR issue_comment actionability to the executor "
+            "and add coverage.\n\n"
+            "https://github.com/gisce/github-agent-bridge/pull/272"
+            "#pullrequestreview-4815162342"
+        ),
+        auth={"spf": True, "dkim": True, "dmarc": True},
+        metadata={
+            "github_event": "pull_request_review",
+            "github_action": "submitted",
+            "review_state": "changes_requested",
+            "feedback_actionability": "pr_authored_by_bot",
+        },
+    )
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = q.enqueue(
+        notification,
+        Policy(
+            trusted_orgs={"gisce"},
+            bot_logins={"giscebot"},
+            intent_classifier=IntentClassifier(
+                enabled=True,
+                model="gpt-5.4-mini",
+                only_when_parser_defaulted=False,
+            ),
+        ),
+    )
+
+    assert state == "enqueued"
+    assert job is not None
+    assert job.status == "pending"
+    assert job.action == "reply_comment"
+    assert job.work_intent == "work_allowed"
+    assert job.metadata["intent_guardrail"] == (
+        "bot_authored_pr_changes_requested_work_allowed"
+    )
+    assert job.metadata["intent_classifier"]["llm"]["action"] == (
+        "archive_notification"
+    )
+
+
 def test_enqueue_falls_back_when_llm_intent_confidence_is_low(tmp_path, monkeypatch):
     def fake_classify(n, ctx, parser_result, cfg, **kwargs):
         return IntentClassification(
@@ -992,6 +1072,37 @@ def test_enqueue_skips_llm_intent_classifier_when_disabled(tmp_path, monkeypatch
     )
 
     assert calls == []
+
+
+def test_enqueue_merge_issue_event_forces_review_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "github_agent_bridge.actors.github_actor_details_for_context",
+        lambda ctx, *, gh_bin="gh": None,
+    )
+    notification = Notification(
+        uid=10417,
+        message_id="<gisce/github-agent-bridge/pull/268/issue_event/32668850070@github.com>",
+        subject="Re: [gisce/github-agent-bridge] fix: allow updates with paused pending jobs (PR #268)",
+        from_addr="ecarreras <notifications@github.com>",
+        body=(
+            "Merged #268 into main.\n\n"
+            "https://github.com/gisce/github-agent-bridge/pull/268#event-32668850070\n"
+            "You are receiving this because you were assigned."
+        ),
+        auth={"spf": True, "dkim": True, "dmarc": True},
+    )
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = q.enqueue(
+        notification,
+        Policy(trusted_orgs={"gisce"}, bot_logins={"giscebot"}),
+    )
+
+    assert state == "enqueued"
+    assert job is not None
+    assert job.action == "sync_after_merge"
+    assert job.work_intent == "review_only"
+    assert job.metadata["intent_guardrail"] == "sync_after_merge_read_only"
 
 
 def test_enqueue_workflow_run_failed_notification(tmp_path):

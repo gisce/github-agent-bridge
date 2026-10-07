@@ -13,12 +13,13 @@ from github_agent_bridge.queue import JobQueue
 
 
 class FakeGitHub:
-    def __init__(self, assigned: bool, mentioned: bool = True, non_actionable_review: bool = False, authored: bool = False, answered_url: str | None = None):
+    def __init__(self, assigned: bool, mentioned: bool = True, non_actionable_review: bool = False, authored: bool = False, answered_url: str | None = None, merged: bool | None = False):
         self.assigned = assigned
         self.mentioned = mentioned
         self.non_actionable_review = non_actionable_review
         self.authored = authored
         self.answered_url = answered_url
+        self.merged = merged
         self.followup_url = answered_url or "https://github.com/gisce/erp/issues/27315#issuecomment-2"
         self.eyes = 0
         self.acks = 0
@@ -30,7 +31,13 @@ class FakeGitHub:
     def is_pull_request_authored_by_current_user(self, ctx):
         return self.authored
 
+    def pull_request_merged(self, ctx):
+        return self.merged
+
     def issue_comment_addresses_current_user(self, ctx):
+        return self.mentioned
+
+    def event_addresses_current_user(self, ctx):
         return self.mentioned
 
     def is_non_actionable_review(self, ctx):
@@ -119,6 +126,41 @@ def enqueue_pr_review(queue: JobQueue):
     return job
 
 
+def enqueue_unaddressed_pr_review(queue: JobQueue):
+    notification = Notification(
+        uid=6,
+        message_id="<gisce/ab-modules/pull/247/review/5439481624@github.com>",
+        subject=(
+            "Re: [gisce/ab-modules] Notificar las altas pendientes de aprobación "
+            "y nuevas solicitudes/reclamaciones en la OV (PR #247)"
+        ),
+        from_addr="'Luis Ka' via GISCE Bot <giscebot@gisce.net>",
+        body=(
+            "@lcbautista requested changes on this pull request.\n\n"
+            "Mou-lo tot a un modul `gisceov_distri_ab`, tot el que sigui OV de "
+            "distri d'AB, que vagi a aquest modul.\n\n"
+            "-- \n"
+            "Reply to this email directly or view it on GitHub:\n"
+            "https://github.com/gisce/ab-modules/pull/247#pullrequestreview-5439481624\n"
+            "You are receiving this because your review was requested."
+        ),
+    )
+    job, state = queue.enqueue(
+        notification,
+        Policy(
+            source_from=("notifications@github.com", "giscebot@gisce.net"),
+            trusted_orgs={"gisce"},
+        ),
+    )
+    assert state == "enqueued"
+    assert job is not None
+    assert job.action == "reply_comment"
+    queue.update_work_intent(job.id, "work_allowed", "reproduce job 7549 classifier result")
+    updated = queue.get(job.id)
+    assert updated is not None
+    return updated
+
+
 def enqueue_pr_comment(queue: JobQueue):
     notification = Notification(
         uid=1,
@@ -176,6 +218,96 @@ def enqueue_sync_after_merge(queue: JobQueue):
     assert job is not None
     assert job.action == "sync_after_merge"
     return job
+
+
+def enqueue_pr_root_open_issue(queue: JobQueue):
+    notification = Notification(
+        uid=5,
+        message_id="<gisce/github-agent-bridge/pull/268/issue_event/32668850070@github.com>",
+        subject="Re: [gisce/github-agent-bridge] fix: allow updates with paused pending jobs (PR #268)",
+        from_addr="ecarreras <notifications@github.com>",
+        body=(
+            "Timeline notification.\n"
+            "https://github.com/gisce/github-agent-bridge/pull/268#event-32668850070\n"
+            "You are receiving this because you were assigned."
+        ),
+    )
+    job, state = queue.enqueue(
+        notification,
+        Policy(trusted_orgs={"gisce"}, bot_logins={"giscebot"}),
+    )
+    assert state == "enqueued"
+    assert job is not None
+    assert job.action == "open_issue"
+    assert job.work_intent == "work_allowed"
+    return job
+
+
+def test_pr_root_work_event_is_skipped_when_pr_is_already_merged(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_root_open_issue(queue)
+    dispatcher = RecordingDispatcher()
+    github = FakeGitHub(assigned=True, merged=True)
+
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=github,
+        config=ExecutorConfig(run_once=True),
+    )
+
+    assert pool.work_one("worker-test") is True
+    assert dispatcher.jobs == []
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "done"
+    assert stored.last_error is None
+    events = job_session_events(queue.path, job.id)
+    assert any(event["event_type"] == "stale_pr_event" for event in events)
+
+
+def test_pr_root_work_event_blocks_when_pr_state_cannot_be_revalidated(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_root_open_issue(queue)
+    dispatcher = RecordingDispatcher()
+    github = FakeGitHub(assigned=True, merged=None)
+
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=github,
+        config=ExecutorConfig(run_once=True),
+    )
+
+    assert pool.work_one("worker-test") is True
+    assert dispatcher.jobs == []
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "blocked"
+    assert "could not revalidate pull request state" in stored.last_error
+
+
+def test_pr_root_work_event_dispatches_when_pr_is_still_open(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_root_open_issue(queue)
+    dispatcher = RecordingDispatcher()
+    github = FakeGitHub(assigned=True, merged=False)
+
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=github,
+        config=ExecutorConfig(run_once=True),
+    )
+
+    assert pool.work_one("worker-test") is True
+    assert [dispatched.id for dispatched in dispatcher.jobs] == [job.id]
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "done"
 
 
 def test_assigned_pr_comment_keeps_review_only_without_explicit_write_request(tmp_path):
@@ -428,6 +560,74 @@ def test_unassigned_unmentioned_pr_comment_reacts_without_dispatch(tmp_path):
     stored = queue.get(job.id)
     assert stored is not None
     assert stored.status == "done"
+
+
+def test_unassigned_unmentioned_pr_review_is_skipped_without_dispatch(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_unaddressed_pr_review(queue)
+    dispatcher = RecordingDispatcher()
+    github = FakeGitHub(assigned=False, mentioned=False, authored=False)
+
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=github,
+        config=ExecutorConfig(run_once=True),
+    )
+
+    assert pool.work_one("worker-test") is True
+    assert dispatcher.jobs == []
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "done"
+    events = job_session_events(queue.path, job.id)
+    assert any(event["event_type"] == "non_actionable_feedback" for event in events)
+
+
+def test_bot_authored_pr_review_remains_actionable_without_mention(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_unaddressed_pr_review(queue)
+    dispatcher = RecordingDispatcher()
+    github = FakeGitHub(assigned=False, mentioned=False, authored=True)
+
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=github,
+        config=ExecutorConfig(run_once=True),
+    )
+
+    assert pool.work_one("worker-test") is True
+    assert [dispatched.id for dispatched in dispatcher.jobs] == [job.id]
+
+
+def test_feedback_guard_cannot_be_bypassed_by_action_reclassification(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_unaddressed_pr_review(queue)
+    with queue.connect() as con:
+        con.execute("UPDATE jobs SET action='open_issue' WHERE id=?", (job.id,))
+    dispatcher = RecordingDispatcher()
+    github = FakeGitHub(assigned=False, mentioned=False, authored=False)
+
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=github,
+        config=ExecutorConfig(run_once=True),
+    )
+
+    assert pool.work_one("worker-test") is True
+    assert dispatcher.jobs == []
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "done"
+    assert any(
+        event["event_type"] == "non_actionable_feedback"
+        for event in job_session_events(queue.path, job.id)
+    )
 
 
 def test_first_attempt_dispatches_even_when_bot_already_commented_after_trigger(tmp_path):
