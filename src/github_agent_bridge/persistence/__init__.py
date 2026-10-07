@@ -3,6 +3,7 @@
 from .acknowledgements import AcknowledgementClaim, AcknowledgementRepository
 from .commit_statuses import CommitStatusClaim, CommitStatusRepository
 from .database import ClosingConnection, Database, TransactionMode
+from .runtime import RuntimeProcess, RuntimeRepository
 from .state import ExecutorPauseState, StateRepository
 
 __all__ = [
@@ -13,6 +14,8 @@ __all__ = [
     "ClosingConnection",
     "Database",
     "ExecutorPauseState",
+    "RuntimeProcess",
+    "RuntimeRepository",
     "StateRepository",
     "TransactionMode",
 ]
