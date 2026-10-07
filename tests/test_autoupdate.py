@@ -11,6 +11,7 @@ from github_agent_bridge.autoupdate import (
     apply_update_plan,
     complete_pending_reload,
     default_install_command,
+    default_migration_command,
     latest_release,
     load_update_state,
     plan_systemd_actions,
@@ -29,6 +30,19 @@ def test_latest_release_reports_missing_gh_as_runtime_error():
 
 def completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(["fake"], returncode, stdout, "")
+
+
+def test_default_migration_command_uses_explicit_cli(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+
+    assert default_migration_command(db, python_bin="python") == [
+        "python",
+        "-m",
+        "github_agent_bridge.cli",
+        "--db",
+        str(db),
+        "migrate-db",
+    ]
 
 
 def release_runner(tag: str, files: list[str]):
@@ -230,11 +244,16 @@ def test_migration_update_is_deferred_while_jobs_are_active(tmp_path, monkeypatc
         db,
         repo_dir=tmp_path,
         installed_version="1.2.3",
-        runner=release_runner("v1.2.4", ["src/github_agent_bridge/sql/schema.sql"]),
+        runner=release_runner(
+            "v1.2.4",
+            ["src/github_agent_bridge/sql/migrations/v0002_example.py"],
+        ),
     )
 
     assert plan["decision"] == "defer_migration"
-    assert plan["classification"]["migration_files"] == ["src/github_agent_bridge/sql/schema.sql"]
+    assert plan["classification"]["migration_files"] == [
+        "src/github_agent_bridge/sql/migrations/v0002_example.py"
+    ]
     assert plan["executor_restart_allowed"] is False
     assert plan["blocked_reason"] == "active_jobs_block_migration"
     assert plan["service_plan"]["immediate"] == []

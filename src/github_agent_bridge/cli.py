@@ -90,6 +90,24 @@ def cmd_init_db(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_migrate_db(args: argparse.Namespace) -> int:
+    queue = JobQueue(args.db)
+    with queue.connect() as con:
+        rows = con.execute(
+            "SELECT version,name,checksum,applied_at FROM schema_migrations ORDER BY version"
+        ).fetchall()
+    print(
+        json.dumps(
+            {
+                "database": str(queue.path),
+                "migrations": [dict(row) for row in rows],
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
 def cmd_validate_policy(args: argparse.Namespace) -> int:
     try:
         validate_policy_file(args.policy)
@@ -467,6 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--policy", default=None)
     sub = p.add_subparsers(required=True)
     s = sub.add_parser("init-db"); s.set_defaults(func=cmd_init_db)
+    s = sub.add_parser("migrate-db", help="apply pending versioned SQLite migrations"); s.set_defaults(func=cmd_migrate_db)
     s = sub.add_parser("validate-policy", help="validate a policy file against the published schema")
     s.add_argument("--policy", required=True)
     s.set_defaults(func=cmd_validate_policy)

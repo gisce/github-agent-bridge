@@ -5,7 +5,6 @@ import json
 import sqlite3
 from importlib import resources
 from pathlib import Path
-from urllib.parse import urlparse
 
 from .models import GitHubContext, Job, Notification, utc_now
 from .parser import classify_github_action, classify_work_intent, extract_github_context
@@ -14,6 +13,7 @@ from .session_correlation import session_id_for_job, session_id_for_job_attempt
 from . import feedback
 from .actors import trigger_actor_details_for_enqueue, trigger_actor_details_from_notification
 from .intent_classifier import ParserResult, classify_notification_with_llm, should_classify_with_llm
+from .sql.migrations import apply_migrations
 
 SCHEMA_PACKAGE = "github_agent_bridge.sql"
 
@@ -28,15 +28,6 @@ ACTIVE_STATUSES = ("pending", "running", "waiting_approval")
 COALESCE_STATUSES = ("pending", "waiting_approval")
 EXECUTOR_PAUSE_STATE_KEY = "executor_paused"
 ACK_RETRY_LIMIT = 2
-
-
-def _webhook_hook_target_from_api_url(api_url: str) -> tuple[str, str] | None:
-    parts = [part for part in urlparse(api_url).path.split("/") if part]
-    if len(parts) >= 4 and parts[0] == "repos" and parts[3] == "hooks":
-        return f"{parts[1]}/{parts[2]}", "repository"
-    if len(parts) >= 3 and parts[0] == "orgs" and parts[2] == "hooks":
-        return parts[1], "organization"
-    return None
 
 
 def semantic_event_identity(
@@ -123,20 +114,31 @@ class JobQueue:
         con.row_factory = sqlite3.Row
         con.execute("PRAGMA foreign_keys=ON")
         if initialize:
-            con.executescript(SCHEMA)
-            self._ensure_columns(con)
-            self._ensure_indexes(con)
-            self._backfill_job_runs(con)
-            self._backfill_webhook_hook_targets(con)
+            self._initialize_database(con)
         return con
 
     def init(self) -> None:
         with self.connect() as con:
+            self._initialize_database(con)
+
+    def _initialize_database(self, con: sqlite3.Connection) -> None:
+        history_exists = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+        ).fetchone()
+        versioned = bool(
+            history_exists
+            and con.execute("SELECT 1 FROM schema_migrations LIMIT 1").fetchone()
+        )
+        if versioned:
+            # Validate/apply immutable steps before the rolling schema snapshot can
+            # touch a database created by this or a newer package version.
+            apply_migrations(con)
             con.executescript(SCHEMA)
-            self._ensure_columns(con)
-            self._ensure_indexes(con)
-            self._backfill_job_runs(con)
-            self._backfill_webhook_hook_targets(con)
+        else:
+            # Legacy databases need the snapshot to create missing tables before
+            # the baseline migration can perform additive changes and backfills.
+            con.executescript(SCHEMA)
+            apply_migrations(con)
 
     def enqueue(self, n: Notification, policy: Policy) -> tuple[Job | None, str]:
         """Backward-compatible email enqueue entrypoint."""
@@ -1014,125 +1016,6 @@ class JobQueue:
             ) AND finished_at IS NULL""",
             (finished_at, result, job_id),
         )
-
-    def _backfill_job_runs(self, con: sqlite3.Connection) -> None:
-        """Preserve the one historical interval recoverable from legacy jobs."""
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_runs'").fetchone() is None:
-            return
-        rows = con.execute(
-            """SELECT id, attempts, started_at, finished_at, locked_by, metadata_json
-            FROM jobs
-            WHERE started_at IS NOT NULL
-              AND finished_at IS NOT NULL
-              AND julianday(finished_at) >= julianday(started_at)
-              AND NOT EXISTS (SELECT 1 FROM job_runs WHERE job_runs.job_id=jobs.id)"""
-        ).fetchall()
-        for row in rows:
-            try:
-                metadata = json.loads(row["metadata_json"] or "{}")
-            except (json.JSONDecodeError, TypeError):
-                metadata = {}
-            attempt = max(1, int(row["attempts"] or 0))
-            session_id = str(
-                metadata.get("openclaw_session_id")
-                or session_id_for_job_attempt(int(row["id"]), attempt)
-            )
-            con.execute(
-                """INSERT OR IGNORE INTO job_runs(
-                    job_id,attempt,started_at,finished_at,result,worker_id,session_id,is_estimated
-                ) VALUES(?,?,?,?,?,?,?,1)""",
-                (
-                    row["id"],
-                    attempt,
-                    row["started_at"],
-                    row["finished_at"],
-                    "historical",
-                    row["locked_by"],
-                    session_id,
-                ),
-            )
-
-    def _ensure_columns(self, con: sqlite3.Connection) -> None:
-        tables = {
-            "jobs": {"trigger_actor": "TEXT", "trigger_actor_avatar_url": "TEXT"},
-            "coalesced_notifications": {"trigger_actor": "TEXT", "trigger_actor_avatar_url": "TEXT"},
-            "mcp_tokens": {"user_login": "TEXT", "created_by": "TEXT"},
-            "webhook_shadow_receipts": {
-                "duplicate_count": "INTEGER NOT NULL DEFAULT 0",
-                "hook_id": "TEXT",
-                "payload_json": "TEXT",
-                "enqueue_status": "TEXT",
-                "job_id": "INTEGER REFERENCES jobs(id) ON DELETE SET NULL",
-            },
-            "webhook_hooks": {
-                "name": "TEXT",
-                "content_type": "TEXT",
-                "insecure_ssl": "INTEGER",
-                "delivery_url": "TEXT",
-                "github_api_url": "TEXT",
-                "ping_url": "TEXT",
-                "deliveries_url": "TEXT",
-                "github_created_at": "TEXT",
-                "github_updated_at": "TEXT",
-                "last_delivery_id": "TEXT",
-                "last_event_name": "TEXT",
-                "last_action": "TEXT",
-                "last_repository": "TEXT",
-                "last_result": "TEXT",
-            },
-        }
-        for table, columns in tables.items():
-            if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is None:
-                continue
-            existing = {row["name"] for row in con.execute(f"PRAGMA table_info({table})")}
-            for column, definition in columns.items():
-                if column not in existing:
-                    con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-
-    def _ensure_indexes(self, con: sqlite3.Connection) -> None:
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='webhook_shadow_receipts'").fetchone() is not None:
-            con.execute(
-                "CREATE INDEX IF NOT EXISTS idx_webhook_shadow_delivery_page ON webhook_shadow_receipts(created_at DESC, delivery_id DESC)"
-            )
-            con.execute(
-                "CREATE INDEX IF NOT EXISTS idx_webhook_shadow_job_id ON webhook_shadow_receipts(job_id)"
-            )
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='webhook_hooks'").fetchone() is not None:
-            con.execute(
-                "CREATE INDEX IF NOT EXISTS idx_webhook_hooks_page ON webhook_hooks(updated_at DESC, hook_id DESC)"
-            )
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mcp_tokens'").fetchone() is not None:
-            con.execute(
-                "CREATE INDEX IF NOT EXISTS idx_mcp_tokens_user ON mcp_tokens(user_login, revoked_at, created_at)"
-            )
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='quarantined_notifications'").fetchone() is not None:
-            con.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_quarantined_notifications_message_id ON quarantined_notifications(message_id) WHERE message_id IS NOT NULL AND message_id != ''"
-            )
-            con.execute(
-                "CREATE INDEX IF NOT EXISTS idx_quarantined_notifications_unresolved ON quarantined_notifications(resolved_at, created_at)"
-            )
-
-    def _backfill_webhook_hook_targets(self, con: sqlite3.Connection) -> None:
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='webhook_hooks'").fetchone() is None:
-            return
-        columns = {row["name"] for row in con.execute("PRAGMA table_info(webhook_hooks)")}
-        if not {"hook_id", "target", "target_type", "github_api_url"} <= columns:
-            return
-        rows = con.execute(
-            "SELECT hook_id,target,target_type,github_api_url FROM webhook_hooks WHERE github_api_url IS NOT NULL"
-        ).fetchall()
-        for row in rows:
-            target = _webhook_hook_target_from_api_url(str(row["github_api_url"] or ""))
-            if target is None:
-                continue
-            target_name, target_type = target
-            if row["target"] == target_name and row["target_type"] == target_type:
-                continue
-            con.execute(
-                "UPDATE webhook_hooks SET target=?,target_type=? WHERE hook_id=?",
-                (target_name, target_type, row["hook_id"]),
-            )
 
     def _row_to_job(self, row: sqlite3.Row | None) -> Job | None:
         if row is None:

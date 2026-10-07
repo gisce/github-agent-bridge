@@ -13,6 +13,7 @@ def test_sql_schema_is_packaged_resource_and_valid():
     con.executescript(schema)
     tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {
+        "schema_migrations",
         "jobs",
         "job_runs",
         "coalesced_notifications",
@@ -35,3 +36,9 @@ def test_packaged_resource_names_are_documented():
     assert {"owner.md", "maintainer.md", "contributor.md", "reviewer.md"} <= role_names
     sql_names = {p.name for p in resources.files("github_agent_bridge.sql").iterdir() if p.name.endswith(".sql")}
     assert {"schema.sql"} <= sql_names
+    migration_names = {
+        p.name
+        for p in resources.files("github_agent_bridge.sql.migrations").iterdir()
+        if p.name.startswith("v") and p.name.endswith(".py")
+    }
+    assert {"v0001_legacy_schema.py"} <= migration_names
