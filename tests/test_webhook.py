@@ -93,6 +93,34 @@ def non_actionable_issue_comment_payload(*, comment_id: int = 5948901951) -> byt
     }).encode()
 
 
+def bot_authored_pull_request_issue_comment_payload(
+    *, comment_id: int = 5948901952
+) -> bytes:
+    return json.dumps({
+        "action": "created",
+        "repository": {"full_name": "gisce/github-agent-bridge"},
+        "issue": {
+            "number": 272,
+            "title": "fix: classify merged pull request notifications safely",
+            "html_url": "https://github.com/gisce/github-agent-bridge/pull/272",
+            "user": {"login": "giscebot"},
+            "assignees": [],
+            "pull_request": {
+                "url": "https://api.github.com/repos/gisce/github-agent-bridge/pulls/272",
+            },
+        },
+        "comment": {
+            "id": comment_id,
+            "body": "Please fix this regression.",
+            "html_url": (
+                "https://github.com/gisce/github-agent-bridge/pull/272"
+                f"#issuecomment-{comment_id}"
+            ),
+        },
+        "sender": {"login": "ecarreras"},
+    }).encode()
+
+
 def pull_request_review_payload(
     *,
     state: str,
@@ -592,6 +620,40 @@ def test_webhook_canary_does_not_claim_non_actionable_comment_before_email(tmp_p
             "SELECT first_source FROM github_events WHERE event_key=?",
             (f"issue_comment:created:gisce/github-agent-bridge:{comment_id}",),
         ).fetchone()[0] == "email"
+
+
+def test_webhook_canary_enqueues_issue_comment_on_bot_authored_pull_request(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.trigger_actor_details_from_notification",
+        lambda notification: None,
+    )
+    payload = bot_authored_pull_request_issue_comment_payload()
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=canary_policy(tmp_path),
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(
+            payload,
+            delivery="bot-authored-pr-issue-comment",
+            event="issue_comment",
+        ),
+    )
+
+    assert response.json()["enqueue_status"] == "enqueued"
+    job = JobQueue(config.db).get(response.json()["job_id"])
+    assert job is not None
+    assert job.action == "reply_comment"
+    assert job.work_intent == "work_allowed"
+    assert job.metadata["feedback_actionability"] == "pr_authored_by_bot"
 
 
 def test_webhook_canary_ignores_repo_outside_webhook_canary_repos(tmp_path):

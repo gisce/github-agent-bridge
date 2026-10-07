@@ -105,35 +105,55 @@ def _first_mentioned_login(body: str) -> str | None:
     return match.group(1).lower() if match else None
 
 
-def _feedback_is_actionable(
+def _feedback_actionability(
     event_name: str,
     payload: dict[str, Any],
     source: dict[str, Any],
     configured_logins: set[str],
-) -> bool:
+) -> str:
     """Authorize feedback from structured GitHub fields, never delivery reason."""
     if event_name not in COMMENT_EVENT_NAMES:
-        return True
+        return "not_applicable"
+    if not configured_logins:
+        return "ignored"
     first_mention = _first_mentioned_login(str(source.get("body") or ""))
     if first_mention in configured_logins:
-        return True
+        return "mentioned"
     pull_request = payload.get("pull_request") if isinstance(payload.get("pull_request"), dict) else None
-    subject = pull_request or payload.get("issue") or {}
+    issue = payload.get("issue") if isinstance(payload.get("issue"), dict) else None
+    subject = pull_request or issue or {}
     if not isinstance(subject, dict):
-        return False
+        return "ignored"
+    pr_issue_comment = bool(
+        event_name == "issue_comment"
+        and issue
+        and isinstance(issue.get("pull_request"), dict)
+    )
+    author: dict[str, Any] = {}
     if pull_request:
         author = pull_request.get("user") if isinstance(pull_request.get("user"), dict) else {}
-        if str(author.get("login") or "").lower() in configured_logins:
-            return True
+    elif pr_issue_comment and issue:
+        # GitHub represents PR conversation comments as issue_comment payloads.
+        # In that shape issue.user is the PR author.
+        author = issue.get("user") if isinstance(issue.get("user"), dict) else {}
+    author_login = str(author.get("login") or "").lower()
+    if author_login in configured_logins:
+        return "pr_authored_by_bot"
     assignees = subject.get("assignees") if isinstance(subject.get("assignees"), list) else []
     assignee = subject.get("assignee") if isinstance(subject.get("assignee"), dict) else None
     if assignee:
         assignees = [*assignees, assignee]
-    return any(
+    if any(
         isinstance(item, dict)
         and str(item.get("login") or "").lower() in configured_logins
         for item in assignees
-    )
+    ):
+        return "assigned"
+    if pr_issue_comment and not author_login:
+        # Partial payloads must reach the executor, which resolves PR authorship
+        # live before allowing work.
+        return "defer_to_executor"
+    return "ignored"
 
 
 def webhook_notification(
@@ -195,12 +215,13 @@ def webhook_notification(
         review_state = str(source.get("state") or "").lower()
         if review_state not in {"changes_requested", "commented"}:
             return None
-    if not _feedback_is_actionable(
+    feedback_actionability = _feedback_actionability(
         event_name,
         payload,
         source,
         configured_logins,
-    ):
+    )
+    if feedback_actionability == "ignored":
         return None
     url = str(source.get("html_url") or subject.get("html_url") or repository.get("html_url") or "")
     if not url.startswith("https://github.com/"):
@@ -232,13 +253,26 @@ def webhook_notification(
         from_addr=f"{login} <notifications@github.com>",
         body=f"{body}\n\n{url}",
         auth={"spf": True, "dkim": True, "dmarc": True},
+        metadata={
+            "github_event": event_name,
+            "github_action": action,
+            "feedback_actionability": feedback_actionability,
+            **(
+                {"review_state": str(source.get("state") or "").lower()}
+                if event_name == "pull_request_review"
+                else {}
+            ),
+        },
     )
     if event_name != "workflow_run" and classify_github_action(
         notification.subject,
         notification.body,
         bot_logins,
         message_id=notification.message_id,
-    ) == "archive_notification":
+    ) == "archive_notification" and feedback_actionability in {
+        "ignored",
+        "not_applicable",
+    }:
         return None
     return notification
 

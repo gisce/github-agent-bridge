@@ -941,6 +941,70 @@ def test_enqueue_can_apply_llm_intent_classifier_to_review_comments(tmp_path, mo
     assert job.work_intent == "work_allowed"
 
 
+def test_enqueue_cannot_downgrade_changes_requested_on_bot_authored_pr(
+    tmp_path, monkeypatch
+):
+    def fake_classify(n, ctx, parser_result, cfg, **kwargs):
+        return IntentClassification(
+            action="archive_notification",
+            work_intent="review_only",
+            confidence=0.99,
+            reason="The reviewer does not mention the bot.",
+            applied=True,
+            addressed_to_agent=False,
+            write_permission="none",
+        )
+
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.classify_notification_with_llm", fake_classify
+    )
+    notification = Notification(
+        uid=None,
+        message_id="<changes-requested@github.com>",
+        subject="Re: [gisce/github-agent-bridge] fix: webhook actionability (PR #272)",
+        from_addr="pilipilisbot <notifications@github.com>",
+        body=(
+            "Please defer ambiguous PR issue_comment actionability to the executor "
+            "and add coverage.\n\n"
+            "https://github.com/gisce/github-agent-bridge/pull/272"
+            "#pullrequestreview-4815162342"
+        ),
+        auth={"spf": True, "dkim": True, "dmarc": True},
+        metadata={
+            "github_event": "pull_request_review",
+            "github_action": "submitted",
+            "review_state": "changes_requested",
+            "feedback_actionability": "pr_authored_by_bot",
+        },
+    )
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = q.enqueue(
+        notification,
+        Policy(
+            trusted_orgs={"gisce"},
+            bot_logins={"giscebot"},
+            intent_classifier=IntentClassifier(
+                enabled=True,
+                model="gpt-5.4-mini",
+                only_when_parser_defaulted=False,
+            ),
+        ),
+    )
+
+    assert state == "enqueued"
+    assert job is not None
+    assert job.status == "pending"
+    assert job.action == "reply_comment"
+    assert job.work_intent == "work_allowed"
+    assert job.metadata["intent_guardrail"] == (
+        "bot_authored_pr_changes_requested_work_allowed"
+    )
+    assert job.metadata["intent_classifier"]["llm"]["action"] == (
+        "archive_notification"
+    )
+
+
 def test_enqueue_falls_back_when_llm_intent_confidence_is_low(tmp_path, monkeypatch):
     def fake_classify(n, ctx, parser_result, cfg, **kwargs):
         return IntentClassification(
