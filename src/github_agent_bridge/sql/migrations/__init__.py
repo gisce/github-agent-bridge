@@ -84,40 +84,47 @@ def apply_migrations(
     if versions != sorted(set(versions)):
         raise MigrationError("migration versions must be unique and ordered")
 
-    rows = con.execute(
-        "SELECT version,name,checksum FROM schema_migrations ORDER BY version"
-    ).fetchall()
-    applied = {int(row[0]): (str(row[1]), str(row[2])) for row in rows}
     known_versions = set(versions)
-    unknown_versions = sorted(set(applied) - known_versions)
-    if unknown_versions:
-        raise MigrationError(
-            "database contains migrations newer than this package: "
-            + ", ".join(str(version) for version in unknown_versions)
-        )
-
     completed: list[int] = []
-    for migration in steps:
-        recorded = applied.get(migration.version)
-        if recorded is not None:
-            if recorded != (migration.name, migration.checksum):
-                raise MigrationError(
-                    f"migration {migration.version} does not match recorded name/checksum"
-                )
-            continue
-
+    while True:
+        # Read migration history only after taking the writer lock so a
+        # concurrent migrator cannot make this decision stale.
         con.execute("BEGIN IMMEDIATE")
+        pending: Migration | None = None
         try:
-            migration.upgrade(con)
-            applied_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            con.execute(
-                "INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(?,?,?,?)",
-                (migration.version, migration.name, migration.checksum, applied_at),
-            )
+            rows = con.execute(
+                "SELECT version,name,checksum FROM schema_migrations ORDER BY version"
+            ).fetchall()
+            applied = {int(row[0]): (str(row[1]), str(row[2])) for row in rows}
+            unknown_versions = sorted(set(applied) - known_versions)
+            if unknown_versions:
+                raise MigrationError(
+                    "database contains migrations newer than this package: "
+                    + ", ".join(str(version) for version in unknown_versions)
+                )
+
+            for migration in steps:
+                recorded = applied.get(migration.version)
+                if recorded is not None:
+                    if recorded != (migration.name, migration.checksum):
+                        raise MigrationError(
+                            f"migration {migration.version} does not match recorded name/checksum"
+                        )
+                elif pending is None:
+                    pending = migration
+
+            if pending is not None:
+                pending.upgrade(con)
+                applied_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                con.execute(
+                    "INSERT INTO schema_migrations(version,name,checksum,applied_at) VALUES(?,?,?,?)",
+                    (pending.version, pending.name, pending.checksum, applied_at),
+                )
         except Exception:
             con.rollback()
             raise
         else:
             con.commit()
-            completed.append(migration.version)
-    return tuple(completed)
+            if pending is None:
+                return tuple(completed)
+            completed.append(pending.version)
