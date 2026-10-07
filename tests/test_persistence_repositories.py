@@ -3,6 +3,8 @@ import json
 from github_agent_bridge.persistence import (
     AcknowledgementRepository,
     ExecutorPauseState,
+    RuntimeProcess,
+    RuntimeRepository,
     StateRepository,
 )
 from github_agent_bridge.models import Notification
@@ -65,3 +67,62 @@ def test_state_repository_maps_executor_pause_state(tmp_path):
         paused=False,
         error="invalid_executor_pause_state",
     )
+
+
+def test_runtime_repository_persists_process_heartbeat_and_events(tmp_path):
+    queue = JobQueue(tmp_path / "queue.sqlite3")
+    job, status = queue.enqueue(
+        notification(),
+        Policy(trusted_orgs={"gisce"}, bot_logins={"pilipilisbot"}),
+    )
+    assert status == "enqueued"
+    assert queue.claim_next("worker-1") is not None
+    repository = RuntimeRepository(queue.database)
+    process = RuntimeProcess.from_identity(
+        "executor-1",
+        "worker-1",
+        {"pid": 101, "ppid": 100, "pgid": 101, "sid": 99, "start_time_ticks": 1234},
+    )
+
+    repository.record_worker_heartbeat(
+        "worker-1", "executor-1", 101, "running", job.id, 2
+    )
+    assert repository.register_process(job.id, process) is True
+    assert repository.add_job_session_event(
+        job.id,
+        "openclaw_stdout",
+        "runtime output",
+        "line one",
+        progress_kind="visible",
+    ) is True
+    assert repository.add_job_worklog(
+        job.id, "runtime_test", "repository event", None
+    ) is True
+    assert repository.mark_process_exited(job.id, "worker-1") is True
+
+    with queue.database.read_only() as con:
+        heartbeat = con.execute(
+            "SELECT * FROM worker_heartbeats WHERE worker_id='worker-1'"
+        ).fetchone()
+        event = con.execute(
+            "SELECT * FROM job_session_events WHERE job_id=? AND event_type='openclaw_stdout'",
+            (job.id,),
+        ).fetchone()
+        progress = con.execute(
+            "SELECT * FROM job_progress WHERE job_id=? AND phase='openclaw_stdout'",
+            (job.id,),
+        ).fetchone()
+        worklog = con.execute(
+            "SELECT * FROM worklog WHERE job_id=? AND phase='runtime_test'",
+            (job.id,),
+        ).fetchone()
+
+    assert heartbeat["executor_id"] == "executor-1"
+    assert heartbeat["active_job_id"] == job.id
+    assert heartbeat["recent_error_count"] == 2
+    assert event["summary"] == "runtime output"
+    assert progress["kind"] == "visible"
+    assert worklog["summary"] == "repository event"
+    runtime_process = queue.get(job.id).metadata["runtime_process"]
+    assert runtime_process["pid"] == 101
+    assert runtime_process["state"] == "exited"

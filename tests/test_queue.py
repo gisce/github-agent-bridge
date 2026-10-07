@@ -616,7 +616,7 @@ def test_claim_rolls_back_job_and_run_when_audit_write_fails(tmp_path, monkeypat
     def fail_audit(*args, **kwargs):
         raise RuntimeError("audit persistence failed")
 
-    monkeypatch.setattr(q, "_log", fail_audit)
+    monkeypatch.setattr(q.runtime, "record_worklog", fail_audit)
 
     with pytest.raises(RuntimeError, match="audit persistence failed"):
         q.claim_next("worker")

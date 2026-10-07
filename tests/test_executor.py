@@ -7,7 +7,6 @@ from github_agent_bridge.dashboard_data import job_session_events
 from github_agent_bridge.dispatch import DispatchResult
 from github_agent_bridge.executor import ExecutorConfig, ExecutorPool
 from github_agent_bridge.models import Notification
-from github_agent_bridge.persistence import Database
 from github_agent_bridge.policy import ModelRoute, ModelRoutes, Policy
 from github_agent_bridge.queue import JobQueue
 
@@ -911,7 +910,8 @@ def test_run_blocks_orphaned_jobs_before_claiming_new_work(tmp_path):
 
 def test_heartbeat_loop_recovers_after_transient_database_lock(tmp_path, monkeypatch):
     queue = JobQueue(tmp_path / "bridge.sqlite3")
-    queue.database = Database(queue.path, timeout_seconds=0.01)
+    queue.database.timeout_seconds = 0.01
+    queue.database.busy_timeout_ms = 10
     pool = ExecutorPool(
         queue,
         Policy(trusted_orgs={"gisce"}),
@@ -960,7 +960,8 @@ def test_heartbeat_loop_recovers_after_transient_database_lock(tmp_path, monkeyp
 def test_acknowledgement_loop_recovers_after_transient_database_lock(tmp_path, monkeypatch):
     queue = JobQueue(tmp_path / "bridge.sqlite3")
     job = enqueue_pr_comment(queue)
-    queue.database = Database(queue.path, timeout_seconds=0.01)
+    queue.database.timeout_seconds = 0.01
+    queue.database.busy_timeout_ms = 10
     github = FakeGitHub(assigned=True)
     pool = ExecutorPool(
         queue,
