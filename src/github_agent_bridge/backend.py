@@ -57,6 +57,7 @@ from .dashboard_data import (
 from .monitor import monitor
 from .mcp import MCPServer, authenticate_token, create_token, list_tokens, revoke_token, update_token_owner
 from .observability import configure_sentry, list_alerts, recent_process_samples
+from .persistence import Database, WebhookRepository
 from .queue import JobQueue
 from .policy import Policy
 from .systemd_status import allowed_unit_names, stream_journal_lines, systemd_status
@@ -76,15 +77,6 @@ PROJECT_REPOSITORY_URL = "https://github.com/gisce/github-agent-bridge"
 SESSION_VERSION = 1
 WEBHOOK_TIMESERIES_MAX_DAYS = 366
 WEBHOOK_TIMESERIES_MAX_HOURLY_DAYS = 31
-WEBHOOK_COVERAGE_EVENT_GLOBS = (
-    "issue_comment:created:*",
-    "pull_request_review_comment:created:*",
-    "pull_request_review:created:*",
-    "commit_comment:created:*",
-    "workflow_run:workflow_run_failed:*",
-)
-
-
 def _expand_systemd_home_specifier(value: str) -> str:
     if value == "%h":
         return str(Path.home())
@@ -138,19 +130,15 @@ def _webhook_datetime_value(value: datetime) -> str:
     return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def _webhook_coverage_predicate(column: str) -> str:
-    return "(" + " OR ".join(f"{column} GLOB '{pattern}'" for pattern in WEBHOOK_COVERAGE_EVENT_GLOBS) + ")"
-
-
 def _webhook_coverage_window(
-    con: sqlite3.Connection,
+    repository: WebhookRepository,
     *,
     retention_days: int,
     grace_seconds: int,
 ) -> tuple[str, str]:
     end = datetime.now(UTC) - timedelta(seconds=grace_seconds)
     start = end - timedelta(days=retention_days)
-    first = con.execute("SELECT MIN(created_at) FROM webhook_shadow_receipts").fetchone()[0]
+    first = repository.first_receipt_created_at()
     if first:
         start = max(start, _parse_webhook_datetime(str(first), "webhook_created_at"))
     if start > end:
@@ -190,7 +178,7 @@ def _webhook_admin_url(target_type: str, target: str, hook_id: str) -> str | Non
     return None
 
 
-def _webhook_hook_status(row: sqlite3.Row) -> str:
+def _webhook_hook_status(row: dict[str, Any]) -> str:
     if not row["active"]:
         return "inactive"
     if row["last_event_at"]:
@@ -200,7 +188,7 @@ def _webhook_hook_status(row: sqlite3.Row) -> str:
     return "never_seen"
 
 
-def _webhook_hook_payload(row: sqlite3.Row) -> dict[str, Any]:
+def _webhook_hook_payload(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row["hook_id"],
         "target": row["target"],
@@ -228,7 +216,7 @@ def _webhook_hook_payload(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _webhook_delivery_payload(row: sqlite3.Row) -> dict[str, Any]:
+def _webhook_delivery_payload(row: dict[str, Any]) -> dict[str, Any]:
     hook = None
     if row["hook_id"]:
         hook = {
@@ -256,7 +244,7 @@ def _webhook_delivery_payload(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _webhook_ping_endpoint(row: sqlite3.Row) -> str:
+def _webhook_ping_endpoint(row: dict[str, Any]) -> str:
     hook_id = str(row["hook_id"])
     target = str(row["target"])
     if row["target_type"] == "organization":
@@ -891,6 +879,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     app.state.dashboard_static_snapshot = static_snapshot
     app.state.dashboard_shutdown_event = shutdown_event
     ensure_webhook_schema = _webhook_schema_initializer(config)
+    webhook_repository = WebhookRepository(Database(config.db))
 
     assets_dir = runtime_static_dir / "assets"
     if assets_dir.exists():
@@ -964,71 +953,43 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     @app.get("/api/webhooks/github/summary")
     def github_webhook_shadow_summary(_: dict[str, Any] = Depends(current_admin_profile)) -> dict[str, Any]:
         ensure_webhook_schema()
-        with sqlite3.connect(config.db) as con:
-            con.row_factory = sqlite3.Row
-            window_start, window_end = _webhook_coverage_window(
-                con,
-                retention_days=config.webhook_retention_days,
-                grace_seconds=config.webhook_coverage_grace_seconds,
-            )
-            receipt = con.execute(
-                "SELECT COALESCE(SUM(CASE WHEN status='observed' THEN 1 ELSE 0 END),0) observed,"
-                "COALESCE(SUM(CASE WHEN status='unsupported' THEN 1 ELSE 0 END),0) unsupported,"
-                "COALESCE(SUM(duplicate_count),0) duplicate_deliveries FROM webhook_shadow_receipts"
-            ).fetchone()
-            coverage = con.execute(
-                "WITH email_events AS ("
-                " SELECT event_key,MIN(created_at) created_at FROM ingest_receipts"
-                f" WHERE source='email' AND julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_webhook_coverage_predicate('event_key')}"
-                " GROUP BY event_key"
-                "), webhook_events AS ("
-                " SELECT event_key,MIN(created_at) created_at FROM webhook_shadow_receipts"
-                f" WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_webhook_coverage_predicate('event_key')}"
-                " GROUP BY event_key"
-                ") SELECT"
-                " (SELECT COUNT(*) FROM email_events) imap_events,"
-                " (SELECT COUNT(*) FROM webhook_events) webhook_events,"
-                " (SELECT COUNT(*) FROM email_events JOIN webhook_events USING(event_key)) both_events,"
-                " (SELECT AVG(ABS((julianday(w.created_at)-julianday(i.created_at))*86400000.0))"
-                "  FROM email_events i JOIN webhook_events w USING(event_key)) match_delay_ms",
-                (window_start, window_end, window_start, window_end),
-            ).fetchone()
-            inventory = con.execute(
-                "SELECT (SELECT COUNT(*) FROM webhook_hooks) hooks,"
-                "(SELECT COUNT(*) FROM webhook_shadow_receipts) deliveries"
-            ).fetchone()
-            enqueue = {
-                str(row["enqueue_status"]): int(row["count"])
-                for row in con.execute(
-                    "SELECT enqueue_status,COUNT(*) count FROM webhook_shadow_receipts "
-                    "WHERE enqueue_status IS NOT NULL GROUP BY enqueue_status"
-                )
-            }
+        window_start, window_end = _webhook_coverage_window(
+            webhook_repository,
+            retention_days=config.webhook_retention_days,
+            grace_seconds=config.webhook_coverage_grace_seconds,
+        )
+        summary = webhook_repository.summary(window_start, window_end)
         counts = {
             name: count
-            for name, count in (("observed", receipt["observed"]), ("unsupported", receipt["unsupported"]))
+            for name, count in (
+                ("observed", summary["observed"]),
+                ("unsupported", summary["unsupported"]),
+            )
             if count
         }
         return {
             "mode": config.webhook_mode,
             "configured": bool(config.webhook_secrets or config.webhook_secrets_by_owner),
             "receipts": counts,
-            "duplicate_deliveries": receipt["duplicate_deliveries"],
-            "cross_source_matches": coverage["both_events"],
-            "enqueue": enqueue,
-            "totals": {"hooks": inventory["hooks"], "deliveries": inventory["deliveries"]},
+            "duplicate_deliveries": summary["duplicate_deliveries"],
+            "cross_source_matches": summary["both_events"],
+            "enqueue": summary["enqueue"],
+            "totals": {
+                "hooks": summary["hooks"],
+                "deliveries": summary["deliveries"],
+            },
             "coverage": {
-                "both": coverage["both_events"],
-                "imap_only": max(coverage["imap_events"] - coverage["both_events"], 0),
-                "webhook_only": max(coverage["webhook_events"] - coverage["both_events"], 0),
-                "imap_eligible": coverage["imap_events"],
+                "both": summary["both_events"],
+                "imap_only": max(summary["imap_events"] - summary["both_events"], 0),
+                "webhook_only": max(summary["webhook_events"] - summary["both_events"], 0),
+                "imap_eligible": summary["imap_events"],
                 "ratio": (
-                    coverage["both_events"] / coverage["imap_events"]
-                    if coverage["imap_events"] else None
+                    summary["both_events"] / summary["imap_events"]
+                    if summary["imap_events"] else None
                 ),
                 "mean_match_delay_ms": (
-                    round(coverage["match_delay_ms"], 1)
-                    if coverage["match_delay_ms"] is not None else None
+                    round(summary["match_delay_ms"], 1)
+                    if summary["match_delay_ms"] is not None else None
                 ),
                 "window_start": window_start,
                 "window_end": window_end,
@@ -1043,41 +1004,14 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Return bounded, actionable shadow divergences without loading all receipts."""
         ensure_webhook_schema()
-        with sqlite3.connect(config.db) as con:
-            con.row_factory = sqlite3.Row
-            window_start, window_end = _webhook_coverage_window(
-                con,
-                retention_days=config.webhook_retention_days,
-                grace_seconds=config.webhook_coverage_grace_seconds,
-            )
-            rows = con.execute(
-                "WITH email_events AS ("
-                " SELECT event_key,source_key,created_at FROM ingest_receipts"
-                f" WHERE source='email' AND julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_webhook_coverage_predicate('event_key')}"
-                "), webhook_events AS ("
-                " SELECT event_key,delivery_id,created_at,repository FROM webhook_shadow_receipts"
-                f" WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_webhook_coverage_predicate('event_key')}"
-                "), candidates AS ("
-                " SELECT 'imap_only' kind,i.event_key,i.source_key reference,i.created_at,NULL repository "
-                " FROM email_events i WHERE NOT EXISTS ("
-                "  SELECT 1 FROM webhook_events w WHERE w.event_key=i.event_key"
-                " ) UNION ALL "
-                " SELECT 'webhook_only',w.event_key,w.delivery_id,w.created_at,w.repository "
-                " FROM webhook_events w WHERE NOT EXISTS ("
-                "  SELECT 1 FROM email_events i WHERE i.event_key=w.event_key"
-                " ) UNION ALL "
-                " SELECT 'unmatchable',NULL,w.delivery_id,w.created_at,w.repository "
-                " FROM webhook_shadow_receipts w WHERE w.event_key IS NULL"
-                " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
-                ") SELECT kind,event_key,reference,created_at,repository FROM candidates "
-                "ORDER BY created_at DESC LIMIT ?",
-                (
-                    window_start, window_end, window_start, window_end,
-                    window_start, window_end, limit,
-                ),
-            ).fetchall()
+        window_start, window_end = _webhook_coverage_window(
+            webhook_repository,
+            retention_days=config.webhook_retention_days,
+            grace_seconds=config.webhook_coverage_grace_seconds,
+        )
+        rows = webhook_repository.exceptions(window_start, window_end, limit)
         return {
-            "exceptions": [dict(row) for row in rows],
+            "exceptions": rows,
             "window_start": window_start,
             "window_end": window_end,
             "grace_seconds": config.webhook_coverage_grace_seconds,
@@ -1101,24 +1035,12 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="time_range_too_large")
         start_value = _webhook_datetime_value(start)
         end_value = _webhook_datetime_value(end)
-        bucket_expression = "substr(created_at,1,13) || ':00:00Z'" if bucket == "hour" else "substr(created_at,1,10)"
-        with sqlite3.connect(config.db) as con:
-            rows = con.execute(
-                f"SELECT {bucket_expression}, "
-                "SUM(CASE WHEN status='observed' THEN 1 ELSE 0 END), "
-                "SUM(duplicate_count), SUM(CASE WHEN status='unsupported' THEN 1 ELSE 0 END) "
-                "FROM webhook_shadow_receipts WHERE created_at>=? AND created_at<? "
-                "GROUP BY 1 ORDER BY 1",
-                (start_value, end_value),
-            ).fetchall()
+        points = webhook_repository.timeseries(start_value, end_value, bucket)
         return {
             "from": start_value,
             "to": end_value,
             "bucket": bucket,
-            "points": [
-                {"bucket": row[0], "observed": row[1], "duplicate": row[2], "unsupported": row[3]}
-                for row in rows
-            ],
+            "points": points,
         }
 
     @app.get("/api/webhooks/github/hooks")
@@ -1128,22 +1050,8 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         _: dict[str, Any] = Depends(current_admin_profile),
     ) -> dict[str, Any]:
         ensure_webhook_schema()
-        where = ""
-        parameters: list[Any] = []
-        if cursor:
-            cursor_updated_at, cursor_hook_id = _decode_webhook_delivery_cursor(cursor)
-            where = "WHERE updated_at<? OR (updated_at=? AND hook_id<?)"
-            parameters.extend((cursor_updated_at, cursor_updated_at, cursor_hook_id))
-        parameters.append(limit + 1)
-        with sqlite3.connect(config.db) as con:
-            con.row_factory = sqlite3.Row
-            hook_rows = con.execute(
-                "SELECT hook_id,target,target_type,name,active,events_json,content_type,insecure_ssl,delivery_url,"
-                "github_api_url,ping_url,deliveries_url,github_created_at,github_updated_at,last_ping_at,last_event_at,"
-                "last_delivery_id,last_event_name,last_action,last_repository,last_result,updated_at "
-                f"FROM webhook_hooks {where} ORDER BY updated_at DESC,hook_id DESC LIMIT ?",
-                parameters,
-            ).fetchall()
+        decoded_cursor = _decode_webhook_delivery_cursor(cursor) if cursor else None
+        hook_rows = webhook_repository.list_hooks(limit, decoded_cursor)
         page = hook_rows[:limit]
         next_cursor = None
         if len(hook_rows) > limit and page:
@@ -1159,45 +1067,22 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         _: dict[str, Any] = Depends(current_admin_profile),
     ) -> dict[str, Any]:
         ensure_webhook_schema()
-        with sqlite3.connect(config.db) as con:
-            con.row_factory = sqlite3.Row
-            hook = con.execute(
-                "SELECT hook_id,target,target_type,name,active,events_json,content_type,insecure_ssl,delivery_url,"
-                "github_api_url,ping_url,deliveries_url,github_created_at,github_updated_at,last_ping_at,last_event_at,"
-                "last_delivery_id,last_event_name,last_action,last_repository,last_result,updated_at "
-                "FROM webhook_hooks WHERE hook_id=?",
-                (hook_id,),
-            ).fetchone()
-            if hook is None:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="webhook_hook_not_found")
-            stats = con.execute(
-                "SELECT COUNT(*) deliveries,COALESCE(SUM(duplicate_count),0) duplicates,"
-                "SUM(CASE WHEN status='unsupported' THEN 1 ELSE 0 END) unsupported "
-                "FROM webhook_shadow_receipts WHERE hook_id=?",
-                (hook_id,),
-            ).fetchone()
-            recent = con.execute(
-                "SELECT r.delivery_id,r.hook_id,r.event_name,r.action,r.event_key,r.repository,r.status,"
-                "r.enqueue_status,r.job_id,"
-                "r.duplicate_count,r.created_at,h.target hook_target,h.target_type hook_target_type "
-                "FROM webhook_shadow_receipts r LEFT JOIN webhook_hooks h ON h.hook_id=r.hook_id "
-                "WHERE r.hook_id=? ORDER BY r.created_at DESC,r.delivery_id DESC LIMIT 20",
-                (hook_id,),
-            ).fetchall()
-            recent_actions = con.execute(
-                "SELECT id,action,actor,status,detail,created_at,completed_at "
-                "FROM webhook_hook_actions WHERE hook_id=? ORDER BY created_at DESC,id DESC LIMIT 10",
-                (hook_id,),
-            ).fetchall()
+        detail = webhook_repository.hook_detail(hook_id)
+        if detail is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="webhook_hook_not_found")
+        stats = detail["stats"]
         return {
-            "hook": _webhook_hook_payload(hook),
+            "hook": _webhook_hook_payload(detail["hook"]),
             "stats": {
                 "deliveries": stats["deliveries"],
                 "duplicates": stats["duplicates"],
                 "unsupported": stats["unsupported"] or 0,
             },
-            "recent_deliveries": [_webhook_delivery_payload(row) for row in recent],
-            "recent_actions": [dict(row) for row in recent_actions],
+            "recent_deliveries": [
+                _webhook_delivery_payload(row)
+                for row in detail["recent_deliveries"]
+            ],
+            "recent_actions": detail["recent_actions"],
         }
 
     @app.post("/api/webhooks/github/hooks/{hook_id}/ping")
@@ -1207,32 +1092,24 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         ensure_webhook_schema()
         created_at = datetime.now(UTC).isoformat()
-        with sqlite3.connect(config.db) as con:
-            con.row_factory = sqlite3.Row
-            hook = con.execute(
-                "SELECT hook_id,target,target_type,ping_url FROM webhook_hooks WHERE hook_id=?",
-                (hook_id,),
-            ).fetchone()
-            if hook is None:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="webhook_hook_not_found")
-            try:
-                endpoint = _webhook_ping_endpoint(hook)
-            except ValueError as exc:
-                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-            cursor = con.execute(
-                "INSERT INTO webhook_hook_actions(hook_id,action,actor,status,created_at) VALUES(?,?,?,?,?)",
-                (hook_id, "ping", str(profile["login"]), "requested", created_at),
-            )
-            action_id = int(cursor.lastrowid)
-            con.commit()
+        hook = webhook_repository.ping_target(hook_id)
+        if hook is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="webhook_hook_not_found")
+        try:
+            endpoint = _webhook_ping_endpoint(hook)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        action_id = webhook_repository.create_hook_action(
+            hook_id, "ping", str(profile["login"]), created_at
+        )
 
         def finish(action_status: str, detail: str) -> None:
-            with sqlite3.connect(config.db) as con:
-                con.execute(
-                    "UPDATE webhook_hook_actions SET status=?,detail=?,completed_at=? WHERE id=?",
-                    (action_status, detail[:1000], datetime.now(UTC).isoformat(), action_id),
-                )
-                con.commit()
+            webhook_repository.finish_hook_action(
+                action_id,
+                action_status,
+                detail,
+                datetime.now(UTC).isoformat(),
+            )
 
         try:
             result = _request_webhook_ping(endpoint, gh_bin=_env("GITHUB_AGENT_BRIDGE_GH_BIN", "gh"))
@@ -1266,34 +1143,16 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         _: dict[str, Any] = Depends(current_admin_profile),
     ) -> dict[str, Any]:
         ensure_webhook_schema()
-        clauses: list[str] = []
-        parameters: list[Any] = []
-        if cursor:
-            cursor_created_at, cursor_delivery_id = _decode_webhook_delivery_cursor(cursor)
-            clauses.append("(r.created_at<? OR (r.created_at=? AND r.delivery_id<?))")
-            parameters.extend((cursor_created_at, cursor_created_at, cursor_delivery_id))
-        for column, value in (
-            ("r.hook_id", hook_id),
-            ("r.event_name", event_name),
-            ("r.repository", repository),
-            ("r.status", result),
-            ("r.enqueue_status", enqueue_status),
-        ):
-            if value:
-                clauses.append(f"{column}=?")
-                parameters.append(value)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        parameters.append(limit + 1)
-        with sqlite3.connect(config.db) as con:
-            con.row_factory = sqlite3.Row
-            delivery_rows = con.execute(
-                "SELECT r.delivery_id,r.hook_id,r.event_name,r.action,r.event_key,r.repository,r.status,"
-                "r.enqueue_status,r.job_id,"
-                "r.duplicate_count,r.created_at,h.target hook_target,h.target_type hook_target_type "
-                f"FROM webhook_shadow_receipts r LEFT JOIN webhook_hooks h ON h.hook_id=r.hook_id {where} "
-                "ORDER BY r.created_at DESC,r.delivery_id DESC LIMIT ?",
-                parameters,
-            ).fetchall()
+        decoded_cursor = _decode_webhook_delivery_cursor(cursor) if cursor else None
+        delivery_rows = webhook_repository.list_deliveries(
+            limit,
+            cursor=decoded_cursor,
+            hook_id=hook_id,
+            event_name=event_name,
+            repository=repository,
+            result=result,
+            enqueue_status=enqueue_status,
+        )
         page = delivery_rows[:limit]
         next_cursor = None
         if len(delivery_rows) > limit and page:
@@ -1309,20 +1168,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         _: dict[str, Any] = Depends(current_admin_profile),
     ) -> dict[str, Any]:
         ensure_webhook_schema()
-        with sqlite3.connect(config.db) as con:
-            con.row_factory = sqlite3.Row
-            row = con.execute(
-                "SELECT r.delivery_id,r.hook_id,r.event_name,r.action,r.event_key,r.repository,r.status,"
-                "r.enqueue_status,r.duplicate_count,r.created_at,r.payload_hash,r.payload_json,"
-                "h.target hook_target,h.target_type hook_target_type,"
-                "j.id job_id,j.work_key job_work_key,j.status job_status,j.action job_action,"
-                "j.decision job_decision,j.work_intent job_work_intent,j.updated_at job_updated_at "
-                "FROM webhook_shadow_receipts r "
-                "LEFT JOIN webhook_hooks h ON h.hook_id=r.hook_id "
-                "LEFT JOIN ingest_receipts i ON i.source='webhook' AND i.source_key=r.delivery_id "
-                "LEFT JOIN jobs j ON j.id=COALESCE(r.job_id,i.job_id) WHERE r.delivery_id=?",
-                (delivery_id,),
-            ).fetchone()
+        row = webhook_repository.delivery_detail(delivery_id)
         if row is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="webhook_delivery_not_found")
         payload = json.loads(row["payload_json"]) if row["payload_json"] else None
