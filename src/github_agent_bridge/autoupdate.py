@@ -319,9 +319,11 @@ def _restore_sqlite_db(db: str | Path, backup_path: str | Path) -> dict[str, Any
 def default_migration_command(db: str | Path, *, python_bin: str = sys.executable) -> list[str]:
     return [
         python_bin,
-        "-c",
-        "import sys; from github_agent_bridge.queue import JobQueue; JobQueue(sys.argv[1])",
+        "-m",
+        "github_agent_bridge.cli",
+        "--db",
         str(Path(db).expanduser()),
+        "migrate-db",
     ]
 
 
@@ -579,7 +581,7 @@ def apply_update_plan(
         migration_state["status"] = "applying"
         command = list(migration_command or default_migration_command(db))
         proc = runner(command, None)
-        result["commands"].append(_command_result("migration", command, proc, reason="apply packaged SQLite schema"))
+        result["commands"].append(_command_result("migration", command, proc, reason="apply versioned SQLite migrations"))
         if proc.returncode != 0:
             migration_state["status"] = "failed"
             migration_state["error"] = proc.stderr.strip() or proc.stdout.strip()

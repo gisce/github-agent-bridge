@@ -284,14 +284,28 @@ Python executable, or another package source. Use `--skip-install` or
 For releases that include SQLite schema/migration changes, `--apply` stays
 conservative. If the active queue is not quiet, it refuses before installing and
 records `active_jobs_block_migration`. If the queue is quiet, it backs up the
-SQLite database first, installs the target package, runs the packaged schema
-initialization from a fresh Python subprocess, restarts the safe immediate
-systemd units, and then runs post-checks for installed version, queue state, and
-restarted services. Set `GITHUB_AGENT_BRIDGE_AUTOUPDATE_BACKUP_DIR` or pass
+SQLite database first, installs the target package, runs `gab migrate-db` from
+a fresh Python subprocess, restarts the safe immediate systemd units, and then
+runs post-checks for installed version, queue state, and restarted services.
+Set `GITHUB_AGENT_BRIDGE_AUTOUPDATE_BACKUP_DIR` or pass
 `--backup-dir` to choose where the pre-migration SQLite backups are written.
 Migration or post-check failures are recorded in autoupdate state with
 `degraded=true`, the backup path, command output, and the blocker that needs
 operator recovery.
+
+The packaged migrations are ordered, transactional steps under
+`src/github_agent_bridge/sql/migrations/`. Successful steps are recorded with
+their version, name, checksum, and application time in `schema_migrations`.
+`schema.sql` remains the current snapshot for fresh databases; migrations make
+existing databases converge on that snapshot and perform required backfills.
+Applied migration files are immutable: a checksum mismatch or a database newer
+than the installed package aborts startup instead of guessing. For an explicit
+operator run outside autoupdate (after independently ensuring the queue is
+quiet), use:
+
+```bash
+gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 migrate-db
+```
 
 Dashboard admins can run the same first-step workflow from the autoupdate notice:
 `Check now` refreshes and records the plan, `Apply update` runs the immediate
