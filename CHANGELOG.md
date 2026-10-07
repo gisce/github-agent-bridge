@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.75.2 (2026-10-07)
+
+### Bug Fixes
+
+- Classify merged pull request notifications safely
+  ([`8afa7c7`](https://github.com/gisce/github-agent-bridge/commit/8afa7c73142b9c66275a8bf740ebf9ea08d76fd2))
+
+- Enforce actionable GitHub feedback
+  ([`0c5f970`](https://github.com/gisce/github-agent-bridge/commit/0c5f970503556d4dcecce384f54cde27b0ac1fb5))
+
+- Preserve actionable PR review semantics
+  ([`b01e0a4`](https://github.com/gisce/github-agent-bridge/commit/b01e0a4ce7b361c4a5b6b37100e736213928b39c))
+
+### Refactoring
+
+- Extract acknowledgement and state repositories
+  ([`244a224`](https://github.com/gisce/github-agent-bridge/commit/244a2244a216d6fc5b7f876ce2263552fd1a8a5f))
+
+
 ## v0.75.1 (2026-10-07)
 
 ### Bug Fixes
