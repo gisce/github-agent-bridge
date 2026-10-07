@@ -15,6 +15,20 @@ def test_shadow_github_reaction_has_no_external_failure():
     assert GitHubClient(gh_bin="definitely-not-present", mode=RunMode.SHADOW).react_eyes(make_job().context) is True
 
 
+def test_shadow_commit_status_has_no_external_side_effect():
+    client = RecordingGitHubClient()
+    client.mode = RunMode.SHADOW
+
+    assert client.create_commit_status(
+        "gisce/erp",
+        "fbd7bc1",
+        "pending",
+        "github-agent-bridge/agent",
+        "Agent queued (job #1)",
+    ) == (True, None)
+    assert client.calls == []
+
+
 def test_live_github_command_handles_missing_gh_binary():
     client = GitHubClient(gh_bin="definitely-not-present", mode=RunMode.LIVE)
 
@@ -35,10 +49,36 @@ class RecordingGitHubClient(GitHubClient):
 
         class Result:
             returncode = 0
-            stdout = '[{"id": 123}, {"id": 456}]' if args[-1].endswith("/comments") else "{}"
+            stdout = (
+                '[{"id": 123}, {"id": 456}]'
+                if args[-1].endswith("/comments")
+                else "fbd7bc190e4f63b00785671144e834a3c99c3fb1"
+                if len(args) > 1 and "/pulls/" in args[1]
+                else "{}"
+            )
             stderr = ""
 
         return Result()
+
+
+def test_pull_request_sha_resolution_ignores_commit_links_from_comment_body():
+    client = RecordingGitHubClient()
+    ctx = GitHubContext(
+        ["https://github.com/gisce/erp/pull/1#issuecomment-2"],
+        "gisce/erp",
+        1,
+        comment_id=2,
+        commit_sha="deadbeef",
+        target_kind="issue_comment",
+    )
+
+    sha, error = client.resolve_commit_sha(ctx)
+
+    assert sha == "fbd7bc190e4f63b00785671144e834a3c99c3fb1"
+    assert error is None
+    assert client.calls == [
+        ["api", "repos/gisce/erp/pulls/1", "--jq", ".head.sha"]
+    ]
 
 
 def test_review_reaction_targets_review_comments():

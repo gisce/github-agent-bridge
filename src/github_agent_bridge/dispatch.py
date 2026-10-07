@@ -123,6 +123,55 @@ class GitHubClient:
             return None
         return result.stdout.strip() or None
 
+    def resolve_commit_sha(self, ctx: GitHubContext) -> tuple[str | None, str | None]:
+        if ctx.commit_sha and ctx.target_kind in {"commit", "commit_comment"}:
+            return ctx.commit_sha, None
+        if not ctx.is_pull_request or not ctx.repo or not ctx.issue_number:
+            return None, "GitHub target is not a pull request or commit"
+        result = self._run(
+            ["api", f"repos/{ctx.repo}/pulls/{ctx.issue_number}", "--jq", ".head.sha"]
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            return None, detail or f"gh exited {result.returncode} while resolving PR head"
+        sha = result.stdout.strip()
+        if not sha:
+            return None, "GitHub returned an empty pull request head SHA"
+        return sha, None
+
+    def create_commit_status(
+        self,
+        repo: str,
+        sha: str,
+        state: str,
+        context: str,
+        description: str,
+        target_url: str | None = None,
+    ) -> tuple[bool, str | None]:
+        if self.mode != RunMode.LIVE:
+            return True, None
+        args = [
+            "api",
+            "-X",
+            "POST",
+            f"repos/{repo}/statuses/{sha}",
+            "-f",
+            f"state={state}",
+            "-f",
+            f"context={context[:100]}",
+            "-f",
+            f"description={description[:140]}",
+            "-H",
+            "Accept: application/vnd.github+json",
+        ]
+        if target_url:
+            args.extend(["-f", f"target_url={target_url}"])
+        result = self._run(args)
+        if result.returncode == 0:
+            return True, None
+        detail = result.stderr.strip() or result.stdout.strip()
+        return False, detail or f"gh exited {result.returncode} while publishing commit status"
+
     def pull_request_review(self, ctx: GitHubContext) -> dict | None:
         if not ctx.repo or not ctx.review_id:
             return None

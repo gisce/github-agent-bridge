@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import dataclass
 
-from .dispatch import GitHubClient, OpenClawDispatcher
+from .dispatch import GitHubClient, OpenClawDispatcher, RunMode
 from .models import GitHubContext
 from .policy import Policy, complexity_from_metadata
 from .queue import JobQueue
@@ -70,6 +70,7 @@ class ExecutorPool:
         self.github = github or GitHubClient()
         self.config = config or ExecutorConfig()
         self.stop_event = threading.Event()
+        self._commit_status_wakeup = threading.Event()
         self.executor_id = f"executor-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         self._executor_lock_file = None
         self._worker_failure_lock = threading.Lock()
@@ -151,6 +152,87 @@ class ExecutorPool:
             pass
         return self.queue.acknowledgement_ok(job_id)
 
+    def _claim_commit_status(self, job_id: int | None = None):
+        while not self.stop_event.is_set():
+            try:
+                return self.queue.claim_commit_status(job_id)
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_contention_error(exc):
+                    raise
+                if self.stop_event.wait(self.config.idle_sleep_seconds):
+                    return None
+        return None
+
+    def publish_commit_status_one(self, job_id: int | None = None) -> bool:
+        claim = self._claim_commit_status(job_id)
+        if claim is None:
+            return False
+        live = (
+            str(getattr(self.github, "mode", RunMode.LIVE.value))
+            == RunMode.LIVE.value
+        )
+        try:
+            error = None
+            if not live:
+                # Consume the outbox item without resolving the PR or calling
+                # GitHub so a later live run cannot leak shadow/dry-run work.
+                ok = True
+            else:
+                sha = claim.sha
+                if not sha:
+                    sha, error = self.github.resolve_commit_sha(
+                        claim.github_context
+                    )
+                    if sha:
+                        sha = self.queue.pin_commit_status_sha(claim.id, sha)
+                if not sha:
+                    ok = False
+                else:
+                    dashboard_url = os.getenv(
+                        "GITHUB_AGENT_BRIDGE_DASHBOARD_PUBLIC_URL", ""
+                    ).rstrip("/")
+                    target_url = (
+                        f"{dashboard_url}/jobs/{claim.job_id}"
+                        if dashboard_url
+                        else None
+                    )
+                    ok, error = self.github.create_commit_status(
+                        claim.repo,
+                        sha,
+                        claim.desired_state,
+                        claim.context_name,
+                        claim.description,
+                        target_url,
+                    )
+            self.queue.finish_commit_status(
+                claim.id, claim.revision, ok, error
+            )
+        except Exception as exc:
+            ok = False
+            error = f"{type(exc).__name__}: {exc}"
+            self.queue.finish_commit_status(
+                claim.id, claim.revision, False, error
+            )
+        if live:
+            self.queue.add_worklog(
+                claim.job_id,
+                "commit_status_published" if ok else "commit_status_failed",
+                (
+                    f"GitHub commit status {claim.desired_state} published"
+                    if ok
+                    else f"GitHub commit status {claim.desired_state} delivery failed"
+                ),
+                error,
+            )
+        return True
+
+    def publish_commit_statuses(self, job_id: int | None = None) -> None:
+        while self.publish_commit_status_one(job_id):
+            pass
+
+    def _wake_commit_status_publisher(self) -> None:
+        self._commit_status_wakeup.set()
+
     def work_one(self, worker_id: str | None = None) -> bool:
         worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
         if self.queue.executor_paused():
@@ -162,6 +244,7 @@ class ExecutorPool:
             self._set_worker_state(worker_id, "idle")
             return False
         self._set_worker_state(worker_id, "running", job.id)
+        self._wake_commit_status_publisher()
         if self.stop_event.is_set():
             self.queue.block_running(
                 "executor shutdown interrupted job before dispatch",
@@ -169,6 +252,7 @@ class ExecutorPool:
                 job_ids=[job.id],
                 locked_by={worker_id},
             )
+            self._wake_commit_status_publisher()
             return True
         dispatched = False
         try:
@@ -179,14 +263,14 @@ class ExecutorPool:
                 ack_ok = self.github.react_ack_no_comment(job.context)
                 summary = "non-actionable review; skipped dispatch"
                 detail = f"eyes={reaction_ok} ack={ack_ok}"
-                self.queue.finish(job.id, "done", summary, detail)
+                self._finish(job, "done", summary, detail)
                 return True
             if job.action == "reply_comment" and job.context.comment_id and not assigned_to_bot and not self.github.issue_comment_addresses_current_user(job.context):
                 reaction_ok = self.acknowledge_job(job.id)
                 ack_ok = self.github.react_ack_no_comment(job.context)
                 summary = "comment not addressed to bot and bot not assigned; skipped dispatch"
                 detail = f"eyes={reaction_ok} ack={ack_ok}"
-                self.queue.finish(job.id, "done", summary, detail)
+                self._finish(job, "done", summary, detail)
                 return True
             if job.action == "reply_comment" and job.work_intent == "review_only" and (assigned_to_bot or authored_by_bot):
                 reason = "PR/issue assigned to authenticated bot" if assigned_to_bot else "PR authored by authenticated bot"
@@ -239,6 +323,7 @@ class ExecutorPool:
                     detail = result.detail or "OpenClaw command succeeded, but no new bot comment was found in the GitHub thread."
                     if job.attempts <= self.config.missing_followup_retries:
                         self.queue.requeue_running(job.id, "agent finished without visible GitHub follow-up; auto-requeued", detail)
+                        self._wake_commit_status_publisher()
                         return True
                     self._finish(job, "blocked", summary, detail, notify_completion=True)
                     return True
@@ -266,6 +351,7 @@ class ExecutorPool:
                         result.detail,
                         fresh_session=self._dispatch_failure_needs_fresh_session(result),
                     )
+                    self._wake_commit_status_publisher()
                     return True
                 self._finish(job, "blocked", reason, result.detail, notify_completion=True)
         except Exception as exc:
@@ -283,6 +369,7 @@ class ExecutorPool:
         followup_url: str | None = None,
     ) -> None:
         self.queue.finish(job.id, status, summary, detail)
+        self._wake_commit_status_publisher()
         if not notify_completion:
             return
         actors = [actor for actor in [job.trigger_actor, *self.queue.coalesced_trigger_actors(job.id)] if actor]
@@ -319,6 +406,13 @@ class ExecutorPool:
             if not self.acknowledge_one():
                 self.stop_event.wait(self.config.idle_sleep_seconds)
 
+    def _commit_status_loop(self) -> None:
+        while not self.stop_event.is_set():
+            if self.publish_commit_status_one():
+                continue
+            self._commit_status_wakeup.wait(self.config.idle_sleep_seconds)
+            self._commit_status_wakeup.clear()
+
     def _loop(self, worker_id: str) -> None:
         while not self.stop_event.is_set():
             did = self.work_one(worker_id)
@@ -339,6 +433,7 @@ class ExecutorPool:
 
     def _request_shutdown(self) -> None:
         self.stop_event.set()
+        self._commit_status_wakeup.set()
         shutdown = getattr(self.dispatcher, "shutdown", None)
         if callable(shutdown):
             shutdown()
@@ -394,6 +489,7 @@ class ExecutorPool:
                 "No prior executor process owns this running job. It was blocked, not auto-requeued, to avoid duplicate external actions.",
             )
             self.queue.recover_acknowledgements()
+            self.queue.recover_commit_statuses()
             self.queue.set_state("executor_process_tracking_id", self.executor_id)
             self.queue.set_state("executor_worker_count", str(worker_count))
             for worker_id in worker_ids:
@@ -408,7 +504,8 @@ class ExecutorPool:
                 for worker_id in worker_ids
             ]
             acknowledgement_thread = threading.Thread(target=self._acknowledgement_loop, daemon=False)
-            threads = [*heartbeat_threads, *worker_threads, acknowledgement_thread]
+            commit_status_thread = threading.Thread(target=self._commit_status_loop, daemon=False)
+            threads = [*heartbeat_threads, commit_status_thread, *worker_threads, acknowledgement_thread]
             for thread in threads:
                 thread.start()
             while any(thread.is_alive() for thread in worker_threads):
