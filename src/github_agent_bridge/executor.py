@@ -3,12 +3,14 @@ from __future__ import annotations
 import fcntl
 import os
 import signal
+import sqlite3
 import threading
 import time
 import uuid
 from dataclasses import dataclass
 
 from .dispatch import GitHubClient, OpenClawDispatcher
+from .models import GitHubContext
 from .policy import Policy, complexity_from_metadata
 from .queue import JobQueue
 from .session_events import redact_event_detail
@@ -36,6 +38,17 @@ TRANSIENT_DISPATCH_ERROR_MARKERS = (
     "summarization failed: connection error",
     "codex app-server client closed before turn completed",
 )
+
+
+def _is_sqlite_contention_error(exc: sqlite3.OperationalError) -> bool:
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(error_code, int) and error_code & 0xFF in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }:
+        return True
+    message = str(exc).lower()
+    return "database" in message and "locked" in message
 
 
 @dataclass(frozen=True)
@@ -76,14 +89,46 @@ class ExecutorPool:
             worker_id, self.executor_id, os.getpid(), loop_state, active_job_id, errors
         )
 
+    def _record_worker_storage_error(self, worker_id: str) -> None:
+        with self._worker_state_lock:
+            loop_state, active_job_id, errors = self._worker_states.get(
+                worker_id, ("starting", None, 0)
+            )
+            self._worker_states[worker_id] = (loop_state, active_job_id, errors + 1)
+
     def _heartbeat_loop(self, worker_id: str) -> None:
         while not self.stop_event.is_set():
-            self._record_worker_heartbeat(worker_id)
+            try:
+                self._record_worker_heartbeat(worker_id)
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_contention_error(exc):
+                    raise
+                self._record_worker_storage_error(worker_id)
+                if self.stop_event.wait(self.config.idle_sleep_seconds):
+                    break
+                continue
             self.stop_event.wait(self.config.heartbeat_interval_seconds)
-        self._record_worker_heartbeat(worker_id)
+        try:
+            self._record_worker_heartbeat(worker_id)
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_contention_error(exc):
+                raise
+
+    def _claim_acknowledgement(
+        self, job_id: int | None = None
+    ) -> tuple[int, int, GitHubContext] | None:
+        while not self.stop_event.is_set():
+            try:
+                return self.queue.claim_acknowledgement(job_id)
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_contention_error(exc):
+                    raise
+                if self.stop_event.wait(self.config.idle_sleep_seconds):
+                    return None
+        return None
 
     def acknowledge_one(self, job_id: int | None = None) -> bool:
-        acknowledgement = self.queue.claim_acknowledgement(job_id)
+        acknowledgement = self._claim_acknowledgement(job_id)
         if acknowledgement is None:
             return False
         acknowledgement_id, acknowledged_job_id, ctx = acknowledgement
@@ -306,7 +351,7 @@ class ExecutorPool:
     def _acknowledgement_loop(self) -> None:
         while not self.stop_event.is_set():
             if not self.acknowledge_one():
-                time.sleep(self.config.idle_sleep_seconds)
+                self.stop_event.wait(self.config.idle_sleep_seconds)
 
     def _loop(self, worker_id: str) -> None:
         while not self.stop_event.is_set():

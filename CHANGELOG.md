@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v0.75.1 (2026-10-07)
+
+### Bug Fixes
+
+- Bound acknowledgement retries before GitHub effects
+  ([`e5481dd`](https://github.com/gisce/github-agent-bridge/commit/e5481dd7e02a9379f14a4daf220b4076a89b1a93))
+
+- Retry transient SQLite executor contention
+  ([`170ccdf`](https://github.com/gisce/github-agent-bridge/commit/170ccdf0c0d30f40f68db57324d0f195fdc8c909))
+
+
 ## v0.75.0 (2026-10-07)
 
 ### Bug Fixes
