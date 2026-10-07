@@ -241,8 +241,29 @@ def plan_systemd_actions(decision: str, classification: dict[str, Any], *, units
 
 
 def active_queue_counts(queue: JobQueue) -> dict[str, int]:
+    return dict(update_queue_state(queue)["active_counts"])
+
+
+def update_queue_state(queue: JobQueue) -> dict[str, Any]:
     stats = queue.stats()
-    return {status: int(stats.get(status, 0)) for status in ACTIVE_JOB_STATUSES}
+    executor_paused = queue.executor_paused()
+    active_statuses = ("running",) if executor_paused else ACTIVE_JOB_STATUSES
+    active_counts = {status: int(stats.get(status, 0)) for status in active_statuses}
+    return {
+        "active_counts": active_counts,
+        "active_total": sum(active_counts.values()),
+        "executor_paused": executor_paused,
+    }
+
+
+def _service_plan_restarts_executor(service_plan: dict[str, Any]) -> bool:
+    units = service_plan.get("units") if isinstance(service_plan.get("units"), dict) else {}
+    executor_unit = str(units.get("executor") or DEFAULT_SYSTEMD_UNITS["executor"])
+    return any(
+        action.get("unit") == executor_unit and action.get("command") in {"restart", "try-restart"}
+        for action in service_plan.get("immediate") or []
+        if isinstance(action, dict)
+    )
 
 
 def load_update_state(queue: JobQueue) -> dict[str, Any]:
@@ -485,6 +506,7 @@ def _record_degraded_update_state(
         return
     state = record_update_plan(db, plan)
     now = utc_now()
+    live_queue = execution.get("queue") if isinstance(execution.get("queue"), dict) else None
     state.update(
         {
             "updated_at": now,
@@ -498,6 +520,8 @@ def _record_degraded_update_state(
             },
         }
     )
+    if live_queue is not None:
+        state["queue"] = live_queue
     save_update_state(JobQueue(db), state)
 
 
@@ -539,11 +563,21 @@ def apply_update_plan(
         return result
     migration_files = list(classification.get("migration_files") or [])
     migration_state: dict[str, Any] = {}
-    queue_info = plan.get("queue") if isinstance(plan.get("queue"), dict) else {}
+    service_plan = plan.get("service_plan") if isinstance(plan.get("service_plan"), dict) else {}
+    queue_info = (
+        update_queue_state(JobQueue(db))
+        if db is not None
+        else plan.get("queue") if isinstance(plan.get("queue"), dict) else {}
+    )
+    result["queue"] = queue_info
     active_total = int(queue_info.get("active_total") or 0)
     if migration_files and active_total:
         result["blocked"].append("active_jobs_block_migration")
         _record_degraded_update_state(db, plan, migration={"required": True, "files": migration_files, "status": "deferred"}, execution=result, degraded=False)
+        return result
+    if active_total and _service_plan_restarts_executor(service_plan):
+        result["blocked"].append("active_jobs_block_executor_reload")
+        _record_degraded_update_state(db, plan, migration={}, execution=result, degraded=False)
         return result
     if migration_files and db is None:
         result["blocked"].append("missing_db_for_migration")
@@ -578,6 +612,13 @@ def apply_update_plan(
             return result
 
     if migration_files and run_migrations:
+        queue_info = update_queue_state(JobQueue(db))
+        result["queue"] = queue_info
+        if int(queue_info.get("active_total") or 0):
+            migration_state["status"] = "deferred"
+            result["blocked"].append("active_jobs_block_migration")
+            _record_degraded_update_state(db, plan, migration=migration_state, execution=result, degraded=False)
+            return result
         migration_state["status"] = "applying"
         command = list(migration_command or default_migration_command(db))
         proc = runner(command, None)
@@ -600,7 +641,19 @@ def apply_update_plan(
         migration_state["applied_at"] = utc_now()
 
     if run_systemd:
-        service_plan = plan.get("service_plan") if isinstance(plan.get("service_plan"), dict) else {}
+        if db is not None and _service_plan_restarts_executor(service_plan):
+            queue_info = update_queue_state(JobQueue(db))
+            result["queue"] = queue_info
+            if int(queue_info.get("active_total") or 0):
+                result["blocked"].append("active_jobs_block_executor_reload")
+                _record_degraded_update_state(
+                    db,
+                    plan,
+                    migration=migration_state,
+                    execution=result,
+                    degraded=bool(migration_state.get("status") == "applied"),
+                )
+                return result
         if not _run_systemd_actions(service_plan.get("immediate") or [], result, systemctl_bin=systemctl_bin, runner=runner):
             _record_degraded_update_state(db, plan, migration=migration_state, execution=result)
             return result
@@ -665,16 +718,13 @@ def complete_pending_reload(
 
     queue = JobQueue(db)
     state = load_update_state(queue)
-    active_counts = active_queue_counts(queue)
-    active_total = sum(active_counts.values())
+    queue_state = update_queue_state(queue)
+    active_total = int(queue_state["active_total"])
     result: dict[str, Any] = {
         "completed": False,
         "blocked": [],
         "commands": [],
-        "queue": {
-            "active_counts": active_counts,
-            "active_total": active_total,
-        },
+        "queue": queue_state,
         "state": state,
     }
 
@@ -750,8 +800,8 @@ def plan_update(
     repo_path = Path(repo_dir).expanduser().resolve()
     current_tag = f"v{installed_version.lstrip('v')}"
     release = ReleaseInfo(tag_name=target_tag, source="explicit_target") if target_tag else latest_release(repo, gh_bin=gh_bin, runner=runner)
-    active_counts = active_queue_counts(queue)
-    active_total = sum(active_counts.values())
+    queue_state = update_queue_state(queue)
+    active_total = int(queue_state["active_total"])
 
     warnings: list[str] = []
     try:
@@ -798,10 +848,7 @@ def plan_update(
         "installed_tag": current_tag,
         "target": release.to_json(),
         "up_to_date": up_to_date,
-        "queue": {
-            "active_counts": active_counts,
-            "active_total": active_total,
-        },
+        "queue": queue_state,
         "classification": classification,
         "decision": decision,
         "dashboard_restart_allowed": dashboard_restart_allowed,

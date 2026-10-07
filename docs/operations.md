@@ -201,9 +201,10 @@ The pause survives executor restarts. Resume after the update and health checks:
 gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 resume-executor
 ```
 
-`gab update` still counts pending jobs as active, even while paused. For an
-update window with pending jobs, plan the package and service restart separately;
-do not assume `update --complete-pending` will restart the executor automatically.
+While the executor is paused, update planning only counts `running` jobs as
+active. Pending and waiting-approval jobs remain queued across the update and do
+not block migrations or the executor reload. Refresh the update plan after
+pausing, wait for `running=0`, apply the update, and resume the executor.
 
 ## Safe update planning
 
@@ -229,7 +230,9 @@ gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 \
 The planner is deliberately conservative. Dashboard-only changes can be staged
 while executor jobs are active, executor/shared changes set a pending reload
 when the queue is busy, and SQLite schema changes are deferred while active jobs
-exist.
+exist. Normally `pending`, `running`, and `waiting_approval` are active; once the
+executor is paused, only `running` blocks an update because queued jobs cannot be
+claimed.
 
 The JSON output also includes a `service_plan` for user-level systemd. It names
 the executor, dashboard, reader, monitor, and feedback units, shows whether a
