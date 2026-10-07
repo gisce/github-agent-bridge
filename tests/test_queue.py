@@ -353,7 +353,7 @@ def test_enqueue_rolls_back_job_when_acknowledgement_cannot_be_persisted(tmp_pat
     def fail_acknowledgement(*args, **kwargs):
         raise RuntimeError("acknowledgement persistence failed")
 
-    monkeypatch.setattr(q, "_queue_acknowledgement", fail_acknowledgement)
+    monkeypatch.setattr(q.acknowledgements, "add_pending", fail_acknowledgement)
 
     with pytest.raises(RuntimeError, match="acknowledgement persistence failed"):
         q.enqueue(notif(1, "<atomic-ack@github.com>", BODY1), policy())
