@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v0.75.0 (2026-10-07)
+
+### Bug Fixes
+
+- Allow updates with paused pending jobs
+  ([`4fc3cdc`](https://github.com/gisce/github-agent-bridge/commit/4fc3cdc9be56e291428ddbda49b40c581447e221))
+
+- Serialize concurrent SQLite migrations
+  ([`e2cb119`](https://github.com/gisce/github-agent-bridge/commit/e2cb119f114b41d30634f5e94e2e5867cd29619d))
+
+### Features
+
+- Add SQLite persistence foundation
+  ([`b09023a`](https://github.com/gisce/github-agent-bridge/commit/b09023abf8fceb2607f00b0a4515fcc8733ca5fe))
+
+
 ## v0.74.0 (2026-10-07)
 
 ### Features
