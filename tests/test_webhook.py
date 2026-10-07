@@ -12,8 +12,10 @@ from github_agent_bridge import backend
 from github_agent_bridge.actors import TriggerActor
 from github_agent_bridge.backend import DashboardConfig, _encode_session, _sign, create_app, create_webhook_app
 from github_agent_bridge.models import Notification
+from github_agent_bridge.parser import extract_github_context
 from github_agent_bridge.policy import Policy
 from github_agent_bridge.queue import JobQueue
+from github_agent_bridge.webhook import webhook_notification
 
 
 SECRET = "test-secret"
@@ -92,6 +94,25 @@ def non_actionable_issue_comment_payload(*, comment_id: int = 5948901951) -> byt
         "sender": {"login": "ecarreras"},
     }).encode()
 
+
+def test_pull_request_issue_comment_normalizes_to_pull_request_target():
+    payload = json.loads(actionable_issue_comment_payload())
+    payload["issue"]["pull_request"] = {
+        "url": "https://api.github.com/repos/gisce/github-agent-bridge/pulls/191"
+    }
+
+    notification = webhook_notification(
+        "issue_comment", "pull-comment", payload, bot_logins={"giscebot"}
+    )
+
+    assert notification is not None
+    ctx = extract_github_context(notification.body)
+    assert ctx.short_url == (
+        "https://github.com/gisce/github-agent-bridge/pull/191"
+        "#issuecomment-5948901951"
+    )
+    assert ctx.is_pull_request is True
+    assert ctx.supports_commit_status is True
 
 def bot_authored_pull_request_issue_comment_payload(
     *, comment_id: int = 5948901952

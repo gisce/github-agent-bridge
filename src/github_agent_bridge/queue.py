@@ -11,6 +11,8 @@ from .parser import classify_github_action, classify_work_intent, extract_github
 from .persistence import (
     AcknowledgementRepository,
     ClosingConnection,
+    CommitStatusClaim,
+    CommitStatusRepository,
     Database,
     StateRepository,
 )
@@ -84,6 +86,7 @@ class JobQueue:
         self.database = Database(self.path)
         self.init()
         self.acknowledgements = AcknowledgementRepository(self.database)
+        self.commit_statuses = CommitStatusRepository(self.database)
         self.state = StateRepository(self.database)
 
     def connect(self) -> sqlite3.Connection:
@@ -105,18 +108,20 @@ class JobQueue:
         history_exists = con.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
         ).fetchone()
-        versioned = bool(
+        baseline_applied = bool(
             history_exists
-            and con.execute("SELECT 1 FROM schema_migrations LIMIT 1").fetchone()
+            and con.execute(
+                "SELECT 1 FROM schema_migrations WHERE version=1"
+            ).fetchone()
         )
-        if versioned:
+        if baseline_applied:
             # Validate/apply immutable steps before the rolling schema snapshot can
             # touch a database created by this or a newer package version.
             apply_migrations(con)
             con.executescript(SCHEMA)
         else:
-            # Legacy databases need the snapshot to create missing tables before
-            # the baseline migration can perform additive changes and backfills.
+            # Legacy or incomplete histories need the snapshot to create missing
+            # tables before the baseline migration can perform its backfills.
             con.executescript(SCHEMA)
             apply_migrations(con)
 
@@ -245,6 +250,21 @@ class JobQueue:
                         "UPDATE ingest_receipts SET status='duplicate',job_id=?,updated_at=? WHERE id=?",
                         (event["job_id"], now, receipt_id),
                     )
+                    if source == "webhook" and event["job_id"]:
+                        duplicate_job = con.execute(
+                            "SELECT status,decision,attempts FROM jobs WHERE id=?",
+                            (event["job_id"],),
+                        ).fetchone()
+                        if duplicate_job is not None:
+                            self._add_initial_commit_status(
+                                con,
+                                int(event["job_id"]),
+                                ctx,
+                                str(duplicate_job["status"]),
+                                str(duplicate_job["decision"]),
+                                int(duplicate_job["attempts"]),
+                                now,
+                            )
                     con.commit()
                     job = self.get(int(event["job_id"])) if event["job_id"] else None
                     return job, "duplicate"
@@ -291,6 +311,16 @@ class JobQueue:
                         con.execute("UPDATE jobs SET coalesced_count=coalesced_count+1, uid=?, message_id=message_id, subject=?, context_json=?, updated_at=? WHERE id=?", (n.uid, n.subject, ctx.to_json(), now, existing["id"]))
                     self._log(con, existing["id"], ctx.work_key, "coalesced", "Notification coalesced into active job", n.message_id)
                     self.acknowledgements.add_pending(con, int(existing["id"]), ctx, now)
+                    if source == "webhook":
+                        self._add_initial_commit_status(
+                            con,
+                            int(existing["id"]),
+                            ctx,
+                            str(existing["status"]),
+                            str(existing["decision"]),
+                            int(existing["attempts"]),
+                            now,
+                        )
                     con.execute(
                         "UPDATE github_events SET job_id=?,updated_at=? WHERE event_key=?",
                         (existing["id"], now, event_key),
@@ -328,6 +358,10 @@ class JobQueue:
                 self._log(con, job_id, ctx.work_key, "queued" if status == "pending" else status, f"decision={decision} action={action}", n.message_id)
                 if status == "pending":
                     self.acknowledgements.add_pending(con, job_id, ctx, now)
+                if source == "webhook":
+                    self._add_initial_commit_status(
+                        con, job_id, ctx, status, decision, 0, now
+                    )
                 con.commit()
                 if policy.feedback_learning.enabled:
                     feedback.capture_feedback(
@@ -362,6 +396,24 @@ class JobQueue:
 
     def acknowledgement_ok(self, job_id: int) -> bool:
         return self.acknowledgements.all_succeeded(job_id)
+
+    def claim_commit_status(self, job_id: int | None = None) -> CommitStatusClaim | None:
+        return self.commit_statuses.claim(job_id)
+
+    def pin_commit_status_sha(self, status_id: int, sha: str) -> str:
+        return self.commit_statuses.pin_sha(status_id, sha)
+
+    def finish_commit_status(
+        self,
+        status_id: int,
+        revision: int,
+        ok: bool,
+        error: str | None = None,
+    ) -> None:
+        self.commit_statuses.finish(status_id, revision, ok, error)
+
+    def recover_commit_statuses(self) -> int:
+        return self.commit_statuses.recover_interrupted()
 
     def quarantine_notification(
         self,
@@ -453,6 +505,13 @@ class JobQueue:
             self._log(con, row["id"], row["work_key"], "running", f"claimed by {worker_id}", None)
             self._session_event(con, row["id"], row["work_key"], metadata["openclaw_session_id"], "claimed", f"claimed by {worker_id}", None)
             self._progress(con, row["id"], row["work_key"], "semantic", "claimed", f"claimed by {worker_id}", None)
+            self._set_commit_status_desired(
+                con,
+                int(row["id"]),
+                "pending",
+                f"Agent working (attempt {attempt})",
+                now,
+            )
             con.commit()
             return self.get(int(row["id"]))
 
@@ -590,6 +649,31 @@ class JobQueue:
             session_id = metadata.get("openclaw_session_id") or session_id_for_job(job_id)
             self._session_event(con, job_id, row["work_key"] if row else None, str(session_id), status, summary, detail)
             self._progress(con, job_id, row["work_key"] if row else None, "semantic", status, summary, detail)
+            if isinstance(cancellation, dict) and cancellation.get("state") in {"requested", "cancelled"}:
+                self._set_commit_status_desired(
+                    con,
+                    job_id,
+                    "error",
+                    "Agent cancelled; attention required",
+                    now,
+                )
+            elif status == "done":
+                description = (
+                    "No agent action needed"
+                    if "skipped" in summary or "not addressed" in summary
+                    else "Agent finished; follow-up available"
+                )
+                self._set_commit_status_desired(
+                    con, job_id, "success", description, now
+                )
+            elif status == "blocked":
+                self._set_commit_status_desired(
+                    con,
+                    job_id,
+                    "error",
+                    "Agent blocked; attention required",
+                    now,
+                )
             con.commit()
 
     def request_cancel_running(
@@ -696,6 +780,13 @@ class JobQueue:
             session_id = str(metadata.get("openclaw_session_id") or session_id_for_job(job_id))
             self._session_event(con, job_id, row["work_key"], session_id, "cancelled", summary, detail)
             self._progress(con, job_id, row["work_key"], "semantic", "cancelled", summary, detail)
+            self._set_commit_status_desired(
+                con,
+                job_id,
+                "error",
+                "Agent cancelled; attention required",
+                now,
+            )
             con.commit()
         return self.get(job_id)
 
@@ -727,6 +818,16 @@ class JobQueue:
             if cur.rowcount:
                 self._finish_run(con, job_id, "requeued", now)
                 self._log(con, job_id, row["work_key"], "retry", summary, detail)
+                attempts = con.execute(
+                    "SELECT attempts FROM jobs WHERE id=?", (job_id,)
+                ).fetchone()["attempts"]
+                self._set_commit_status_desired(
+                    con,
+                    job_id,
+                    "pending",
+                    f"Agent retry scheduled (attempt {int(attempts) + 1})",
+                    now,
+                )
             con.commit()
             return bool(cur.rowcount)
 
@@ -786,6 +887,13 @@ class JobQueue:
                 session_id = str(metadata.get("openclaw_session_id") or session_id_for_job(job_id))
                 self._session_event(con, job_id, row["work_key"], session_id, "blocked", summary, detail)
                 self._progress(con, job_id, row["work_key"], "semantic", "blocked", summary, detail)
+                self._set_commit_status_desired(
+                    con,
+                    job_id,
+                    "error",
+                    "Agent blocked; attention required",
+                    now,
+                )
             con.commit()
             return blocked_ids
 
@@ -837,8 +945,15 @@ class JobQueue:
         with self.connect() as con:
             cur = con.execute("UPDATE jobs SET status='pending', locked_by=NULL, last_error=NULL, updated_at=? WHERE id=? AND status='blocked' AND decision='auto_trusted'", (now, job_id))
             if cur.rowcount:
-                row = con.execute("SELECT work_key FROM jobs WHERE id=?", (job_id,)).fetchone()
+                row = con.execute("SELECT work_key,attempts FROM jobs WHERE id=?", (job_id,)).fetchone()
                 self._log(con, job_id, row["work_key"] if row else None, "retry", summary, None)
+                self._set_commit_status_desired(
+                    con,
+                    job_id,
+                    "pending",
+                    f"Agent retry scheduled (attempt {int(row['attempts']) + 1})",
+                    now,
+                )
             return bool(cur.rowcount)
 
     def dismiss(self, job_id: int, reason: str) -> bool:
@@ -870,6 +985,16 @@ class JobQueue:
                 con.execute("UPDATE jobs SET status='pending', locked_by=NULL, finished_at=?, updated_at=? WHERE id=?", (now, now, row["id"]))
                 self._finish_run(con, int(row["id"]), "requeued", now)
                 self._log(con, row["id"], row["work_key"], "unlock_stale", f"running job older than {older_than_seconds}s requeued", None)
+                attempts = con.execute(
+                    "SELECT attempts FROM jobs WHERE id=?", (row["id"],)
+                ).fetchone()["attempts"]
+                self._set_commit_status_desired(
+                    con,
+                    int(row["id"]),
+                    "pending",
+                    f"Agent retry scheduled (attempt {int(attempts) + 1})",
+                    now,
+                )
             con.commit()
             return len(rows)
 
@@ -922,6 +1047,55 @@ class JobQueue:
 
     def _log(self, con: sqlite3.Connection, job_id: int | None, work_key: str | None, phase: str, summary: str, detail: str | None) -> None:
         con.execute("INSERT INTO worklog(ts,job_id,work_key,phase,summary,detail) VALUES(?,?,?,?,?,?)", (utc_now(), job_id, work_key, phase, summary, detail))
+
+    @staticmethod
+    def _commit_status_feedback(
+        job_id: int,
+        status: str,
+        attempts: int,
+    ) -> tuple[str, str] | None:
+        if status == "pending":
+            if attempts:
+                return "pending", f"Agent retry scheduled (attempt {attempts + 1})"
+            return "pending", f"Agent queued (job #{job_id})"
+        if status == "running":
+            return "pending", f"Agent working (attempt {max(1, attempts)})"
+        if status == "done":
+            return "success", "Agent finished; follow-up available"
+        if status == "blocked":
+            return "error", "Agent blocked; attention required"
+        return None
+
+    def _add_initial_commit_status(
+        self,
+        con: sqlite3.Connection,
+        job_id: int,
+        ctx: GitHubContext,
+        status: str,
+        decision: str,
+        attempts: int,
+        now: str,
+    ) -> None:
+        if decision != "auto_trusted":
+            return
+        desired = self._commit_status_feedback(job_id, status, attempts)
+        if desired is None:
+            return
+        self.commit_statuses.add_for_job(
+            con, job_id, ctx, desired[0], desired[1], now
+        )
+
+    def _set_commit_status_desired(
+        self,
+        con: sqlite3.Connection,
+        job_id: int,
+        state: str,
+        description: str,
+        now: str,
+    ) -> None:
+        self.commit_statuses.set_desired(
+            con, job_id, state, description, now
+        )
 
     def _session_event(self, con: sqlite3.Connection, job_id: int, work_key: str | None, session_id: str, event_type: str, summary: str, detail: str | None) -> None:
         con.execute(

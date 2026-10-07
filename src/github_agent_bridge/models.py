@@ -37,6 +37,28 @@ class GitHubContext:
     def short_url(self) -> str:
         return self.urls[0] if self.urls else "(sense URL)"
 
+    @property
+    def is_pull_request(self) -> bool:
+        if not self.repo or not self.issue_number:
+            return False
+        if self.review_id or self.review_comment_id:
+            return True
+        expected = f"github.com/{self.repo}/pull/{self.issue_number}".lower()
+        return expected in self.short_url.lower()
+
+    @property
+    def supports_commit_status(self) -> bool:
+        return bool(
+            self.repo
+            and (
+                self.is_pull_request
+                or (
+                    self.commit_sha
+                    and self.target_kind in {"commit", "commit_comment"}
+                )
+            )
+        )
+
     def to_json(self) -> str:
         return json.dumps(self.__dict__, ensure_ascii=False, sort_keys=True)
 

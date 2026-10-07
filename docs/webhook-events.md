@@ -32,3 +32,26 @@ that delivery becomes a read-only `sync_after_merge` job. Comment and review
 deliveries must additionally be addressed to the bot, belong to a PR authored
 by the bot, or target a PR/issue assigned to the bot. Being a reviewer,
 subscriber, or email recipient is not authorization to work.
+
+## Commit status feedback
+
+Jobs accepted through webhook ingestion publish a best-effort commit status
+when their target is a pull request or commit. The rollout intentionally follows
+the repositories that already have actionable webhooks enabled; there is no
+second commit-status canary list.
+
+- `pending`: queued, running, or waiting for a retry;
+- `success`: the bridge finished and its GitHub follow-up is visible, or the
+  event was conclusively non-actionable;
+- `error`: the bridge blocked or cancelled the job.
+
+The stable context is `github-agent-bridge/agent`. It reports bridge processing,
+not test or review quality, and must not be configured as a required branch
+protection check. The PR head SHA is resolved once and pinned to the job, so a
+later push cannot receive the result of work started on an older commit.
+
+Delivery uses a SQLite outbox and is independent of the job result: exhausted
+GitHub API retries leave an auditable delivery error but do not block an
+otherwise successful job. `shadow` and `dry-run` consume outbox entries without
+calling GitHub. When `GITHUB_AGENT_BRIDGE_DASHBOARD_PUBLIC_URL` is configured,
+the status links to `/jobs/<job-id>`; otherwise it has no target URL.

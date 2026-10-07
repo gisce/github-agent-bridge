@@ -224,6 +224,15 @@ def webhook_notification(
     if feedback_actionability == "ignored":
         return None
     url = str(source.get("html_url") or subject.get("html_url") or repository.get("html_url") or "")
+    pull_request = subject.get("pull_request") if isinstance(subject, dict) else None
+    if event_name == "issue_comment" and isinstance(pull_request, dict) and number:
+        # GitHub reports PR issue comments with an /issues/ HTML URL. Preserve
+        # the comment identity but normalize the target so downstream code can
+        # distinguish PR jobs (which have a head SHA) from plain issues.
+        comment_id = source.get("id")
+        url = f"https://github.com/{repo}/pull/{number}"
+        if comment_id:
+            url += f"#issuecomment-{comment_id}"
     if not url.startswith("https://github.com/"):
         return None
     if event_name == "workflow_run":
