@@ -3,6 +3,12 @@
 from .acknowledgements import AcknowledgementClaim, AcknowledgementRepository
 from .commit_statuses import CommitStatusClaim, CommitStatusRepository
 from .database import ClosingConnection, Database, TransactionMode
+from .feedback import (
+    FeedbackEvent,
+    FeedbackProposal,
+    FeedbackRepository,
+    FeedbackRule,
+)
 from .ingestion import IngestionRepository, IngestionRequest, IngestionResult
 from .jobs import JobRepository, job_from_row
 from .mcp_tokens import McpToken, McpTokenCredential, McpTokenRepository
@@ -20,6 +26,10 @@ __all__ = [
     "ClosingConnection",
     "Database",
     "ExecutorPauseState",
+    "FeedbackEvent",
+    "FeedbackProposal",
+    "FeedbackRepository",
+    "FeedbackRule",
     "JobRepository",
     "McpToken",
     "McpTokenCredential",
