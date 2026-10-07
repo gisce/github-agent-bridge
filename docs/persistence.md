@@ -29,6 +29,13 @@ Backup and restore are deliberately excluded. They use SQLite's backup API in
 `autoupdate.py` and remain specialized database operations rather than
 repository methods.
 
+Executor heartbeat and acknowledgement threads treat `SQLITE_BUSY` and
+`SQLITE_LOCKED` as transient contention after the connection timeout: they
+wait and retry instead of terminating the background thread. Other
+`OperationalError` failures still propagate so schema or storage faults are
+not hidden. Recovered heartbeat contention increments the worker's persisted
+`recent_error_count` on the next successful heartbeat.
+
 ## Queue transaction boundaries
 
 The following boundaries are behavioral contracts. Repository extraction may

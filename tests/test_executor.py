@@ -1,3 +1,4 @@
+import sqlite3
 import threading
 
 import pytest
@@ -6,6 +7,7 @@ from github_agent_bridge.dashboard_data import job_session_events
 from github_agent_bridge.dispatch import DispatchResult
 from github_agent_bridge.executor import ExecutorConfig, ExecutorPool
 from github_agent_bridge.models import Notification
+from github_agent_bridge.persistence import Database
 from github_agent_bridge.policy import ModelRoute, ModelRoutes, Policy
 from github_agent_bridge.queue import JobQueue
 
@@ -705,6 +707,128 @@ def test_run_blocks_orphaned_jobs_before_claiming_new_work(tmp_path):
     assert heartbeat is not None
     assert heartbeat["executor_id"] == pool.executor_id
     assert heartbeat["pid"] > 0
+
+
+def test_heartbeat_loop_recovers_after_transient_database_lock(tmp_path, monkeypatch):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    queue.database = Database(queue.path, timeout_seconds=0.01)
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        RecordingDispatcher(),
+        github=FakeGitHub(assigned=True),
+        config=ExecutorConfig(idle_sleep_seconds=0.01, heartbeat_interval_seconds=0.01),
+    )
+    worker_id = f"{pool.executor_id}/worker-0"
+    pool._set_worker_state(worker_id, "idle")
+    attempted = threading.Event()
+    succeeded = threading.Event()
+    original = queue.record_worker_heartbeat
+
+    def record_heartbeat(*args, **kwargs):
+        attempted.set()
+        result = original(*args, **kwargs)
+        succeeded.set()
+        return result
+
+    monkeypatch.setattr(queue, "record_worker_heartbeat", record_heartbeat)
+    locker = sqlite3.connect(queue.path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    thread = threading.Thread(target=pool._heartbeat_loop, args=(worker_id,))
+    thread.start()
+    try:
+        assert attempted.wait(timeout=1)
+        assert succeeded.wait(timeout=0.05) is False
+        assert thread.is_alive() is True
+        locker.commit()
+        assert succeeded.wait(timeout=2)
+    finally:
+        if locker.in_transaction:
+            locker.rollback()
+        locker.close()
+        pool.stop_event.set()
+        thread.join(timeout=2)
+    assert thread.is_alive() is False
+    with queue.connect() as con:
+        heartbeat = con.execute(
+            "SELECT recent_error_count FROM worker_heartbeats WHERE worker_id=?",
+            (worker_id,),
+        ).fetchone()
+    assert heartbeat["recent_error_count"] >= 1
+
+
+def test_acknowledgement_loop_recovers_after_transient_database_lock(tmp_path, monkeypatch):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_comment(queue)
+    queue.database = Database(queue.path, timeout_seconds=0.01)
+    github = FakeGitHub(assigned=True)
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        RecordingDispatcher(),
+        github=github,
+        config=ExecutorConfig(idle_sleep_seconds=0.01),
+    )
+    attempted = threading.Event()
+    reacted = threading.Event()
+    original_claim = queue.claim_acknowledgement
+    original_react = github.react_eyes
+
+    def claim_acknowledgement(*args, **kwargs):
+        attempted.set()
+        return original_claim(*args, **kwargs)
+
+    def react_eyes(ctx):
+        result = original_react(ctx)
+        reacted.set()
+        return result
+
+    monkeypatch.setattr(queue, "claim_acknowledgement", claim_acknowledgement)
+    monkeypatch.setattr(github, "react_eyes", react_eyes)
+    locker = sqlite3.connect(queue.path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    thread = threading.Thread(target=pool._acknowledgement_loop)
+    thread.start()
+    try:
+        assert attempted.wait(timeout=1)
+        assert reacted.wait(timeout=0.05) is False
+        assert thread.is_alive() is True
+        locker.commit()
+        assert reacted.wait(timeout=2)
+    finally:
+        if locker.in_transaction:
+            locker.rollback()
+        locker.close()
+        pool.stop_event.set()
+        thread.join(timeout=2)
+    assert thread.is_alive() is False
+    assert queue.acknowledgement_ok(job.id) is True
+
+
+def test_heartbeat_loop_does_not_hide_non_contention_database_errors(tmp_path, monkeypatch):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    pool = ExecutorPool(queue, Policy(), RecordingDispatcher())
+
+    def fail_heartbeat(*args, **kwargs):
+        raise sqlite3.OperationalError("no such table: worker_heartbeats")
+
+    monkeypatch.setattr(queue, "record_worker_heartbeat", fail_heartbeat)
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        pool._heartbeat_loop("worker-test")
+
+
+def test_acknowledgement_loop_does_not_hide_non_contention_database_errors(tmp_path, monkeypatch):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    pool = ExecutorPool(queue, Policy(), RecordingDispatcher())
+
+    def fail_acknowledgement():
+        raise sqlite3.OperationalError("malformed database schema")
+
+    monkeypatch.setattr(pool, "acknowledge_one", fail_acknowledgement)
+
+    with pytest.raises(sqlite3.OperationalError, match="malformed database schema"):
+        pool._acknowledgement_loop()
 
 
 def test_shutdown_cancels_dispatch_and_blocks_job_without_requeue(tmp_path):
