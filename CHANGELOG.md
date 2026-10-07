@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.73.2 (2026-10-07)
+
+### Bug Fixes
+
+- Handle webhook assignment events
+  ([`3315f6f`](https://github.com/gisce/github-agent-bridge/commit/3315f6f8b080384b6dc4b738d41eedc5f643c087))
+
+
 ## v0.73.1 (2026-10-07)
 
 ### Bug Fixes
