@@ -8,7 +8,12 @@ from pathlib import Path
 
 from .models import GitHubContext, Job, Notification, utc_now
 from .parser import classify_github_action, classify_work_intent, extract_github_context
-from .persistence import ClosingConnection, Database
+from .persistence import (
+    AcknowledgementRepository,
+    ClosingConnection,
+    Database,
+    StateRepository,
+)
 from .policy import Policy
 from .session_correlation import session_id_for_job, session_id_for_job_attempt
 from . import feedback
@@ -27,8 +32,6 @@ def load_schema() -> str:
 SCHEMA = load_schema()
 ACTIVE_STATUSES = ("pending", "running", "waiting_approval")
 COALESCE_STATUSES = ("pending", "waiting_approval")
-EXECUTOR_PAUSE_STATE_KEY = "executor_paused"
-ACK_RETRY_LIMIT = 2
 
 
 def semantic_event_identity(
@@ -73,26 +76,13 @@ def canonical_event_key(
     return f"{source}:{source_key}"
 
 
-def acknowledgement_target_key(ctx: GitHubContext) -> str:
-    """Return a stable identity for one GitHub reaction target."""
-    return json.dumps(
-        {
-            "repo": ctx.repo,
-            "issue_number": ctx.issue_number,
-            "comment_id": ctx.comment_id,
-            "review_comment_id": ctx.review_comment_id,
-            "review_id": ctx.review_id,
-            "commit_comment_id": ctx.commit_comment_id,
-        },
-        sort_keys=True,
-    )
-
-
 class JobQueue:
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser()
         self.database = Database(self.path)
         self.init()
+        self.acknowledgements = AcknowledgementRepository(self.database)
+        self.state = StateRepository(self.database)
 
     def connect(self) -> sqlite3.Connection:
         initialize = not self.path.exists()
@@ -269,7 +259,7 @@ class JobQueue:
                     else:
                         con.execute("UPDATE jobs SET coalesced_count=coalesced_count+1, uid=?, message_id=message_id, subject=?, context_json=?, updated_at=? WHERE id=?", (n.uid, n.subject, ctx.to_json(), now, existing["id"]))
                     self._log(con, existing["id"], ctx.work_key, "coalesced", "Notification coalesced into active job", n.message_id)
-                    self._queue_acknowledgement(con, int(existing["id"]), ctx, now)
+                    self.acknowledgements.add_pending(con, int(existing["id"]), ctx, now)
                     con.execute(
                         "UPDATE github_events SET job_id=?,updated_at=? WHERE event_key=?",
                         (existing["id"], now, event_key),
@@ -306,7 +296,7 @@ class JobQueue:
                 )
                 self._log(con, job_id, ctx.work_key, "queued" if status == "pending" else status, f"decision={decision} action={action}", n.message_id)
                 if status == "pending":
-                    self._queue_acknowledgement(con, job_id, ctx, now)
+                    self.acknowledgements.add_pending(con, job_id, ctx, now)
                 con.commit()
                 if policy.feedback_learning.enabled:
                     feedback.capture_feedback(
@@ -327,65 +317,20 @@ class JobQueue:
 
     def claim_acknowledgement(self, job_id: int | None = None) -> tuple[int, int, GitHubContext] | None:
         """Reserve one durable GitHub acknowledgement without claiming its job."""
-        now = utc_now()
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            job_filter = "AND a.job_id=?" if job_id is not None else ""
-            status_filter = "a.status IN ('pending','failed')" if job_id is not None else "a.status='pending'"
-            args = (ACK_RETRY_LIMIT, job_id) if job_id is not None else (ACK_RETRY_LIMIT,)
-            row = con.execute(
-                f"""SELECT a.id,a.job_id,a.context_json
-                FROM job_acknowledgements a
-                JOIN jobs j ON j.id=a.job_id
-                WHERE {status_filter} AND a.attempts < ?
-                AND j.status IN ('pending','running') {job_filter}
-                ORDER BY a.created_at,a.id LIMIT 1""",
-                args,
-            ).fetchone()
-            if row is None:
-                con.commit()
-                return None
-            con.execute(
-                "UPDATE job_acknowledgements SET status='processing',attempts=attempts+1,updated_at=? WHERE id=?",
-                (now, row["id"]),
-            )
-            con.commit()
-            return int(row["id"]), int(row["job_id"]), GitHubContext.from_json(row["context_json"])
+        claim = self.acknowledgements.claim(job_id)
+        if claim is None:
+            return None
+        return claim.id, claim.job_id, claim.context
 
     def recover_acknowledgements(self) -> int:
         """Release acknowledgements interrupted by an executor restart."""
-        now = utc_now()
-        with self.connect() as con:
-            cursor = con.execute(
-                "UPDATE job_acknowledgements SET status='pending',updated_at=? WHERE status='processing'",
-                (now,),
-            )
-            return cursor.rowcount
+        return self.acknowledgements.recover_interrupted()
 
     def finish_acknowledgement(self, acknowledgement_id: int, ok: bool, error: str | None = None) -> None:
-        now = utc_now()
-        with self.connect() as con:
-            con.execute(
-                "UPDATE job_acknowledgements SET status=?,last_error=?,updated_at=? WHERE id=?",
-                ("succeeded" if ok else "failed", None if ok else (error or "reaction failed")[:1000], now, acknowledgement_id),
-            )
+        self.acknowledgements.finish(acknowledgement_id, ok, error)
 
     def acknowledgement_ok(self, job_id: int) -> bool:
-        with self.connect() as con:
-            row = con.execute(
-                "SELECT COUNT(*) AS total,SUM(status='succeeded') AS succeeded FROM job_acknowledgements WHERE job_id=?",
-                (job_id,),
-            ).fetchone()
-        return bool(row and row["total"] and row["total"] == row["succeeded"])
-
-    @staticmethod
-    def _queue_acknowledgement(con: sqlite3.Connection, job_id: int, ctx: GitHubContext, now: str) -> None:
-        con.execute(
-            """INSERT OR IGNORE INTO job_acknowledgements(
-            job_id,target_key,context_json,status,created_at,updated_at
-            ) VALUES(?,?,?,'pending',?,?)""",
-            (job_id, acknowledgement_target_key(ctx), ctx.to_json(), now, now),
-        )
+        return self.acknowledgements.all_succeeded(job_id)
 
     def quarantine_notification(
         self,
@@ -437,10 +382,7 @@ class JobQueue:
         with self.connect() as con:
             con.execute("BEGIN IMMEDIATE")
             # Serialize the pause check with claims so a completed pause blocks later claims.
-            pause_row = con.execute(
-                "SELECT value FROM state WHERE key=?", (EXECUTOR_PAUSE_STATE_KEY,)
-            ).fetchone()
-            if pause_row and json.loads(pause_row["value"]).get("paused"):
+            if self.state.executor_paused(connection=con):
                 con.commit()
                 return None
             intent_filter = ""
@@ -930,47 +872,22 @@ class JobQueue:
             return None if row is None or row["age"] is None else int(row["age"])
 
     def set_state(self, key: str, value: str) -> None:
-        with self.connect() as con:
-            con.execute("INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+        self.state.set(key, value)
 
     def get_state(self, key: str, default: str = "") -> str:
-        with self.connect() as con:
-            row = con.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
-            return row["value"] if row else default
+        return self.state.get(key, default)
 
     def pause_executor(self, reason: str = "") -> None:
-        payload = {
-            "paused": True,
-            "reason": reason,
-            "updated_at": utc_now(),
-        }
-        self.set_state(EXECUTOR_PAUSE_STATE_KEY, json.dumps(payload, sort_keys=True))
+        self.state.pause_executor(reason)
 
     def resume_executor(self) -> None:
-        payload = {
-            "paused": False,
-            "updated_at": utc_now(),
-        }
-        self.set_state(EXECUTOR_PAUSE_STATE_KEY, json.dumps(payload, sort_keys=True))
+        self.state.resume_executor()
 
     def executor_pause_state(self) -> dict[str, object]:
-        raw = self.get_state(EXECUTOR_PAUSE_STATE_KEY, "")
-        if not raw:
-            return {"paused": False}
-        try:
-            state = json.loads(raw)
-        except json.JSONDecodeError:
-            return {"paused": False, "error": "invalid_executor_pause_state"}
-        if not isinstance(state, dict):
-            return {"paused": False, "error": "invalid_executor_pause_state"}
-        return {
-            "paused": bool(state.get("paused")),
-            **({"reason": state["reason"]} if state.get("reason") else {}),
-            **({"updated_at": state["updated_at"]} if state.get("updated_at") else {}),
-        }
+        return self.state.executor_pause_state().to_dict()
 
     def executor_paused(self) -> bool:
-        return bool(self.executor_pause_state().get("paused"))
+        return self.state.executor_paused()
 
     def _log(self, con: sqlite3.Connection, job_id: int | None, work_key: str | None, phase: str, summary: str, detail: str | None) -> None:
         con.execute("INSERT INTO worklog(ts,job_id,work_key,phase,summary,detail) VALUES(?,?,?,?,?,?)", (utc_now(), job_id, work_key, phase, summary, detail))
