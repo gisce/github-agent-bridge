@@ -68,6 +68,8 @@ def canonical_event_key(
     for event_type, target_id in identities:
         if repo and target_id:
             return f"{event_type}:created:{repo}:{target_id}"
+    if action == "sync_after_merge" and repo and ctx.issue_number:
+        return f"pull_request:merged:{repo}:{ctx.issue_number}"
     if repo and ctx.workflow_run_id:
         return f"workflow_run:{action}:{repo}:{ctx.workflow_run_id}"
     return f"{source}:{source_key}"

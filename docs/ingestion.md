@@ -159,6 +159,13 @@ continues unchanged. Both transports use the same canonical event key, so the
 first committed receipt wins and the second is recorded as a duplicate of the
 same job.
 
+Actionability is independent of transport. Before dispatch, every issue
+comment, review comment, formal review, and commit comment must either address
+the authenticated bot explicitly, target a PR/issue assigned to it, or belong
+to a PR authored by it. GitHub email delivery footers are excluded from intent
+classification because notification reasons such as “your review was
+requested” describe routing, not authorization.
+
 For enqueueing, the common queue transaction commits before the monitoring
 receipt. The receipt records the enqueue decision and linked job so canary
 behavior is auditable in the delivery explorer. A crash in that narrow gap
@@ -169,7 +176,9 @@ receipt. Events sent by a configured `botLogins` identity, `edited`
 comments/reviews, unsupported families, and repositories outside
 `webhookCanaryRepos` remain observational only. For `workflow_run.completed`,
 only runs with `conclusion: failure` enqueue work; successful and other
-conclusions remain observational.
+conclusions remain observational. Merged pull-request deliveries share the
+same canonical key as the equivalent IMAP merge notification, so dual ingestion
+does not enqueue cleanup twice.
 
 Coverage compares only canonical event families shared by both transports,
 starting at the first retained webhook receipt and ending before a configurable

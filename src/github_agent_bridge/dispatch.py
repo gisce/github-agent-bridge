@@ -368,8 +368,24 @@ class GitHubClient:
         after = self.issue_created_at(ctx)
         return self.current_user_thread_comment_after(ctx, after) or self.current_user_review_comment_after(ctx, after) or self.current_user_review_after(ctx, after)
 
-    def issue_comment_addresses_current_user(self, ctx: GitHubContext) -> bool:
-        body = self.issue_comment_body(ctx)
+    def event_addresses_current_user(self, ctx: GitHubContext) -> bool:
+        """Return whether the triggering feedback is explicitly addressed to us.
+
+        GitHub can notify a reviewer or subscriber about feedback directed at
+        somebody else. Resolve the immutable target through the API and require
+        the authenticated bot to be the first mention in the actual feedback.
+        """
+        body: str | None = None
+        if ctx.comment_id:
+            body = self.issue_comment_body(ctx)
+        elif ctx.review_comment_id:
+            comment = self.pull_request_review_comment(ctx)
+            body = str(comment.get("body") or "") if comment else None
+        elif ctx.review_id:
+            review = self.pull_request_review(ctx)
+            body = str(review.get("body") or "") if review else None
+        elif ctx.commit_comment_id:
+            body = self.commit_comment_body(ctx)
         login = self.current_login()
         if body is None or not login:
             return False
@@ -380,6 +396,10 @@ class GitHubClient:
         # first mentioned user. A later mention can be merely referential, e.g.
         # "@Marc what do you think about @pilipilisbot's changes?"
         return mentions[0] == login.lower()
+
+    def issue_comment_addresses_current_user(self, ctx: GitHubContext) -> bool:
+        """Backward-compatible alias for the transport-neutral event guard."""
+        return self.event_addresses_current_user(ctx)
 
     def issue_comment_mentions_current_user(self, ctx: GitHubContext) -> bool:
         return self.issue_comment_addresses_current_user(ctx)

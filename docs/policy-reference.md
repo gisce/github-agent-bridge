@@ -478,13 +478,21 @@ Supported action names currently produced by the parser:
 | Action | Produced when | Typical meaning |
 | --- | --- | --- |
 | `archive_notification` | Notification is routine and does not mention/assign/request the bot. | Persist as handled without agent work. |
-| `sync_after_merge` | GitHub sends an explicit merge notification, either via a `/merged@github.com` message id or a PR timeline `#event-...` URL whose text matches a merge event. | Dispatch trusted post-merge workspace cleanup to the agent. |
+| `sync_after_merge` | GitHub sends an explicit merge notification via IMAP, or a `pull_request.closed` webhook with `merged=true`. | Dispatch trusted post-merge workspace cleanup to the agent in read-only mode. |
 | `workflow_run_failed` | Notification text contains a GitHub Actions run URL and a failure marker such as `run failed`, `workflow failed`, or `job failed`. | Dispatch trusted CI failure investigation to the agent. |
 | `submit_review` | GitHub requested a review from the bot. | React 👀 and dispatch review-only work that must end with a formal PR review verdict. |
 | `reply_comment` | Bot mentioned, Copilot review, or PR review/comment notification. | React 👀 and dispatch agent work/reply. |
 | `open_issue` | User asks to open an issue, or the bot is assigned to an issue/PR. | React 👀 and dispatch the agent with the separately classified work intent. Assignment alone stays `review_only`. |
 
 Other action names can appear in policy, but they have no effect until parser/dispatcher code produces or handles them.
+
+Every policy decision for a feedback target remains subject to a hard
+actionability check before dispatch. The triggering feedback must address the
+authenticated bot, target a PR/issue assigned to it, or belong to a PR authored
+by it. Reviewer/subscriber status and email delivery reasons never satisfy this
+check, and the rule covers issue comments, inline review comments, formal
+reviews, and commit comments. Reclassifying an event to another action cannot
+bypass the guard.
 
 ### `actions.auto`
 

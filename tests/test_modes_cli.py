@@ -57,6 +57,67 @@ def test_pull_request_merged_is_tristate(returncode, stdout, expected):
     assert client.pull_request_merged(ctx) is expected
 
 
+@pytest.mark.parametrize(
+    "ctx",
+    [
+        GitHubContext(
+            ["https://github.com/gisce/erp/issues/1#issuecomment-2"],
+            "gisce/erp",
+            1,
+            comment_id=2,
+            target_kind="issue_comment",
+        ),
+        GitHubContext(
+            ["https://github.com/gisce/erp/pull/1#discussion_r2"],
+            "gisce/erp",
+            1,
+            review_comment_id=2,
+            target_kind="review_comment",
+        ),
+        GitHubContext(
+            ["https://github.com/gisce/erp/pull/1#pullrequestreview-2"],
+            "gisce/erp",
+            1,
+            review_id=2,
+            target_kind="review",
+        ),
+        GitHubContext(
+            ["https://github.com/gisce/erp/commit/abc#commitcomment-2"],
+            "gisce/erp",
+            commit_comment_id=2,
+            commit_sha="abc",
+            target_kind="commit_comment",
+        ),
+    ],
+)
+def test_event_addresses_current_user_covers_all_comment_targets(ctx):
+    client = GitHubClient()
+    client.current_login = lambda: "giscebot"
+    client.issue_comment_body = lambda current: "@giscebot issue"
+    client.pull_request_review_comment = lambda current: {"body": "@giscebot inline"}
+    client.pull_request_review = lambda current: {"body": "@giscebot review"}
+    client.commit_comment_body = lambda current: "@giscebot commit"
+
+    assert client.event_addresses_current_user(ctx) is True
+
+
+def test_event_addresses_current_user_rejects_referential_later_mention():
+    client = GitHubClient()
+    client.current_login = lambda: "giscebot"
+    client.pull_request_review = lambda ctx: {
+        "body": "@hperezgisce apply the feedback from @giscebot"
+    }
+    ctx = GitHubContext(
+        ["https://github.com/gisce/erp/pull/1#pullrequestreview-2"],
+        "gisce/erp",
+        1,
+        review_id=2,
+        target_kind="review",
+    )
+
+    assert client.event_addresses_current_user(ctx) is False
+
+
 class RecordingGitHubClient(GitHubClient):
     def __init__(self):
         super().__init__(mode=RunMode.LIVE)

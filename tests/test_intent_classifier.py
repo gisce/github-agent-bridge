@@ -104,6 +104,34 @@ def test_build_intent_prompt_uses_configured_agent_identity():
     assert "giscebot" not in prompt
 
 
+def test_build_intent_prompt_excludes_github_email_delivery_footer():
+    notif = notification(
+        "<gisce/ab-modules/pull/247/review/5439481624@github.com>",
+        (
+            "@lcbautista requested changes on this pull request.\n\n"
+            "Mou-lo tot a un modul `gisceov_distri_ab`.\n\n"
+            "-- \n"
+            "Reply to this email directly or view it on GitHub:\n"
+            "https://github.com/gisce/ab-modules/pull/247#pullrequestreview-5439481624\n"
+            "You are receiving this because your review was requested."
+        ),
+    )
+
+    prompt = build_intent_prompt(
+        notif,
+        extract_github_context(notif.body),
+        ParserResult("reply_comment", "review_only"),
+        prompt_template="{event_json}",
+    )
+    event = json.loads(prompt)
+
+    assert event["body"] == (
+        "@lcbautista requested changes on this pull request. "
+        "Mou-lo tot a un modul `gisceov_distri_ab`."
+    )
+    assert "review was requested" not in event["body"]
+
+
 def test_normalize_result_preserves_semantic_decomposition_metadata():
     result = normalize_result(
         {

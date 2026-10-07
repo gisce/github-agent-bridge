@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,6 +73,12 @@ def canonical_webhook_event_key(event_name: str, payload: dict[str, Any]) -> str
         requested_login = str(reviewer.get("login") or "").lower() if isinstance(reviewer, dict) else ""
         if pr_id and requested_login:
             return f"pull_request:review_requested:{repo}:{pr_id}:{requested_login}"
+    if event_name == "pull_request" and action == "closed":
+        pull_request = payload.get("pull_request") or {}
+        merged = pull_request.get("merged") if isinstance(pull_request, dict) else False
+        number = pull_request.get("number") if isinstance(pull_request, dict) else None
+        if merged and number:
+            return f"pull_request:merged:{repo}:{number}"
     if event_name == "workflow_run":
         run = payload.get("workflow_run") or {}
         run_id = run.get("id")
@@ -83,6 +90,50 @@ def canonical_webhook_event_key(event_name: str, payload: dict[str, Any]) -> str
             )
             return f"workflow_run:{canonical_action}:{repo}:{run_id}"
     return None
+
+
+COMMENT_EVENT_NAMES = {
+    "issue_comment",
+    "pull_request_review_comment",
+    "pull_request_review",
+    "commit_comment",
+}
+
+
+def _first_mentioned_login(body: str) -> str | None:
+    match = re.search(r"@([A-Za-z0-9-]+)", body or "")
+    return match.group(1).lower() if match else None
+
+
+def _feedback_is_actionable(
+    event_name: str,
+    payload: dict[str, Any],
+    source: dict[str, Any],
+    configured_logins: set[str],
+) -> bool:
+    """Authorize feedback from structured GitHub fields, never delivery reason."""
+    if event_name not in COMMENT_EVENT_NAMES:
+        return True
+    first_mention = _first_mentioned_login(str(source.get("body") or ""))
+    if first_mention in configured_logins:
+        return True
+    pull_request = payload.get("pull_request") if isinstance(payload.get("pull_request"), dict) else None
+    subject = pull_request or payload.get("issue") or {}
+    if not isinstance(subject, dict):
+        return False
+    if pull_request:
+        author = pull_request.get("user") if isinstance(pull_request.get("user"), dict) else {}
+        if str(author.get("login") or "").lower() in configured_logins:
+            return True
+    assignees = subject.get("assignees") if isinstance(subject.get("assignees"), list) else []
+    assignee = subject.get("assignee") if isinstance(subject.get("assignee"), dict) else None
+    if assignee:
+        assignees = [*assignees, assignee]
+    return any(
+        isinstance(item, dict)
+        and str(item.get("login") or "").lower() in configured_logins
+        for item in assignees
+    )
 
 
 def webhook_notification(
@@ -101,6 +152,7 @@ def webhook_notification(
         ("pull_request_review", "submitted"),
         ("pull_request", "review_requested"),
         ("pull_request", "assigned"),
+        ("pull_request", "closed"),
         ("commit_comment", "created"),
         ("workflow_run", "completed"),
     }:
@@ -122,6 +174,9 @@ def webhook_notification(
     if not isinstance(source, dict):
         return None
     configured_logins = {login.lower().lstrip("@") for login in (bot_logins or set())}
+    if event_name == "pull_request" and action == "closed":
+        if not bool(source.get("merged")):
+            return None
     if action == "assigned":
         assignee = payload.get("assignee") if isinstance(payload.get("assignee"), dict) else {}
         assignee_login = str(assignee.get("login") or "").lower()
@@ -140,11 +195,21 @@ def webhook_notification(
         review_state = str(source.get("state") or "").lower()
         if review_state not in {"changes_requested", "commented"}:
             return None
+    if not _feedback_is_actionable(
+        event_name,
+        payload,
+        source,
+        configured_logins,
+    ):
+        return None
     url = str(source.get("html_url") or subject.get("html_url") or repository.get("html_url") or "")
     if not url.startswith("https://github.com/"):
         return None
     if event_name == "workflow_run":
         body = "Workflow run failed (conclusion: failure)."
+    elif event_name == "pull_request" and action == "closed":
+        base = source.get("base") if isinstance(source.get("base"), dict) else {}
+        body = f"Merged #{number} into {str(base.get('ref') or 'the base branch')}."
     elif action == "assigned":
         assignee = payload.get("assignee") if isinstance(payload.get("assignee"), dict) else {}
         target_label = "pull request" if event_name == "pull_request" else "issue"
@@ -157,9 +222,12 @@ def webhook_notification(
     login = str(sender.get("login") or "GitHub")
     title = str(subject.get("title") or subject.get("name") or event_name)
     suffix = f" (#{number})" if number else ""
+    message_id = f"<{delivery_id}@github.com>"
+    if event_name == "pull_request" and action == "closed":
+        message_id = f"<{repo}/pull/{number}/merged@github.com>"
     notification = Notification(
         uid=None,
-        message_id=f"<{delivery_id}@github.com>",
+        message_id=message_id,
         subject=f"[{repo}] {title}{suffix}",
         from_addr=f"{login} <notifications@github.com>",
         body=f"{body}\n\n{url}",

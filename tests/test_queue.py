@@ -284,6 +284,22 @@ def test_canonical_event_key_falls_back_to_source_receipt_when_identity_is_uncer
     )
 
 
+def test_canonical_event_key_deduplicates_merge_across_email_and_webhook():
+    ctx = GitHubContext(
+        ["https://github.com/gisce/github-agent-bridge/pull/272"],
+        "gisce/github-agent-bridge",
+        272,
+        target_kind="issue",
+    )
+
+    assert canonical_event_key(
+        "sync_after_merge", ctx, "email", "<merge-mail@github.com>"
+    ) == "pull_request:merged:gisce/github-agent-bridge:272"
+    assert canonical_event_key(
+        "sync_after_merge", ctx, "webhook", "pr-272-merged"
+    ) == "pull_request:merged:gisce/github-agent-bridge:272"
+
+
 def test_ingest_records_receipt_and_event_and_deduplicates_same_event(tmp_path, monkeypatch):
     monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
     q = JobQueue(tmp_path / "q.sqlite3")

@@ -206,11 +206,31 @@ class ExecutorPool:
                 detail = f"eyes={reaction_ok} ack={ack_ok}"
                 self.queue.finish(job.id, "done", summary, detail)
                 return True
-            if job.action == "reply_comment" and job.context.comment_id and not assigned_to_bot and not self.github.issue_comment_addresses_current_user(job.context):
+            feedback_target = any((
+                job.context.comment_id,
+                job.context.review_comment_id,
+                job.context.review_id,
+                job.context.commit_comment_id,
+            ))
+            if (
+                feedback_target
+                and not assigned_to_bot
+                and not authored_by_bot
+                and not self.github.event_addresses_current_user(job.context)
+            ):
                 reaction_ok = self.acknowledge_job(job.id)
                 ack_ok = self.github.react_ack_no_comment(job.context)
-                summary = "comment not addressed to bot and bot not assigned; skipped dispatch"
-                detail = f"eyes={reaction_ok} ack={ack_ok}"
+                summary = "feedback not actionable for bot; skipped dispatch"
+                detail = (
+                    "bot was not addressed, assigned, or the pull request author; "
+                    f"eyes={reaction_ok} ack={ack_ok}"
+                )
+                self.queue.add_session_event(
+                    job.id,
+                    "non_actionable_feedback",
+                    summary,
+                    detail,
+                )
                 self.queue.finish(job.id, "done", summary, detail)
                 return True
             if job.action == "reply_comment" and job.work_intent == "review_only" and (assigned_to_bot or authored_by_bot):
