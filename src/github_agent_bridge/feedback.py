@@ -14,6 +14,13 @@ from typing import Any
 from .models import GitHubContext, Notification, utc_now
 from .parser import extract_github_context
 from .policy import Policy
+from .persistence import (
+    Database,
+    FeedbackEvent,
+    FeedbackProposal,
+    FeedbackRepository,
+    FeedbackRule,
+)
 
 
 ACTIONABLE_FEEDBACK_ACTIONS = {"reply_comment", "open_issue", "submit_review", "docs_update", "content_change"}
@@ -67,10 +74,8 @@ def canonical_key(scope: str, rule_type: str, rule: str) -> str:
     return short_hash(normalized)
 
 
-def _connect(db_path: str | Path) -> sqlite3.Connection:
-    con = sqlite3.connect(db_path, timeout=30, isolation_level=None)
-    con.row_factory = sqlite3.Row
-    return con
+def _repository(db_path: str | Path) -> FeedbackRepository:
+    return FeedbackRepository(Database(db_path))
 
 
 def capture_feedback(
@@ -111,47 +116,32 @@ def capture_feedback(
     }
 
     try:
-        with _connect(db_path) as con:
-            con.execute(
-                """INSERT OR IGNORE INTO feedback_events(
-                    id, occurred_at, captured_at, source, scope, actor, comment, context_json,
-                    classification, confidence, memorable
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    event_id(n),
-                    n.received_at,
-                    utc_now(),
-                    "github-agent-bridge",
-                    scope,
-                    trigger_actor or "github",
-                    compact(f"{n.subject}\n\n{n.body}"),
-                    json.dumps(context, ensure_ascii=False, sort_keys=True),
-                    "unreviewed",
-                    0.0,
-                    0,
-                ),
+        _repository(db_path).capture(
+            FeedbackEvent(
+                id=event_id(n),
+                occurred_at=n.received_at,
+                captured_at=utc_now(),
+                source="github-agent-bridge",
+                scope=scope,
+                actor=trigger_actor or "github",
+                comment=compact(f"{n.subject}\n\n{n.body}"),
+                context=context,
+                classification="unreviewed",
+                confidence=0.0,
+                memorable=False,
             )
+        )
     except sqlite3.Error:
         return False
     return True
 
 
 def pending_events(db_path: str | Path, scope: str = "", limit: int = 10) -> list[dict[str, Any]]:
-    clauses = [
-        """NOT EXISTS (
-            SELECT 1 FROM feedback_rule_proposals p
-            WHERE p.event_id=feedback_events.id
-            AND p.status != 'error'
-        )"""
+    repository = _repository(db_path)
+    return [
+        _enrich_event(repository, event.to_dict())
+        for event in repository.pending_events(scope, limit)
     ]
-    args: list[Any] = []
-    if scope:
-        clauses.append("(scope=? OR scope LIKE ?)")
-        args.extend([scope, f"{scope}:%"])
-    sql = "SELECT * FROM feedback_events WHERE " + " AND ".join(clauses) + " ORDER BY occurred_at ASC, id ASC LIMIT ?"
-    args.append(limit)
-    with _connect(db_path) as con:
-        return [_enrich_event(con, _event_dict(row)) for row in con.execute(sql, args)]
 
 
 def add_rule(
@@ -174,27 +164,17 @@ def add_rule(
 
     now = utc_now()
     rule_id = canonical_key(scope, rule_type, clean_rule)
-    events = sorted(set(source_events or []))
-    with _connect(db_path) as con:
-        row = con.execute("SELECT * FROM feedback_rules WHERE id=?", (rule_id,)).fetchone()
-        if row:
-            events = sorted(set(json.loads(row["source_events_json"] or "[]") + events))
-            confidence = max(float(row["confidence"]), confidence)
-            observations = int(row["observations"]) + 1
-            con.execute(
-                """UPDATE feedback_rules
-                SET confidence=?, last_seen=?, source_events_json=?, observations=?
-                WHERE id=?""",
-                (confidence, now, json.dumps(events, ensure_ascii=False, sort_keys=True), observations, rule_id),
-            )
-        else:
-            con.execute(
-                """INSERT INTO feedback_rules(
-                    id, scope, type, confidence, rule, created_at, last_seen, source_events_json, observations
-                ) VALUES(?,?,?,?,?,?,?,?,?)""",
-                (rule_id, scope, rule_type, confidence, clean_rule, now, now, json.dumps(events, ensure_ascii=False, sort_keys=True), 1),
-            )
-    return next(rule for rule in list_rules(db_path, scope=scope, min_confidence=0) if rule["id"] == rule_id)
+    repository = _repository(db_path)
+    stored = repository.upsert_rule(
+        rule_id=rule_id,
+        scope=scope,
+        rule_type=rule_type,
+        rule=clean_rule,
+        confidence=confidence,
+        source_events=sorted(set(source_events or [])),
+        now=now,
+    )
+    return _rule_to_dict(repository, stored)
 
 
 def proposal_id(event_id: str, scope: str, rule_type: str, rule: str) -> str:
@@ -351,26 +331,23 @@ def store_proposal(
     elif not error and proposal["is_feedback"] and proposal["rule"]:
         status = "proposed"
     pid = proposal_id(proposal["event_id"], proposal["scope"], proposal["type"], proposal["rule"] or proposal.get("reason", ""))
-    with _connect(db_path) as con:
-        con.execute(
-            """INSERT OR REPLACE INTO feedback_rule_proposals(
-                id, event_id, created_at, updated_at, status, scope, type, confidence, rule, reason, model, error
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                pid,
-                proposal["event_id"],
-                now,
-                now,
-                status,
-                proposal["scope"],
-                proposal["type"],
-                proposal["confidence"],
-                proposal["rule"],
-                proposal.get("reason", ""),
-                model or "",
-                error,
-            ),
+    repository = _repository(db_path)
+    repository.store_proposal(
+        FeedbackProposal(
+            id=pid,
+            event_id=proposal["event_id"],
+            created_at=now,
+            updated_at=now,
+            status=status,
+            scope=proposal["scope"],
+            type=proposal["type"],
+            confidence=proposal["confidence"],
+            rule=proposal["rule"],
+            reason=proposal.get("reason", ""),
+            model=model or "",
+            error=error,
         )
+    )
     if status == "approved":
         add_rule(
             db_path,
@@ -385,37 +362,38 @@ def store_proposal(
 
 def approve_proposal(db_path: str | Path, proposal_id: str, *, react: bool = False, gh_bin: str = "gh") -> dict[str, Any] | None:
     now = utc_now()
-    with _connect(db_path) as con:
-        row = con.execute("SELECT * FROM feedback_rule_proposals WHERE id=?", (proposal_id,)).fetchone()
-        if not row:
-            return None
-        con.execute("UPDATE feedback_rule_proposals SET status='approved', updated_at=?, error=NULL WHERE id=?", (now, proposal_id))
-    add_rule(db_path, row["scope"], row["type"], row["rule"], float(row["confidence"]), [row["event_id"], proposal_id])
+    proposal = _repository(db_path).set_proposal_status(
+        proposal_id, "approved", now
+    )
+    if proposal is None:
+        return None
+    add_rule(
+        db_path,
+        proposal.scope,
+        proposal.type,
+        proposal.rule,
+        proposal.confidence,
+        [proposal.event_id, proposal_id],
+    )
     if react:
-        react_to_feedback_event(db_path, row["event_id"], gh_bin=gh_bin)
+        react_to_feedback_event(db_path, proposal.event_id, gh_bin=gh_bin)
     return get_proposal(db_path, proposal_id)
 
 
 def reject_proposal(db_path: str | Path, proposal_id: str) -> dict[str, Any] | None:
-    now = utc_now()
-    with _connect(db_path) as con:
-        row = con.execute("SELECT id FROM feedback_rule_proposals WHERE id=?", (proposal_id,)).fetchone()
-        if not row:
-            return None
-        con.execute("UPDATE feedback_rule_proposals SET status='rejected', updated_at=? WHERE id=?", (now, proposal_id))
-    return get_proposal(db_path, proposal_id)
+    proposal = _repository(db_path).set_proposal_status(
+        proposal_id, "rejected", utc_now()
+    )
+    return proposal.to_dict() if proposal else None
 
 
 def get_proposal(db_path: str | Path, proposal_id: str) -> dict[str, Any] | None:
-    with _connect(db_path) as con:
-        row = con.execute("SELECT * FROM feedback_rule_proposals WHERE id=?", (proposal_id,)).fetchone()
-        return _proposal_dict(row) if row else None
+    proposal = _repository(db_path).get_proposal(proposal_id)
+    return proposal.to_dict() if proposal else None
 
 
 def delete_rule(db_path: str | Path, rule_id: str) -> bool:
-    with _connect(db_path) as con:
-        cur = con.execute("DELETE FROM feedback_rules WHERE id=?", (rule_id,))
-        return cur.rowcount > 0
+    return _repository(db_path).delete_rule(rule_id)
 
 
 def validate_rule_scope(scope: str) -> str:
@@ -435,43 +413,13 @@ def validate_rule_scope(scope: str) -> str:
 
 def update_rule_scope(db_path: str | Path, rule_id: str, scope: str) -> dict[str, Any] | None:
     new_scope = validate_rule_scope(scope)
-    with _connect(db_path) as con:
-        row = con.execute("SELECT * FROM feedback_rules WHERE id=?", (rule_id,)).fetchone()
-        if not row:
-            return None
-        if row["scope"] == new_scope:
-            return _rule_dict(con, row)
-
-        new_id = canonical_key(new_scope, row["type"], row["rule"])
-        source_events = json.loads(row["source_events_json"] or "[]")
-        existing = con.execute("SELECT * FROM feedback_rules WHERE id=?", (new_id,)).fetchone()
-        if existing and existing["id"] != rule_id:
-            merged_events = sorted(set(json.loads(existing["source_events_json"] or "[]") + source_events))
-            con.execute(
-                """UPDATE feedback_rules
-                SET confidence=?, created_at=?, last_seen=?, source_events_json=?, observations=?
-                WHERE id=?""",
-                (
-                    max(float(existing["confidence"]), float(row["confidence"])),
-                    min(str(existing["created_at"]), str(row["created_at"])),
-                    max(str(existing["last_seen"]), str(row["last_seen"])),
-                    json.dumps(merged_events, ensure_ascii=False, sort_keys=True),
-                    int(existing["observations"]) + int(row["observations"]),
-                    existing["id"],
-                ),
-            )
-            con.execute("DELETE FROM feedback_rules WHERE id=?", (rule_id,))
-            merged = con.execute("SELECT * FROM feedback_rules WHERE id=?", (new_id,)).fetchone()
-            return _rule_dict(con, merged) if merged else None
-
-        con.execute(
-            """UPDATE feedback_rules
-            SET id=?, scope=?
-            WHERE id=?""",
-            (new_id, new_scope, rule_id),
-        )
-        updated = con.execute("SELECT * FROM feedback_rules WHERE id=?", (new_id,)).fetchone()
-        return _rule_dict(con, updated) if updated else None
+    repository = _repository(db_path)
+    rule = repository.get_rule(rule_id)
+    if rule is None:
+        return None
+    new_id = canonical_key(new_scope, rule.type, rule.rule)
+    moved = repository.move_rule(rule_id, new_id, new_scope)
+    return _rule_to_dict(repository, moved) if moved else None
 
 
 def reaction_endpoint(ctx: GitHubContext) -> str | None:
@@ -519,11 +467,11 @@ def react_to_feedback_comment(event: dict[str, Any], gh_bin: str = "gh") -> bool
 
 
 def react_to_feedback_event(db_path: str | Path, event_id: str, gh_bin: str = "gh") -> bool:
-    with _connect(db_path) as con:
-        row = con.execute("SELECT * FROM feedback_events WHERE id=?", (event_id,)).fetchone()
-        if not row:
-            return False
-        event = _enrich_event(con, _event_dict(row))
+    repository = _repository(db_path)
+    stored = repository.get_event(event_id)
+    if stored is None:
+        return False
+    event = _enrich_event(repository, stored.to_dict())
     return react_to_feedback_comment(event, gh_bin=gh_bin)
 
 
@@ -602,88 +550,27 @@ def learn_from_events(
 
 
 def list_proposals(db_path: str | Path, status: str = "", limit: int = 20) -> list[dict[str, Any]]:
-    args: list[Any] = []
-    sql = "SELECT * FROM feedback_rule_proposals"
-    if status:
-        sql += " WHERE status=?"
-        args.append(status)
-    sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
-    args.append(limit)
-    with _connect(db_path) as con:
-        proposals = []
-        for row in con.execute(sql, args):
-            event_row = con.execute("SELECT * FROM feedback_events WHERE id=?", (row["event_id"],)).fetchone()
-            source_event = _enrich_event(con, _event_dict(event_row)) if event_row else None
-            proposals.append(_proposal_dict(row, source_event=source_event))
-        return proposals
-
-
-def _proposal_dict(row: sqlite3.Row, source_event: dict[str, Any] | None = None) -> dict[str, Any]:
-    return {
-        "id": row["id"],
-        "event_id": row["event_id"],
-        "created_at": row["created_at"],
-        "updated_at": row["updated_at"],
-        "status": row["status"],
-        "scope": row["scope"],
-        "type": row["type"],
-        "confidence": row["confidence"],
-        "rule": row["rule"],
-        "reason": row["reason"],
-        "model": row["model"],
-        "error": row["error"],
-        "source_event": source_event,
-    }
+    repository = _repository(db_path)
+    proposals = []
+    for proposal in repository.list_proposals(status, limit):
+        event = repository.get_event(proposal.event_id)
+        source_event = (
+            _enrich_event(repository, event.to_dict()) if event else None
+        )
+        proposals.append(proposal.to_dict(source_event))
+    return proposals
 
 
 def list_events(db_path: str | Path, scope: str = "", limit: int = 20) -> list[dict[str, Any]]:
-    clauses = []
-    args: list[Any] = []
-    if scope:
-        clauses.append("(scope=? OR scope LIKE ?)")
-        args.extend([scope, f"{scope}:%"])
-    sql = "SELECT * FROM feedback_events"
-    if clauses:
-        sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY occurred_at DESC, id DESC LIMIT ?"
-    args.append(limit)
-    with _connect(db_path) as con:
-        return [_enrich_event(con, _event_dict(row)) for row in con.execute(sql, args)]
+    repository = _repository(db_path)
+    return [
+        _enrich_event(repository, event.to_dict())
+        for event in repository.list_events(scope, limit)
+    ]
 
 
 def list_repositories(db_path: str | Path) -> list[str]:
-    with _connect(db_path) as con:
-        rows = con.execute(
-            """
-            SELECT scope FROM feedback_events
-            UNION
-            SELECT scope FROM feedback_rules
-            UNION
-            SELECT scope FROM feedback_rule_proposals
-            """
-        ).fetchall()
-    repos = {
-        str(row["scope"]).removeprefix("repo:")
-        for row in rows
-        if str(row["scope"]).startswith("repo:") and str(row["scope"]).removeprefix("repo:")
-    }
-    return sorted(repos)
-
-
-def _event_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "id": row["id"],
-        "occurred_at": row["occurred_at"],
-        "captured_at": row["captured_at"],
-        "source": row["source"],
-        "scope": row["scope"],
-        "actor": row["actor"],
-        "comment": row["comment"],
-        "context": json.loads(row["context_json"] or "{}"),
-        "classification": row["classification"],
-        "confidence": row["confidence"],
-        "memorable": bool(row["memorable"]),
-    }
+    return _repository(db_path).list_repositories()
 
 
 def _safe_json_object(raw: str | None) -> dict[str, Any]:
@@ -720,7 +607,7 @@ def _source_from_stored_context(context: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _source_from_row(row: sqlite3.Row, table: str) -> dict[str, Any]:
+def _source_from_row(row: dict[str, Any], table: str) -> dict[str, Any]:
     github_context = _safe_json_object(row["context_json"])
     urls = github_context.get("urls") if isinstance(github_context.get("urls"), list) else []
     clean_urls = [str(url) for url in urls if isinstance(url, str) and url.strip()]
@@ -735,22 +622,13 @@ def _source_from_row(row: sqlite3.Row, table: str) -> dict[str, Any]:
     }
 
 
-def _source_for_message_id(con: sqlite3.Connection, message_id: str | None) -> dict[str, Any]:
-    if not message_id:
+def _source_for_message_id(
+    repository: FeedbackRepository, message_id: str | None
+) -> dict[str, Any]:
+    row = repository.source_for_message_id(message_id)
+    if not row:
         return {}
-    job = con.execute(
-        "SELECT id, trigger_actor, trigger_actor_avatar_url, context_json FROM jobs WHERE message_id=? ORDER BY id DESC LIMIT 1",
-        (message_id,),
-    ).fetchone()
-    if job:
-        return _source_from_row(job, "jobs")
-    coalesced = con.execute(
-        "SELECT id, job_id, trigger_actor, trigger_actor_avatar_url, context_json FROM coalesced_notifications WHERE message_id=? ORDER BY id DESC LIMIT 1",
-        (message_id,),
-    ).fetchone()
-    if coalesced:
-        return _source_from_row(coalesced, "coalesced_notifications")
-    return {}
+    return _source_from_row(row, str(row["source_table"]))
 
 
 def _fallback_source_from_comment(comment: str) -> dict[str, Any]:
@@ -859,19 +737,16 @@ def persist_resolved_review_comment_source(db_path: str | Path, event: dict[str,
     if not resolved:
         return event
     source_url = resolved.short_url
-    with _connect(db_path) as con:
-        row = con.execute("SELECT context_json FROM feedback_events WHERE id=?", (event["id"],)).fetchone()
-        if not row:
-            return event
-        context = _safe_json_object(row["context_json"])
-        github_context = _safe_json_object(resolved.to_json())
-        context["github_context"] = github_context
-        context["github_urls"] = resolved.urls
-        context["source_url"] = source_url
-        con.execute(
-            "UPDATE feedback_events SET context_json=? WHERE id=?",
-            (json.dumps(context, ensure_ascii=False, sort_keys=True), event["id"]),
-        )
+    repository = _repository(db_path)
+    stored = repository.get_event(event["id"])
+    if stored is None:
+        return event
+    context = stored.context
+    github_context = _safe_json_object(resolved.to_json())
+    context["github_context"] = github_context
+    context["github_urls"] = resolved.urls
+    context["source_url"] = source_url
+    repository.update_event_context(event["id"], context)
     enriched = {
         **event,
         "github_context": _safe_json_object(resolved.to_json()),
@@ -888,10 +763,14 @@ def persist_resolved_review_comment_source(db_path: str | Path, event: dict[str,
     return enriched
 
 
-def _enrich_event(con: sqlite3.Connection, event: dict[str, Any]) -> dict[str, Any]:
+def _enrich_event(
+    repository: FeedbackRepository, event: dict[str, Any]
+) -> dict[str, Any]:
     context = event.get("context") if isinstance(event.get("context"), dict) else {}
     stored = _source_from_stored_context(context)
-    joined = _source_for_message_id(con, str(context.get("message_id") or "") or None)
+    joined = _source_for_message_id(
+        repository, str(context.get("message_id") or "") or None
+    )
     fallback = _fallback_source_from_comment(str(event.get("comment") or ""))
 
     github_urls = _first_value(stored.get("github_urls"), joined.get("github_urls"), fallback.get("github_urls")) or []
@@ -916,20 +795,14 @@ def _enrich_event(con: sqlite3.Connection, event: dict[str, Any]) -> dict[str, A
 
 
 def list_rules(db_path: str | Path, scope: str = "", min_confidence: float | None = None) -> list[dict[str, Any]]:
-    clauses = []
-    args: list[Any] = []
-    if scope:
-        clauses.append("(scope=? OR scope LIKE ?)")
-        args.extend([scope, f"{scope}:%"])
-    if min_confidence is not None:
-        clauses.append("confidence>=?")
-        args.append(min_confidence)
-    sql = "SELECT * FROM feedback_rules"
-    if clauses:
-        sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY last_seen DESC, created_at DESC, scope ASC, type ASC, rule ASC"
-    with _connect(db_path) as con:
-        return [_rule_dict(con, row) for row in con.execute(sql, args)]
+    repository = _repository(db_path)
+    scopes = [scope] if scope else None
+    return [
+        _rule_to_dict(repository, rule)
+        for rule in repository.list_rules(
+            scopes=scopes, min_confidence=min_confidence
+        )
+    ]
 
 
 def rule_scopes_for_repo(repo: str) -> list[str]:
@@ -944,39 +817,21 @@ def rule_scopes_for_repo(repo: str) -> list[str]:
 
 def list_applicable_rules(db_path: str | Path, repo: str, min_confidence: float | None = None) -> list[dict[str, Any]]:
     scopes = rule_scopes_for_repo(repo)
-    clauses = []
-    args: list[Any] = []
-    scope_clauses = []
-    for scope in scopes:
-        scope_clauses.append("(scope=? OR scope LIKE ?)")
-        args.extend([scope, f"{scope}:%"])
-    if scope_clauses:
-        clauses.append("(" + " OR ".join(scope_clauses) + ")")
-    if min_confidence is not None:
-        clauses.append("confidence>=?")
-        args.append(min_confidence)
-    sql = "SELECT * FROM feedback_rules"
-    if clauses:
-        sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY last_seen DESC, created_at DESC, scope ASC, type ASC, rule ASC"
-    with _connect(db_path) as con:
-        return [_rule_dict(con, row) for row in con.execute(sql, args)]
+    repository = _repository(db_path)
+    return [
+        _rule_to_dict(repository, rule)
+        for rule in repository.list_rules(
+            scopes=scopes, min_confidence=min_confidence
+        )
+    ]
 
 
-def _rule_dict(con: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
-    source_events = json.loads(row["source_events_json"] or "[]")
-    return {
-        "id": row["id"],
-        "scope": row["scope"],
-        "type": row["type"],
-        "confidence": row["confidence"],
-        "rule": row["rule"],
-        "created_at": row["created_at"],
-        "last_seen": row["last_seen"],
-        "source_events": source_events,
-        "source_event_details": _source_event_details(con, source_events),
-        "observations": row["observations"],
-    }
+def _rule_to_dict(
+    repository: FeedbackRepository, rule: FeedbackRule
+) -> dict[str, Any]:
+    return rule.to_dict(
+        _source_event_details(repository, rule.source_events)
+    )
 
 
 def format_rules_context(repo: str, min_confidence: float, rules: list[dict[str, Any]]) -> str:
@@ -993,14 +848,16 @@ def format_rules_context(repo: str, min_confidence: float, rules: list[dict[str,
     return "\n".join(lines)
 
 
-def _source_event_details(con: sqlite3.Connection, source_events: list[str]) -> list[dict[str, Any]]:
+def _source_event_details(
+    repository: FeedbackRepository, source_events: list[str]
+) -> list[dict[str, Any]]:
     details: list[dict[str, Any]] = []
     seen: set[str] = set()
     for event_id in source_events:
         if not event_id or event_id in seen:
             continue
         seen.add(event_id)
-        row = con.execute("SELECT * FROM feedback_events WHERE id=?", (event_id,)).fetchone()
-        if row:
-            details.append(_enrich_event(con, _event_dict(row)))
+        event = repository.get_event(event_id)
+        if event:
+            details.append(_enrich_event(repository, event.to_dict()))
     return details
