@@ -76,6 +76,7 @@ class Notification:
     body: str
     received_at: str = field(default_factory=utc_now)
     auth: dict[str, bool] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

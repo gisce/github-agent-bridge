@@ -24,10 +24,14 @@ The inventory names event families, not every `action` value. Actions are
 tracked separately because their delivery semantics differ. For comments and
 reviews, `created`/`submitted` has the actionable canonical identity; `edited`
 and other actions remain distinct observational identities and must not
-retrigger work without an explicit Phase 2 policy decision. For `issues` and
-`pull_request`, only `assigned` is actionable when the payload assignee matches
-a configured bot login; `pull_request.review_requested` retains its existing
-configured-reviewer check.
+retrigger work without an explicit Phase 2 policy decision. For `issues`, only
+`assigned` is actionable when the payload assignee matches a configured bot
+login. For `pull_request`, `assigned` and `review_requested` retain their
+configured-bot checks, while `closed` is actionable only when `merged=true`;
+that delivery becomes a read-only `sync_after_merge` job. Comment and review
+deliveries must additionally be addressed to the bot, belong to a PR authored
+by the bot, or target a PR/issue assigned to the bot. Being a reviewer,
+subscriber, or email recipient is not authorization to work.
 
 ## Commit status feedback
 

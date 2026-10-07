@@ -1,6 +1,8 @@
 import threading
 import time
 
+import pytest
+
 from github_agent_bridge.dispatch import GitHubClient, OpenClawDispatcher, RunMode
 from github_agent_bridge.models import GitHubContext, Job
 from github_agent_bridge.policy import ModelRoute, ModelRoutes, Policy
@@ -37,6 +39,97 @@ def test_live_github_command_handles_missing_gh_binary():
     assert result.returncode == 127
     assert result.stdout == ""
     assert "definitely-not-present" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [
+        (0, '{"merged_at":"2026-10-07T07:37:33Z"}', True),
+        (0, '{"merged_at":null}', False),
+        (1, "", None),
+        (0, "not-json", None),
+    ],
+)
+def test_pull_request_merged_is_tristate(returncode, stdout, expected):
+    client = GitHubClient()
+
+    class Result:
+        stderr = ""
+
+        def __init__(self):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    client._run = lambda args: Result()
+    ctx = GitHubContext(
+        ["https://github.com/gisce/github-agent-bridge/pull/268"],
+        "gisce/github-agent-bridge",
+        268,
+        target_kind="issue",
+    )
+
+    assert client.pull_request_merged(ctx) is expected
+
+
+@pytest.mark.parametrize(
+    "ctx",
+    [
+        GitHubContext(
+            ["https://github.com/gisce/erp/issues/1#issuecomment-2"],
+            "gisce/erp",
+            1,
+            comment_id=2,
+            target_kind="issue_comment",
+        ),
+        GitHubContext(
+            ["https://github.com/gisce/erp/pull/1#discussion_r2"],
+            "gisce/erp",
+            1,
+            review_comment_id=2,
+            target_kind="review_comment",
+        ),
+        GitHubContext(
+            ["https://github.com/gisce/erp/pull/1#pullrequestreview-2"],
+            "gisce/erp",
+            1,
+            review_id=2,
+            target_kind="review",
+        ),
+        GitHubContext(
+            ["https://github.com/gisce/erp/commit/abc#commitcomment-2"],
+            "gisce/erp",
+            commit_comment_id=2,
+            commit_sha="abc",
+            target_kind="commit_comment",
+        ),
+    ],
+)
+def test_event_addresses_current_user_covers_all_comment_targets(ctx):
+    client = GitHubClient()
+    client.current_login = lambda: "giscebot"
+    client.issue_comment_body = lambda current: "@giscebot issue"
+    client.pull_request_review_comment = lambda current: {"body": "@giscebot inline"}
+    client.pull_request_review = lambda current: {"body": "@giscebot review"}
+    client.commit_comment_body = lambda current: "@giscebot commit"
+
+    assert client.event_addresses_current_user(ctx) is True
+
+
+def test_event_addresses_current_user_rejects_referential_later_mention():
+    client = GitHubClient()
+    client.current_login = lambda: "giscebot"
+    client.pull_request_review = lambda ctx: {
+        "body": "@hperezgisce apply the feedback from @giscebot"
+    }
+    ctx = GitHubContext(
+        ["https://github.com/gisce/erp/pull/1#pullrequestreview-2"],
+        "gisce/erp",
+        1,
+        review_id=2,
+        target_kind="review",
+    )
+
+    assert client.event_addresses_current_user(ctx) is False
 
 
 class RecordingGitHubClient(GitHubClient):

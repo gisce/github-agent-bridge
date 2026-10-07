@@ -417,8 +417,24 @@ class GitHubClient:
         after = self.issue_created_at(ctx)
         return self.current_user_thread_comment_after(ctx, after) or self.current_user_review_comment_after(ctx, after) or self.current_user_review_after(ctx, after)
 
-    def issue_comment_addresses_current_user(self, ctx: GitHubContext) -> bool:
-        body = self.issue_comment_body(ctx)
+    def event_addresses_current_user(self, ctx: GitHubContext) -> bool:
+        """Return whether the triggering feedback is explicitly addressed to us.
+
+        GitHub can notify a reviewer or subscriber about feedback directed at
+        somebody else. Resolve the immutable target through the API and require
+        the authenticated bot to be the first mention in the actual feedback.
+        """
+        body: str | None = None
+        if ctx.comment_id:
+            body = self.issue_comment_body(ctx)
+        elif ctx.review_comment_id:
+            comment = self.pull_request_review_comment(ctx)
+            body = str(comment.get("body") or "") if comment else None
+        elif ctx.review_id:
+            review = self.pull_request_review(ctx)
+            body = str(review.get("body") or "") if review else None
+        elif ctx.commit_comment_id:
+            body = self.commit_comment_body(ctx)
         login = self.current_login()
         if body is None or not login:
             return False
@@ -429,6 +445,10 @@ class GitHubClient:
         # first mentioned user. A later mention can be merely referential, e.g.
         # "@Marc what do you think about @pilipilisbot's changes?"
         return mentions[0] == login.lower()
+
+    def issue_comment_addresses_current_user(self, ctx: GitHubContext) -> bool:
+        """Backward-compatible alias for the transport-neutral event guard."""
+        return self.event_addresses_current_user(ctx)
 
     def issue_comment_mentions_current_user(self, ctx: GitHubContext) -> bool:
         return self.issue_comment_addresses_current_user(ctx)
@@ -494,6 +514,22 @@ class GitHubClient:
             return False
         author = data.get("user") if isinstance(data, dict) else None
         return isinstance(author, dict) and author.get("login") == login
+
+    def pull_request_merged(self, ctx: GitHubContext) -> bool | None:
+        """Return the live merge state, or ``None`` when it cannot be verified."""
+        repo, issue = ctx.repo, ctx.issue_number
+        if not repo or not issue:
+            return None
+        result = self._run(["api", f"repos/{repo}/pulls/{issue}"])
+        if result.returncode != 0:
+            return None
+        try:
+            data = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict) or "merged_at" not in data:
+            return None
+        return data["merged_at"] is not None
 
     def react_eyes(self, ctx: GitHubContext) -> bool:
         return self.react(ctx, "eyes")

@@ -73,6 +73,8 @@ def canonical_event_key(
     for event_type, target_id in identities:
         if repo and target_id:
             return f"{event_type}:created:{repo}:{target_id}"
+    if action == "sync_after_merge" and repo and ctx.issue_number:
+        return f"pull_request:merged:{repo}:{ctx.issue_number}"
     if repo and ctx.workflow_run_id:
         return f"workflow_run:{action}:{repo}:{ctx.workflow_run_id}"
     return f"{source}:{source_key}"
@@ -145,6 +147,24 @@ class JobQueue:
         )
         intent = classify_work_intent(n.subject, n.body, policy.bot_logins)
         metadata: dict[str, object] = {"received_at": n.received_at}
+        feedback_actionability = str(n.metadata.get("feedback_actionability") or "")
+        structured_feedback = feedback_actionability in {
+            "mentioned",
+            "assigned",
+            "pr_authored_by_bot",
+            "defer_to_executor",
+        }
+        bot_authored_changes_requested = bool(
+            n.metadata.get("github_event") == "pull_request_review"
+            and n.metadata.get("review_state") == "changes_requested"
+            and feedback_actionability == "pr_authored_by_bot"
+        )
+        if n.metadata:
+            metadata.update(n.metadata)
+        if structured_feedback:
+            action = "reply_comment"
+        if bot_authored_changes_requested:
+            intent = "work_allowed"
         parser_result = ParserResult(action, intent)
         if should_classify_with_llm(n, ctx, parser_result, policy):
             metadata["intent_classifier"] = {
@@ -178,9 +198,20 @@ class JobQueue:
                     **metadata["intent_classifier"],
                     "error": str(exc)[:500],
                 }
+        if structured_feedback:
+            action = "reply_comment"
+            metadata["action_guardrail"] = "structured_feedback_actionable"
+        if bot_authored_changes_requested:
+            intent = "work_allowed"
+            metadata["intent_guardrail"] = (
+                "bot_authored_pr_changes_requested_work_allowed"
+            )
         if action == "submit_review":
             intent = "review_only"
             metadata["intent_guardrail"] = "submit_review_read_only"
+        elif action == "sync_after_merge":
+            intent = "review_only"
+            metadata["intent_guardrail"] = "sync_after_merge_read_only"
         decision = policy.decision(n, ctx, action)
         status = {"auto": "done", "ask": "waiting_approval", "deny": "denied"}.get(decision, "pending")
         now = utc_now()

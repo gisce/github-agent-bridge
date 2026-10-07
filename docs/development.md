@@ -124,6 +124,11 @@ Role and work intent are separate.
 
 `owner` + `review_only` should preserve owner-level judgment while forbidding code and metadata changes. Do not auto-convert review-only work to the `reviewer` role.
 
+Actionability is a structural guard, not an LLM decision. All GitHub feedback
+targets must be explicitly addressed to the bot, assigned to it, or attached to
+a PR authored by it before dispatch. Keep this invariant transport-neutral so
+IMAP and webhook ingestion cannot grant different authority.
+
 ## PR checklist
 
 - [ ] Tests added/updated for changed parser, policy, queue, dispatch, CLI, monitor, or resources.
