@@ -3,6 +3,7 @@ import sqlite3
 
 import pytest
 
+import github_agent_bridge.reader as reader_module
 from github_agent_bridge.reader import ImapConfig, ImapReader
 from github_agent_bridge.policy import Policy
 from github_agent_bridge.queue import JobQueue
@@ -77,24 +78,30 @@ def make_reader():
     return ImapReader(config, QueueStub(), object())
 
 
-def test_fetch_once_reconnects_after_imap_abort(monkeypatch):
-    connections = [AbortOnSelect(), EmptyMailbox()]
+def test_fetch_once_reconnects_with_backoff_after_imap_aborts(monkeypatch):
+    connections = [AbortOnSelect(), AbortOnSelect(), EmptyMailbox()]
+    sleeps = []
 
     monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda *args: connections.pop(0))
+    monkeypatch.setattr(reader_module.time, "sleep", sleeps.append)
 
     assert make_reader().fetch_once() == 0
     assert connections == []
+    assert sleeps == [1.0, 2.0]
 
 
-def test_fetch_once_raises_after_second_imap_abort(monkeypatch):
-    connections = [AbortOnSelect(), AbortOnSelect()]
+def test_fetch_once_raises_after_all_imap_retries(monkeypatch):
+    connections = [AbortOnSelect(), AbortOnSelect(), AbortOnSelect()]
+    sleeps = []
 
     monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda *args: connections.pop(0))
+    monkeypatch.setattr(reader_module.time, "sleep", sleeps.append)
 
     with pytest.raises(imaplib.IMAP4.abort, match="socket error: EOF"):
         make_reader().fetch_once()
 
     assert connections == []
+    assert sleeps == [1.0, 2.0]
 
 
 def github_message(message_id, body):

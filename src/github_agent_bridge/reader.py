@@ -3,6 +3,7 @@ from __future__ import annotations
 import email
 import imaplib
 import sqlite3
+import time
 from dataclasses import dataclass
 
 from .models import Notification
@@ -40,13 +41,15 @@ class ImapReader:
         self.mark_seen = mark_seen
 
     def fetch_once(self) -> int:
-        for attempt in range(2):
+        retry_delays = (1.0, 2.0)
+        for attempt in range(len(retry_delays) + 1):
             try:
                 return self._fetch_once()
             except imaplib.IMAP4.abort:
-                if attempt:
+                if attempt == len(retry_delays):
                     raise
-        return 0
+                time.sleep(retry_delays[attempt])
+        raise AssertionError("unreachable")
 
     def _fetch_once(self) -> int:
         last_uid = int(self.queue.get_state("last_uid", "0") or 0)
