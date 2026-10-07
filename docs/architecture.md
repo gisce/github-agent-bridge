@@ -48,6 +48,10 @@ It also selects delivery routes and repository roles for dispatched agent work.
 
 `JobQueue` uses SQLite/WAL.
 
+Normal connections and transaction modes follow the
+[`SQLite persistence contract`](persistence.md). Queue extraction into focused
+repositories must preserve those transaction boundaries.
+
 | Table | Purpose |
 | --- | --- |
 | `jobs` | Durable work items and execution state. |

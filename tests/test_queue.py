@@ -1,4 +1,6 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
@@ -314,6 +316,55 @@ def test_ingest_records_receipt_and_event_and_deduplicates_same_event(tmp_path, 
     assert events[0]["job_id"] == first.id
 
 
+def test_concurrent_ingestion_creates_one_canonical_job_per_event(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "github_agent_bridge.actors.github_actor_details_for_context",
+        lambda ctx, *, gh_bin="gh": None,
+    )
+    q = JobQueue(tmp_path / "q.sqlite3")
+    barrier = Barrier(2)
+
+    def ingest(uid, message_id, source):
+        barrier.wait()
+        return q.ingest(notif(uid, message_id, BODY1), policy(), source=source, source_key=message_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                lambda args: ingest(*args),
+                [
+                    (1, "<email@github.com>", "email"),
+                    (2, "delivery-1", "webhook"),
+                ],
+            )
+        )
+
+    assert sorted(state for _, state in results) == ["duplicate", "enqueued"]
+    assert len({job.id for job, _ in results}) == 1
+    with q.connect() as con:
+        assert con.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+        assert con.execute("SELECT count(*) FROM github_events").fetchone()[0] == 1
+        assert con.execute("SELECT count(*) FROM ingest_receipts").fetchone()[0] == 2
+
+
+def test_enqueue_rolls_back_job_when_acknowledgement_cannot_be_persisted(tmp_path, monkeypatch):
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    def fail_acknowledgement(*args, **kwargs):
+        raise RuntimeError("acknowledgement persistence failed")
+
+    monkeypatch.setattr(q, "_queue_acknowledgement", fail_acknowledgement)
+
+    with pytest.raises(RuntimeError, match="acknowledgement persistence failed"):
+        q.enqueue(notif(1, "<atomic-ack@github.com>", BODY1), policy())
+
+    with q.connect() as con:
+        assert con.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM job_acknowledgements").fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM github_events").fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM ingest_receipts").fetchone()[0] == 0
+
+
 def test_equivalent_open_issue_notification_coalesces_after_claim(tmp_path, monkeypatch):
     monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
     q = JobQueue(tmp_path / "q.sqlite3")
@@ -523,6 +574,42 @@ def test_claim_parallel_different_work_keys_but_not_same(tmp_path):
     j2 = q.claim_next("w2")
     assert {j1.work_key, j2.work_key} == {"gisce/erp#1", "gisce/erp#2"}
     assert q.claim_next("w3") is None
+
+
+def test_concurrent_workers_cannot_claim_the_same_job(tmp_path):
+    q = JobQueue(tmp_path / "q.sqlite3")
+    job, _ = q.enqueue(notif(1, "<claim-race@github.com>", BODY1), policy())
+    barrier = Barrier(2)
+
+    def claim(worker_id):
+        barrier.wait()
+        return q.claim_next(worker_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        claims = list(executor.map(claim, ["worker-1", "worker-2"]))
+
+    claimed = [candidate for candidate in claims if candidate is not None]
+    assert [candidate.id for candidate in claimed] == [job.id]
+    assert q.get(job.id).attempts == 1
+
+
+def test_claim_rolls_back_job_and_run_when_audit_write_fails(tmp_path, monkeypatch):
+    q = JobQueue(tmp_path / "q.sqlite3")
+    job, _ = q.enqueue(notif(1, "<atomic-run@github.com>", BODY1), policy())
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit persistence failed")
+
+    monkeypatch.setattr(q, "_log", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit persistence failed"):
+        q.claim_next("worker")
+
+    stored = q.get(job.id)
+    assert stored.status == "pending"
+    assert stored.attempts == 0
+    with q.connect() as con:
+        assert con.execute("SELECT count(*) FROM job_runs WHERE job_id=?", (job.id,)).fetchone()[0] == 0
 
 
 def test_worker_heartbeat_upserts_liveness_and_active_job(tmp_path):

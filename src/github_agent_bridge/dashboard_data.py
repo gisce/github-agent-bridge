@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .persistence import Database
 from .session_events import redact_event_detail
 from .session_correlation import job_session_metadata
 
@@ -29,10 +30,7 @@ EXECUTOR_PAUSE_STATE_KEY = "executor_paused"
 
 
 def readonly_connect(db: str | Path) -> sqlite3.Connection:
-    path = Path(db).expanduser()
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-    con.row_factory = sqlite3.Row
-    return con
+    return Database(db).read_only()
 
 
 def table_exists(con: sqlite3.Connection, name: str) -> bool:

@@ -9,6 +9,7 @@ A compact map of the `github-agent-bridge` documentation set.
 | Understand what this project is | [`../README.md`](../README.md) | Overview |
 | Install a deployment | [`installation.md`](installation.md) | How-to |
 | Understand system design | [`architecture.md`](architecture.md) | Explanation |
+| Understand SQLite connection and transaction boundaries | [`persistence.md`](persistence.md) | Reference |
 | Understand event identity and transport migration | [`ingestion.md`](ingestion.md) | Explanation |
 | Configure policy | [`policy-reference.md`](policy-reference.md) | Reference |
 | Roll out safely | [`shadow-canary.md`](shadow-canary.md) | How-to |

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from .models import GitHubContext, Job, Notification, utc_now
 from .parser import classify_github_action, classify_work_intent, extract_github_context
+from .persistence import ClosingConnection, Database
 from .policy import Policy
 from .session_correlation import session_id_for_job, session_id_for_job_attempt
 from . import feedback
@@ -87,34 +88,21 @@ def acknowledgement_target_key(ctx: GitHubContext) -> str:
     )
 
 
-class ClosingConnection(sqlite3.Connection):
-    """Commit or roll back a context-managed connection, then close it."""
-
-    def __exit__(self, exc_type, exc_value, traceback) -> bool:
-        try:
-            return super().__exit__(exc_type, exc_value, traceback)
-        finally:
-            self.close()
-
-
 class JobQueue:
     def __init__(self, path: str | Path):
         self.path = Path(path).expanduser()
+        self.database = Database(self.path)
         self.init()
 
     def connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         initialize = not self.path.exists()
-        con = sqlite3.connect(
-            self.path,
-            timeout=30,
-            isolation_level=None,
-            factory=ClosingConnection,
-        )
-        con.row_factory = sqlite3.Row
-        con.execute("PRAGMA foreign_keys=ON")
-        if initialize:
-            self._initialize_database(con)
+        con = self.database.read_write()
+        try:
+            if initialize:
+                self._initialize_database(con)
+        except Exception:
+            con.close()
+            raise
         return con
 
     def init(self) -> None:
