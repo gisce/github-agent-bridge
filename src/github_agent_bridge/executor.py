@@ -10,6 +10,7 @@ import uuid
 from dataclasses import dataclass
 
 from .dispatch import GitHubClient, OpenClawDispatcher
+from .models import GitHubContext
 from .policy import Policy, complexity_from_metadata
 from .queue import JobQueue
 from .session_events import redact_event_detail
@@ -113,8 +114,21 @@ class ExecutorPool:
             if not _is_sqlite_contention_error(exc):
                 raise
 
+    def _claim_acknowledgement(
+        self, job_id: int | None = None
+    ) -> tuple[int, int, GitHubContext] | None:
+        while not self.stop_event.is_set():
+            try:
+                return self.queue.claim_acknowledgement(job_id)
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_contention_error(exc):
+                    raise
+                if self.stop_event.wait(self.config.idle_sleep_seconds):
+                    return None
+        return None
+
     def acknowledge_one(self, job_id: int | None = None) -> bool:
-        acknowledgement = self.queue.claim_acknowledgement(job_id)
+        acknowledgement = self._claim_acknowledgement(job_id)
         if acknowledgement is None:
             return False
         acknowledgement_id, acknowledged_job_id, ctx = acknowledgement
@@ -302,14 +316,7 @@ class ExecutorPool:
 
     def _acknowledgement_loop(self) -> None:
         while not self.stop_event.is_set():
-            try:
-                acknowledged = self.acknowledge_one()
-            except sqlite3.OperationalError as exc:
-                if not _is_sqlite_contention_error(exc):
-                    raise
-                self.stop_event.wait(self.config.idle_sleep_seconds)
-                continue
-            if not acknowledged:
+            if not self.acknowledge_one():
                 self.stop_event.wait(self.config.idle_sleep_seconds)
 
     def _loop(self, worker_id: str) -> None:

@@ -831,6 +831,27 @@ def test_acknowledgement_loop_does_not_hide_non_contention_database_errors(tmp_p
         pool._acknowledgement_loop()
 
 
+def test_acknowledgement_loop_does_not_retry_after_external_reaction(tmp_path, monkeypatch):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_comment(queue)
+    github = FakeGitHub(assigned=True)
+    pool = ExecutorPool(queue, Policy(), RecordingDispatcher(), github=github)
+    monkeypatch.setattr(
+        queue,
+        "claim_acknowledgement",
+        lambda job_id=None: (1, job.id, job.context),
+    )
+
+    def fail_finish(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(queue, "finish_acknowledgement", fail_finish)
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        pool._acknowledgement_loop()
+    assert github.eyes == 1
+
+
 def test_shutdown_cancels_dispatch_and_blocks_job_without_requeue(tmp_path):
     queue = JobQueue(tmp_path / "bridge.sqlite3")
     job = enqueue_pr_comment(queue)
