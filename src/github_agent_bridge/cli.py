@@ -22,7 +22,7 @@ from .autoupdate import (
     record_update_plan,
 )
 from .cancellation import cancel_running_job
-from .dashboard_data import inspect_db_read_only, list_jobs
+from .dashboard_data import DashboardQueries, JobListFilters
 from .dispatch import FEEDBACK_LEARNING_RULES, GitHubClient, OpenClawDispatcher, RunMode, prompt_rule
 from .executor import ExecutorConfig, ExecutorPool
 from .models import Notification, utc_now
@@ -280,7 +280,7 @@ def job_dict(job):
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    metrics = inspect_db_read_only(args.db)
+    metrics = DashboardQueries(args.db).status()
     print(json.dumps({"stats": metrics.get("counts", {}), "oldest_pending_age_seconds": metrics.get("oldest_pending_age_seconds"), "executor_pause": metrics.get("executor_pause", {"paused": False})}, ensure_ascii=False, indent=2))
     return 0
 
@@ -300,7 +300,10 @@ def cmd_resume_executor(args: argparse.Namespace) -> int:
 
 
 def cmd_jobs(args: argparse.Namespace) -> int:
-    rows = list_jobs(args.db, status_filter=args.status, limit=args.limit)
+    rows = DashboardQueries(args.db).list_jobs(
+        JobListFilters(status=args.status),
+        limit=args.limit,
+    )
     print(json.dumps([job_dict(j) for j in rows], ensure_ascii=False, indent=2))
     return 0
 
