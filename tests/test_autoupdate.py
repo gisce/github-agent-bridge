@@ -260,7 +260,7 @@ def test_migration_update_is_deferred_while_jobs_are_active(tmp_path, monkeypatc
     assert plan["service_plan"]["deferred"][0]["unit"] == "github-agent-bridge.service"
 
 
-def test_paused_executor_only_counts_running_jobs_as_active(tmp_path, monkeypatch):
+def test_migration_counts_pending_jobs_while_executor_is_paused(tmp_path, monkeypatch):
     monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
     db = tmp_path / "bridge.sqlite3"
     q = JobQueue(db)
@@ -278,12 +278,12 @@ def test_paused_executor_only_counts_running_jobs_as_active(tmp_path, monkeypatc
     )
 
     assert plan["queue"] == {
-        "active_counts": {"running": 0},
-        "active_total": 0,
+        "active_counts": {"pending": 1, "running": 0, "waiting_approval": 0},
+        "active_total": 1,
         "executor_paused": True,
     }
-    assert plan["decision"] == "stage_full_reload"
-    assert plan["executor_restart_allowed"] is True
+    assert plan["decision"] == "defer_migration"
+    assert plan["executor_restart_allowed"] is False
 
 
 def test_paused_executor_still_counts_running_jobs_as_active(tmp_path, monkeypatch):
@@ -305,7 +305,7 @@ def test_paused_executor_still_counts_running_jobs_as_active(tmp_path, monkeypat
     )
 
     assert plan["queue"] == {
-        "active_counts": {"running": 1},
+        "active_counts": {"pending": 0, "running": 1, "waiting_approval": 0},
         "active_total": 1,
         "executor_paused": True,
     }
@@ -482,11 +482,10 @@ def test_apply_update_plan_blocks_migration_execution_while_jobs_are_active(tmp_
     assert state["migration"]["status"] == "deferred"
 
 
-def test_apply_update_plan_rechecks_live_queue_after_executor_resumes(tmp_path, monkeypatch):
+def test_apply_update_plan_rechecks_live_queue_while_executor_is_paused(tmp_path, monkeypatch):
     monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
     db = tmp_path / "bridge.sqlite3"
     q = JobQueue(db)
-    enqueue_job(q)
     q.pause_executor("upgrade window")
     plan = plan_update(
         db,
@@ -498,7 +497,7 @@ def test_apply_update_plan_rechecks_live_queue_after_executor_resumes(tmp_path, 
         ),
     )
     assert plan["queue"]["active_total"] == 0
-    q.resume_executor()
+    enqueue_job(q)
     calls: list[list[str]] = []
 
     execution = apply_update_plan(
@@ -512,7 +511,7 @@ def test_apply_update_plan_rechecks_live_queue_after_executor_resumes(tmp_path, 
     assert execution["queue"] == {
         "active_counts": {"pending": 1, "running": 0, "waiting_approval": 0},
         "active_total": 1,
-        "executor_paused": False,
+        "executor_paused": True,
     }
     assert load_update_state(q)["queue"] == execution["queue"]
     assert calls == []

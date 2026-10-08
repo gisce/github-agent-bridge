@@ -25,9 +25,10 @@ domain repositories, the service owns one transaction and passes that
 connection to every participating repository; repositories must not open a
 nested independent transaction.
 
-Backup and restore are deliberately excluded. They use SQLite's backup API in
-`autoupdate.py` and remain specialized database operations rather than
-repository methods.
+Backup and restore are deliberately excluded from repositories. The specialized
+`backup_sqlite_database()` and `restore_sqlite_database()` operations use
+SQLite's backup API and are shared by autoupdate and the explicit migration
+command.
 
 Executor heartbeat writes, acknowledgement claims and streamed session-event
 writes treat `SQLITE_BUSY` and `SQLITE_LOCKED` as transient contention after the

@@ -10,7 +10,7 @@ from github_agent_bridge.queue import canonical_event_key
 from github_agent_bridge.intent_classifier import IntentClassification
 from github_agent_bridge.policy import FeedbackLearning, IntentClassifier, Policy
 from github_agent_bridge.queue import JobQueue
-from github_agent_bridge.sql.migrations import load_migrations
+from github_agent_bridge.sql.migrations import MigrationRequiredError, load_migrations
 
 BODY1 = "@pilipilisbot one https://github.com/gisce/erp/pull/1#issuecomment-10"
 BODY2 = "@pilipilisbot two https://github.com/gisce/erp/pull/1#issuecomment-11"
@@ -150,12 +150,12 @@ def test_connect_recreates_missing_parent_directory(tmp_path):
         ).fetchone()[0] == 1
 
 
-def test_init_adds_quarantine_schema_to_existing_database(tmp_path):
+def test_explicit_migration_adds_quarantine_schema_to_existing_database(tmp_path):
     db = tmp_path / "q.sqlite3"
     with sqlite3.connect(db) as con:
         con.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
 
-    JobQueue(db)
+    JobQueue(db, migrate=True)
 
     with sqlite3.connect(db) as con:
         tables = {
@@ -194,7 +194,7 @@ def test_fresh_database_records_packaged_migrations(tmp_path):
     assert all(row[3].endswith("Z") for row in rows)
 
 
-def test_versioned_migration_adds_columns_to_existing_database(tmp_path):
+def test_queue_requires_explicit_migration_for_existing_database(tmp_path):
     db = tmp_path / "q.sqlite3"
     q = JobQueue(db)
     with q.connect() as con:
@@ -202,7 +202,20 @@ def test_versioned_migration_adds_columns_to_existing_database(tmp_path):
         con.execute("ALTER TABLE jobs DROP COLUMN trigger_actor_avatar_url")
         con.execute("DELETE FROM schema_migrations WHERE version=1")
 
-    JobQueue(db)
+    with pytest.raises(MigrationRequiredError, match="pending migrations 1"):
+        JobQueue(db)
+
+    with sqlite3.connect(db) as con:
+        columns = {row[1] for row in con.execute("PRAGMA table_info(jobs)")}
+        applied = con.execute(
+            "SELECT count(*) FROM schema_migrations WHERE version=1"
+        ).fetchone()[0]
+
+    assert "trigger_actor" not in columns
+    assert "trigger_actor_avatar_url" not in columns
+    assert applied == 0
+
+    JobQueue(db, migrate=True)
 
     with sqlite3.connect(db) as con:
         columns = {row[1] for row in con.execute("PRAGMA table_info(jobs)")}
@@ -739,7 +752,7 @@ def test_init_backfills_only_the_known_legacy_interval_as_estimated(tmp_path):
             ),
         )
 
-    JobQueue(db)
+    JobQueue(db, migrate=True)
     JobQueue(db)
 
     with sqlite3.connect(db) as con:

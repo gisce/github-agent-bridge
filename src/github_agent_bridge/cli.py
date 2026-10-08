@@ -7,13 +7,20 @@ import mailbox
 import os
 import re
 import shlex
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
 from . import feedback
 from .actors import backfill_trigger_actors
-from .autoupdate import apply_update_plan, complete_pending_reload, plan_update, record_update_plan
+from .autoupdate import (
+    DEFAULT_BACKUP_DIR,
+    apply_update_plan,
+    complete_pending_reload,
+    plan_update,
+    record_update_plan,
+)
 from .cancellation import cancel_running_job
 from .dashboard_data import inspect_db_read_only, list_jobs
 from .dispatch import FEEDBACK_LEARNING_RULES, GitHubClient, OpenClawDispatcher, RunMode, prompt_rule
@@ -23,9 +30,16 @@ from .monitor import MonitorThresholds, monitor, report_json
 from .mcp import authenticate_token, create_token, list_tokens, revoke_token, serve_stdio
 from .observability import DEFAULT_PROCESS_SAMPLE_RETENTION_SECONDS, configure_sentry
 from .parser import decode_header_value, extract_body_text, is_github_notification_message, parse_auth_results
+from .persistence import (
+    Database,
+    active_job_counts,
+    backup_sqlite_database,
+    restore_sqlite_database,
+)
 from .policy import Policy, validate_policy_file
 from .queue import JobQueue
 from .reader import ImapConfig, ImapReader, imap_mailbox_arg
+from .sql.migrations import migration_history
 
 DEFAULT_DB = os.path.expanduser("~/.local/state/github-agent-bridge/bridge.sqlite3")
 DEFAULT_POLICY = os.path.expanduser("~/.config/github-agent-bridge/policy.json")
@@ -91,16 +105,41 @@ def cmd_init_db(args: argparse.Namespace) -> int:
 
 
 def cmd_migrate_db(args: argparse.Namespace) -> int:
-    queue = JobQueue(args.db)
+    db_path = Path(args.db).expanduser()
+    backup: dict | None = None
+    if db_path.exists():
+        counts = active_job_counts(Database(db_path))
+        active_total = sum(counts.values())
+        if active_total:
+            print(
+                "migration blocked: active jobs must be resolved first "
+                + json.dumps(counts, sort_keys=True),
+                file=sys.stderr,
+            )
+            return 2
+        backup = backup_sqlite_database(
+            db_path,
+            Path(args.backup_dir).expanduser(),
+        )
+    try:
+        queue = JobQueue(db_path, migrate=True)
+    except Exception as exc:
+        rollback_error = ""
+        if backup is not None:
+            try:
+                restore_sqlite_database(db_path, backup["path"])
+            except sqlite3.Error as restore_exc:
+                rollback_error = f"; rollback failed: {restore_exc}"
+        print(f"migration failed: {exc}{rollback_error}", file=sys.stderr)
+        return 1
     with queue.connect() as con:
-        rows = con.execute(
-            "SELECT version,name,checksum,applied_at FROM schema_migrations ORDER BY version"
-        ).fetchall()
+        migrations = migration_history(con)
     print(
         json.dumps(
             {
                 "database": str(queue.path),
-                "migrations": [dict(row) for row in rows],
+                "backup": backup,
+                "migrations": migrations,
             },
             ensure_ascii=False,
         )
@@ -485,7 +524,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--policy", default=None)
     sub = p.add_subparsers(required=True)
     s = sub.add_parser("init-db"); s.set_defaults(func=cmd_init_db)
-    s = sub.add_parser("migrate-db", help="apply pending versioned SQLite migrations"); s.set_defaults(func=cmd_migrate_db)
+    s = sub.add_parser("migrate-db", help="back up the database and apply pending versioned SQLite migrations")
+    s.add_argument(
+        "--backup-dir",
+        default=os.getenv("GITHUB_AGENT_BRIDGE_AUTOUPDATE_BACKUP_DIR", str(DEFAULT_BACKUP_DIR)),
+        help="directory for the required pre-migration SQLite backup",
+    )
+    s.set_defaults(func=cmd_migrate_db)
     s = sub.add_parser("validate-policy", help="validate a policy file against the published schema")
     s.add_argument("--policy", required=True)
     s.set_defaults(func=cmd_validate_policy)

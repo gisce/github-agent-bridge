@@ -2,7 +2,13 @@
 
 from .acknowledgements import AcknowledgementClaim, AcknowledgementRepository
 from .commit_statuses import CommitStatusClaim, CommitStatusRepository
-from .database import ClosingConnection, Database, TransactionMode
+from .database import (
+    ClosingConnection,
+    Database,
+    TransactionMode,
+    backup_sqlite_database,
+    restore_sqlite_database,
+)
 from .feedback import (
     FeedbackEvent,
     FeedbackProposal,
@@ -10,7 +16,7 @@ from .feedback import (
     FeedbackRule,
 )
 from .ingestion import IngestionRepository, IngestionRequest, IngestionResult
-from .jobs import JobRepository, job_from_row
+from .jobs import ACTIVE_JOB_STATUSES, JobRepository, active_job_counts, job_from_row
 from .mcp_tokens import McpToken, McpTokenCredential, McpTokenRepository
 from .observability import ObservabilityAlert, ObservabilityRepository, ProcessSample
 from .runtime import RuntimeProcess, RuntimeRepository
@@ -21,6 +27,7 @@ from .web_push import WebPushRepository, WebPushSubscription
 __all__ = [
     "AcknowledgementClaim",
     "AcknowledgementRepository",
+    "ACTIVE_JOB_STATUSES",
     "CommitStatusClaim",
     "CommitStatusRepository",
     "ClosingConnection",
@@ -48,5 +55,8 @@ __all__ = [
     "WebhookRepository",
     "WebPushRepository",
     "WebPushSubscription",
+    "active_job_counts",
+    "backup_sqlite_database",
     "job_from_row",
+    "restore_sqlite_database",
 ]

@@ -302,13 +302,21 @@ their version, name, checksum, and application time in `schema_migrations`.
 `schema.sql` remains the current snapshot for fresh databases; migrations make
 existing databases converge on that snapshot and perform required backfills.
 Applied migration files are immutable: a checksum mismatch or a database newer
-than the installed package aborts startup instead of guessing. For an explicit
-operator run outside autoupdate (after independently ensuring the queue is
-quiet), use:
+than the installed package aborts startup instead of guessing. Ordinary queue,
+CLI, dashboard and webhook startup validates migration history without applying
+pending steps or the rolling schema snapshot. For an explicit operator run
+outside autoupdate, use:
 
 ```bash
 gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 migrate-db
 ```
+
+`migrate-db` refuses to run while any `pending`, `running` or
+`waiting_approval` job exists, even if the executor is paused. For an existing
+database it creates an online backup before applying the snapshot and versioned
+steps; use `--backup-dir` to choose the destination. A failed migration restores
+that backup before returning an error. Fresh database creation remains allowed
+without a backup because there is no prior state to preserve.
 
 Dashboard admins can run the same first-step workflow from the autoupdate notice:
 `Check now` refreshes and records the plan, `Apply update` runs the immediate

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 
 class TransactionMode(str, Enum):
@@ -109,3 +110,37 @@ class Database:
             journal_mode = str(con.execute("PRAGMA journal_mode").fetchone()[0]).lower()
             if journal_mode != "wal":
                 con.execute("PRAGMA journal_mode=WAL")
+
+
+def backup_sqlite_database(
+    path: str | Path,
+    backup_dir: str | Path,
+) -> dict[str, Any]:
+    """Create a consistent online SQLite backup for an operator action."""
+    source_path = Path(path).expanduser()
+    backup_root = Path(backup_dir).expanduser()
+    backup_root.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    backup_path = backup_root / f"{source_path.stem}-{timestamp}.sqlite3"
+    with sqlite3.connect(source_path) as source, sqlite3.connect(backup_path) as target:
+        source.backup(target)
+    return {
+        "path": str(backup_path),
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "source": str(source_path),
+        "size_bytes": backup_path.stat().st_size,
+    }
+
+
+def restore_sqlite_database(path: str | Path, backup_path: str | Path) -> dict[str, Any]:
+    """Restore a SQLite database from an operator-created backup."""
+    target_path = Path(path).expanduser()
+    source_path = Path(backup_path).expanduser()
+    with sqlite3.connect(source_path) as source, sqlite3.connect(target_path) as target:
+        source.backup(target)
+    return {
+        "restored_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "source": str(source_path),
+        "target": str(target_path),
+        "size_bytes": target_path.stat().st_size,
+    }

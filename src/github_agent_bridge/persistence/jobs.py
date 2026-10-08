@@ -10,6 +10,27 @@ from .database import Database, TransactionMode
 from .runtime import RuntimeRepository
 from .state import StateRepository
 
+ACTIVE_JOB_STATUSES = ("pending", "running", "waiting_approval")
+
+
+def active_job_counts(database: Database) -> dict[str, int]:
+    """Read migration-blocking job counts without constructing a queue."""
+    with database.read_only() as con:
+        jobs_exists = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'"
+        ).fetchone()
+        if jobs_exists is None:
+            return {status: 0 for status in ACTIVE_JOB_STATUSES}
+        placeholders = ",".join("?" for _ in ACTIVE_JOB_STATUSES)
+        rows = con.execute(
+            f"SELECT status,count(*) count FROM jobs "
+            f"WHERE status IN ({placeholders}) GROUP BY status",
+            ACTIVE_JOB_STATUSES,
+        ).fetchall()
+    counts = {status: 0 for status in ACTIVE_JOB_STATUSES}
+    counts.update({str(row["status"]): int(row["count"]) for row in rows})
+    return counts
+
 
 def job_from_row(row: sqlite3.Row | None) -> Job | None:
     """Map one persistence row to the public queue job DTO."""
