@@ -4,13 +4,13 @@ import hashlib
 import hmac
 import json
 import re
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .models import Notification, utc_now
 from .parser import classify_github_action
+from .persistence import Database, WebhookRepository
 
 
 @dataclass(frozen=True)
@@ -324,74 +324,30 @@ def persist_shadow_delivery(
     status = "observed" if event_key else "unsupported"
     payload_hash = hashlib.sha256(raw_payload).hexdigest()
     now = utc_now()
-    con = sqlite3.connect(Path(db).expanduser(), timeout=30)
-    try:
-        con.execute(
-            "DELETE FROM webhook_shadow_receipts WHERE julianday(created_at) < julianday('now', ?)",
-            (f"-{retention_days} days",),
-        )
-        try:
-            con.execute(
-                "INSERT INTO webhook_shadow_receipts(delivery_id,hook_id,event_name,action,event_key,repository,payload_hash,payload_json,status,enqueue_status,job_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    delivery_id, hook_id, event_name, action, event_key, repo,
-                    payload_hash, raw_payload.decode("utf-8"), status,
-                    enqueue_status, job_id, now,
-                ),
-            )
-        except sqlite3.IntegrityError:
-            con.rollback()
-            con.execute(
-                "UPDATE webhook_shadow_receipts SET duplicate_count=duplicate_count+1,"
-                "enqueue_status=COALESCE(enqueue_status,?),job_id=COALESCE(job_id,?) WHERE delivery_id=?",
-                (enqueue_status, job_id, delivery_id),
-            )
-            status = "duplicate"
-        if hook_id:
-            hook = payload.get("hook") if isinstance(payload, dict) else None
-            target, target_type = webhook_hook_target(payload)
-            if event_name == "ping" and isinstance(hook, dict):
-                config = hook.get("config") if isinstance(hook.get("config"), dict) else {}
-                events = hook.get("events") if isinstance(hook.get("events"), list) else []
-                insecure_ssl = config.get("insecure_ssl")
-                insecure_ssl_value = None if insecure_ssl is None else int(str(insecure_ssl) == "1")
-                con.execute(
-                    "INSERT INTO webhook_hooks("
-                    "hook_id,target,target_type,name,active,events_json,content_type,insecure_ssl,delivery_url,"
-                    "github_api_url,ping_url,deliveries_url,github_created_at,github_updated_at,last_ping_at,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hook_id) DO UPDATE SET "
-                    "target=excluded.target,target_type=excluded.target_type,name=excluded.name,active=excluded.active,"
-                    "events_json=excluded.events_json,content_type=excluded.content_type,insecure_ssl=excluded.insecure_ssl,"
-                    "delivery_url=excluded.delivery_url,github_api_url=excluded.github_api_url,ping_url=excluded.ping_url,"
-                    "deliveries_url=excluded.deliveries_url,github_created_at=excluded.github_created_at,"
-                    "github_updated_at=excluded.github_updated_at,last_ping_at=excluded.last_ping_at,updated_at=excluded.updated_at",
-                    (
-                        hook_id, target, target_type, str(hook.get("name") or "") or None,
-                        int(bool(hook.get("active", True))), json.dumps(events),
-                        str(config.get("content_type") or "") or None, insecure_ssl_value,
-                        str(config.get("url") or "") or None, str(hook.get("url") or "") or None,
-                        str(hook.get("ping_url") or "") or None, str(hook.get("deliveries_url") or "") or None,
-                        str(hook.get("created_at") or "") or None, str(hook.get("updated_at") or "") or None,
-                        now, now,
-                    ),
-                )
-            else:
-                con.execute(
-                    "INSERT INTO webhook_hooks("
-                    "hook_id,target,target_type,active,events_json,last_event_at,last_delivery_id,last_event_name,"
-                    "last_action,last_repository,last_result,updated_at"
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hook_id) DO UPDATE SET "
-                    "last_event_at=excluded.last_event_at,last_delivery_id=excluded.last_delivery_id,"
-                    "last_event_name=excluded.last_event_name,last_action=excluded.last_action,"
-                    "last_repository=excluded.last_repository,last_result=excluded.last_result,updated_at=excluded.updated_at",
-                    (
-                        hook_id, target, target_type, 1, "[]", now, delivery_id, event_name,
-                        action, repo, status, now,
-                    ),
-                )
-        con.commit()
-    finally:
-        con.close()
+    stored = WebhookRepository(Database(db)).persist_delivery(
+        delivery_id=delivery_id,
+        hook_id=hook_id,
+        event_name=event_name,
+        action=action,
+        event_key=event_key,
+        repository=repo,
+        payload_hash=payload_hash,
+        payload_json=raw_payload.decode("utf-8"),
+        payload=payload,
+        status=status,
+        enqueue_status=enqueue_status,
+        job_id=job_id,
+        retention_days=retention_days,
+        created_at=now,
+        hook_target=webhook_hook_target(payload) if hook_id else None,
+    )
     return ShadowReceipt(
-        delivery_id, event_name, action, event_key, repo, status, enqueue_status, job_id,
+        stored.delivery_id,
+        stored.event_name,
+        stored.action,
+        stored.event_key,
+        stored.repository,
+        stored.status,
+        stored.enqueue_status,
+        stored.job_id,
     )

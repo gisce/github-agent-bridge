@@ -5,8 +5,10 @@ from .commit_statuses import CommitStatusClaim, CommitStatusRepository
 from .database import ClosingConnection, Database, TransactionMode
 from .ingestion import IngestionRepository, IngestionRequest, IngestionResult
 from .jobs import JobRepository, job_from_row
+from .mcp_tokens import McpToken, McpTokenCredential, McpTokenRepository
 from .runtime import RuntimeProcess, RuntimeRepository
 from .state import ExecutorPauseState, StateRepository
+from .webhooks import WebhookReceipt, WebhookRepository
 
 __all__ = [
     "AcknowledgementClaim",
@@ -17,6 +19,9 @@ __all__ = [
     "Database",
     "ExecutorPauseState",
     "JobRepository",
+    "McpToken",
+    "McpTokenCredential",
+    "McpTokenRepository",
     "IngestionRepository",
     "IngestionRequest",
     "IngestionResult",
@@ -24,5 +29,7 @@ __all__ = [
     "RuntimeRepository",
     "StateRepository",
     "TransactionMode",
+    "WebhookReceipt",
+    "WebhookRepository",
     "job_from_row",
 ]
