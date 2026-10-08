@@ -100,6 +100,8 @@ def assert_openclaw_agent_exec_supported(openclaw_bin: str) -> None:
     output = proc.stdout + proc.stderr
     required = (
         "Usage: openclaw agent exec",
+        "--code-mode",
+        "direct",
         "--message-file",
         "--json",
         "--timeout",
@@ -259,6 +261,8 @@ def classify_notification_with_llm(
         "agent",
         "exec",
         "--json",
+        "--code-mode",
+        "direct",
         "--timeout",
         str(cfg.timeout),
         "--thinking",

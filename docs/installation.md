@@ -7,7 +7,7 @@ This guide shows how to install `github-agent-bridge` for a new OpenClaw deploym
 Before installing the bridge, have these ready:
 
 - Python 3.11 or newer.
-- OpenClaw CLI installed with `openclaw agent exec` support for the intent classifier.
+- OpenClaw CLI 2026.9.9 or newer installed with `openclaw agent exec --code-mode direct` support for the intent classifier.
 - GitHub CLI (`gh`) installed and authenticated as the GitHub user/bot that should react to comments.
 - An email inbox that receives GitHub notification emails.
 - IMAP access to that inbox, usually an app password.

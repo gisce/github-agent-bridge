@@ -767,16 +767,18 @@ Agents must also apply the comment value rule before posting: comment only when 
 
 ## Intent classifier
 
-`intentClassifier` controls an optional enqueue-time LLM classifier for trusted GitHub comments and reviews. It is disabled by default; when enabled, the bridge calls OpenClaw with the packaged `prompt_rules/intent_classifier.md` prompt or `promptOverrides.rules.intent_classifier`, expects JSON output, and uses the result only when confidence is high enough. Low-confidence, invalid, timed-out, or failed webhook comment/review classifier calls fall back to `review_only`; email ingestion keeps the deterministic parser result for backward compatibility.
+`intentClassifier` controls an optional enqueue-time LLM classifier for trusted GitHub comments and reviews. It is disabled by default; when enabled, the bridge calls OpenClaw with the packaged `prompt_rules/intent_classifier.md` prompt or `promptOverrides.rules.intent_classifier`, expects JSON output, and uses the result only when confidence is high enough. Webhook comment/review parser results are still guarded even when the classifier is disabled: only a high-confidence applied classifier result, or the explicit structured `pr_authored_by_bot` feedback path, may keep/elevate webhook comment work to `work_allowed`. Low-confidence, invalid, timed-out, failed, or disabled webhook comment/review classifier paths fall back to `review_only`; email ingestion keeps the deterministic parser result for backward compatibility.
 
-Classifier calls use `openclaw agent exec`, avoiding the long-lived Gateway
-session path for enqueue-time routing. The bridge verifies the
-`openclaw agent exec --help` contract before classification, retries once,
-limits classifier subprocess concurrency, and treats failure as `review_only`
-for webhook comments/reviews. Deployments that enable the classifier must run an
-OpenClaw CLI build that exposes `agent exec`, `--message-file`, `--json`,
-`--timeout`, and `--thinking`. Normal executor, feedback-learning, and
-interactive gateway calls still need suitable OpenClaw concurrency headroom; see
+Classifier calls use `openclaw agent exec --code-mode direct`, avoiding the
+long-lived Gateway session path for enqueue-time routing and preventing
+untrusted GitHub text from running as a coding-agent turn with repository tools.
+The bridge verifies the `openclaw agent exec --help` contract before
+classification, retries once, limits classifier subprocess concurrency, and
+treats failure as `review_only` for webhook comments/reviews. Deployments that
+enable the classifier must run OpenClaw CLI 2026.9.9 or newer with `agent exec`,
+`--code-mode`, `--message-file`, `--json`, `--timeout`, and `--thinking`.
+Normal executor, feedback-learning, and interactive gateway calls still need
+suitable OpenClaw concurrency headroom; see
 [`operations.md`](operations.md#openclaw-concurrency-headroom).
 
 The classifier returns structured semantics: whether the event is addressed to the configured agent, the requested action, the work intent, write permission, and the scope of any requested state change. Results not addressed to the configured agent are normalized to `archive_notification` + `review_only`. Results that request `work_allowed` without `write_permission=state_change_allowed` are normalized back to `review_only`.
@@ -807,7 +809,7 @@ Example:
 | `onlyWhenParserDefaulted` | boolean | `true` | Run the classifier for conservative comment/review classifications and for bot-mentioned comments even when the parser saw implementation-looking language. Set to `false` to let the classifier arbitrate all eligible trusted GitHub comments and reviews. |
 | `openclawBin` | string | `openclaw` | OpenClaw executable used for classifier subprocess calls. |
 | `sessionId` | string | `github-agent-bridge-intent` | Backward-compatible setting retained for older deployments. Current classifier execution uses `openclaw agent exec` and does not rely on a long-lived OpenClaw session id. |
-| `timeout` | integer | `60` | Maximum seconds to wait for one classifier call before falling back to parser behavior. |
+| `timeout` | integer | `60` | Maximum seconds to wait for one classifier call before falling back conservatively for webhook comments/reviews. |
 
 The classifier runs before policy decision mapping, but it does not grant trust or bypass authorization. Source trust, `enabledRepos`, `actions`, `trustedRepos`, `trustedOrgs`, routes, roles, and the final `Policy.decision` checks still apply after classification.
 

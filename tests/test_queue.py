@@ -1175,6 +1175,28 @@ def test_enqueue_skips_llm_intent_classifier_when_disabled(tmp_path, monkeypatch
     assert calls == []
 
 
+def test_webhook_comment_classifier_disabled_downgrades_parser_work_allowed(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr("github_agent_bridge.queue.classify_notification_with_llm", lambda *args, **kwargs: calls.append(args) or None)
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = q.ingest(
+        notif(
+            1,
+            "<webhook-disabled@github.com>",
+            "@pilipilisbot implementa això https://github.com/gisce/erp/pull/1#issuecomment-10",
+        ),
+        policy(),
+        source="webhook",
+        source_key="delivery-disabled",
+    )
+
+    assert state == "enqueued"
+    assert calls == []
+    assert job.work_intent == "review_only"
+    assert job.metadata["intent_guardrail"] == "webhook_classifier_required_read_only"
+
+
 def test_enqueue_merge_issue_event_forces_review_only(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "github_agent_bridge.actors.github_actor_details_for_context",

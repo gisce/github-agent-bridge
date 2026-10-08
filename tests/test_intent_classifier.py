@@ -225,7 +225,10 @@ def test_classify_notification_with_llm_uses_agent_exec_with_stdin_prompt(monkey
             return subprocess.CompletedProcess(
                 cmd,
                 0,
-                "Usage: openclaw agent exec\n--message-file <path>\n--json\n--timeout <seconds>\n--thinking <level>\n",
+                "Usage: openclaw agent exec\n"
+                "--code-mode <mode> direct | auto | code\n"
+                "--message-file <path>\n--json\n--timeout <seconds>\n"
+                "--thinking <level>\n",
                 "",
             )
         return subprocess.CompletedProcess(
@@ -271,6 +274,8 @@ def test_classify_notification_with_llm_uses_agent_exec_with_stdin_prompt(monkey
 
     classifier_calls = [(cmd, kwargs) for cmd, kwargs in calls if cmd[-1] != "--help"]
     assert [cmd[:4] for cmd, _ in classifier_calls] == [["/tmp/openclaw", "agent", "exec", "--json"]] * 2
+    assert all("--code-mode" in cmd for cmd, _ in classifier_calls)
+    assert all(cmd[cmd.index("--code-mode") + 1] == "direct" for cmd, _ in classifier_calls)
     assert all("--message-file" in cmd and "-" in cmd for cmd, _ in classifier_calls)
     assert all("Event JSON:" in kwargs["input"] for _, kwargs in classifier_calls)
     assert classifier_calls[0][1]["input"] != classifier_calls[1][1]["input"]
@@ -320,6 +325,8 @@ def test_openclaw_agent_exec_cli_accepts_classifier_contract():
     output = proc.stdout + proc.stderr
     assert proc.returncode == 0
     assert "Usage: openclaw agent exec" in output
+    assert "--code-mode <mode>" in output
+    assert "direct" in output
     assert "--message-file <path>" in output
     assert "--json" in output
     assert "--timeout <seconds>" in output
@@ -335,7 +342,10 @@ def test_classify_notification_with_llm_reports_timeout_without_prompt(monkeypat
             return subprocess.CompletedProcess(
                 cmd,
                 0,
-                "Usage: openclaw agent exec\n--message-file <path>\n--json\n--timeout <seconds>\n--thinking <level>\n",
+                "Usage: openclaw agent exec\n"
+                "--code-mode <mode> direct | auto | code\n"
+                "--message-file <path>\n--json\n--timeout <seconds>\n"
+                "--thinking <level>\n",
                 "",
             )
         raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
@@ -370,7 +380,10 @@ def test_classify_notification_with_llm_retries_once(monkeypatch):
             return subprocess.CompletedProcess(
                 cmd,
                 0,
-                "Usage: openclaw agent exec\n--message-file <path>\n--json\n--timeout <seconds>\n--thinking <level>\n",
+                "Usage: openclaw agent exec\n"
+                "--code-mode <mode> direct | auto | code\n"
+                "--message-file <path>\n--json\n--timeout <seconds>\n"
+                "--thinking <level>\n",
                 "",
             )
         calls += 1
