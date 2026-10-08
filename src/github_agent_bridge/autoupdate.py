@@ -270,6 +270,12 @@ def database_queue_state(
 ) -> dict[str, Any]:
     """Inspect queue state without triggering schema initialization or migration."""
     database = Database(db)
+    if not database.path.exists():
+        return {
+            "active_counts": {status: 0 for status in ACTIVE_JOB_STATUSES},
+            "active_total": 0,
+            "executor_paused": False,
+        }
     counts = active_job_counts(database)
     executor_paused = StateRepository(database).executor_paused()
     active_statuses = (

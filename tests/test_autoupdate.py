@@ -145,6 +145,25 @@ def test_update_plan_noops_when_release_matches_installed_version(tmp_path, monk
     assert plan["executor_reload_pending"] is False
 
 
+def test_update_plan_treats_missing_database_as_an_empty_queue(tmp_path):
+    db = tmp_path / "missing.sqlite3"
+
+    plan = plan_update(
+        db,
+        repo_dir=tmp_path,
+        installed_version="1.2.3",
+        runner=release_runner("v1.2.3", []),
+    )
+
+    assert plan["decision"] == "noop"
+    assert plan["queue"] == {
+        "active_counts": {"pending": 0, "running": 0, "waiting_approval": 0},
+        "active_total": 0,
+        "executor_paused": False,
+    }
+    assert not db.exists()
+
+
 def test_dashboard_only_update_can_stage_while_jobs_are_active(tmp_path, monkeypatch):
     monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
     db = tmp_path / "bridge.sqlite3"
