@@ -508,13 +508,31 @@ async def _sleep_or_shutdown(shutdown_event: asyncio.Event | None, sleep_seconds
     return True
 
 
+def _is_sqlite_contention_error(exc: sqlite3.OperationalError) -> bool:
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(error_code, int) and error_code & 0xFF in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }:
+        return True
+    message = str(exc).lower()
+    return "database" in message and "locked" in message
+
+
 async def _session_stream_events(db: str | Path, job_id: int, *, after_id: int | None = None, sleep_seconds: float = 2.0, shutdown_event: asyncio.Event | None = None):
     queries = DashboardQueries(db)
     last_id = after_id or 0
     sent_transcript_keys: set[str] = set()
     while shutdown_event is None or not shutdown_event.is_set():
         emitted = False
-        events = queries.job_session_events(job_id, after_id=last_id, limit=100)
+        try:
+            events = queries.job_session_events(job_id, after_id=last_id, limit=100)
+            transcript = queries.job_session_transcript(job_id, limit=500)
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_contention_error(exc):
+                raise
+            events = []
+            transcript = []
         for event in events:
             if shutdown_event is not None and shutdown_event.is_set():
                 return
@@ -527,7 +545,6 @@ async def _session_stream_events(db: str | Path, job_id: int, *, after_id: int |
                 if key not in sent_transcript_keys:
                     sent_transcript_keys.add(key)
                     yield _sse_event("transcript_entry", {"job_id": job_id, "entry": entry})
-        transcript = queries.job_session_transcript(job_id, limit=500)
         for entry in transcript:
             if shutdown_event is not None and shutdown_event.is_set():
                 return
