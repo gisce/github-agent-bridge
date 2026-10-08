@@ -29,13 +29,16 @@ Backup and restore are deliberately excluded. They use SQLite's backup API in
 `autoupdate.py` and remain specialized database operations rather than
 repository methods.
 
-Executor heartbeat writes and acknowledgement claims treat `SQLITE_BUSY` and
-`SQLITE_LOCKED` as transient contention after the connection timeout: they wait
-and retry instead of terminating the background thread. Acknowledgement retries
-stop before the external GitHub reaction, so ambiguous post-side-effect failures
-still surface. Other `OperationalError` failures also propagate so schema or
-storage faults are not hidden. Recovered heartbeat contention increments the
-worker's persisted `recent_error_count` on the next successful heartbeat.
+Executor heartbeat writes, acknowledgement claims, and individual IMAP reader
+storage operations treat `SQLITE_BUSY` and `SQLITE_LOCKED` as transient
+contention after the connection timeout: they wait and retry instead of
+terminating the worker or reader pass. Reader retries stay inside the failed
+SQLite operation, so they do not fetch the message again or repeat the IMAP
+`\Seen` side effect. Acknowledgement retries stop before the external GitHub
+reaction, so ambiguous post-side-effect failures still surface. Other
+`OperationalError` failures also propagate so schema or storage faults are not
+hidden. Recovered heartbeat contention increments the worker's persisted
+`recent_error_count` on the next successful heartbeat.
 
 ## Queue transaction boundaries
 
