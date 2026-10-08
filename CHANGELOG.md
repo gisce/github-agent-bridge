@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.76.3 (2026-10-08)
+
+### Bug Fixes
+
+- Avoid duplicate acknowledgement finalization
+  ([`51d02cd`](https://github.com/gisce/github-agent-bridge/commit/51d02cd06967b75275efe080e5af73eecc6aae96))
+
+
 ## v0.76.2 (2026-10-08)
 
 ### Bug Fixes
