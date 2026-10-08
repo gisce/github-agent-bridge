@@ -2,6 +2,31 @@
 
 <!-- version list -->
 
+## v0.76.2 (2026-10-08)
+
+### Bug Fixes
+
+- Release refactor commits as patches
+  ([`ff6bf83`](https://github.com/gisce/github-agent-bridge/commit/ff6bf83254267725d66a43a3903f4dc57c6fdff7))
+
+### Refactoring
+
+- Extract feedback repository
+  ([`867acbe`](https://github.com/gisce/github-agent-bridge/commit/867acbe943ee105f3de8c69581933afdcf7ca251))
+
+- Extract push and observability repositories
+  ([`1ce260a`](https://github.com/gisce/github-agent-bridge/commit/1ce260aa61ddee2aa9901b893d515ab5eeaa19ff))
+
+- Extract queue persistence repositories
+  ([`e9eacb5`](https://github.com/gisce/github-agent-bridge/commit/e9eacb5dad39930adb6bd70feeeee0efbfad546a))
+
+- Extract runtime repository
+  ([`46a6b11`](https://github.com/gisce/github-agent-bridge/commit/46a6b115390202ffb6baa3b9c336cf3bb441740d))
+
+- Extract webhook and MCP repositories
+  ([`5cc28c1`](https://github.com/gisce/github-agent-bridge/commit/5cc28c11be925377cd570e34af4014f149da09e2))
+
+
 ## v0.76.1 (2026-10-07)
 
 ### Bug Fixes
