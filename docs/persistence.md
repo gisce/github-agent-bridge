@@ -30,6 +30,51 @@ Backup and restore are deliberately excluded from repositories. The specialized
 SQLite's backup API and are shared by autoupdate and the explicit migration
 command.
 
+## Adding or changing persisted data
+
+Keep schema, write-model and read-model changes separate and explicit:
+
+1. Add every schema change as the next immutable module under
+   `sql/migrations/`, and update `sql/schema.sql` so a fresh database and an
+   upgraded database converge on the same schema. Test both paths. Application
+   services and maintenance commands must never add columns or indexes as a
+   compatibility side effect.
+2. Add write and domain lookup methods under `persistence/`. Return typed DTOs
+   rather than leaking `sqlite3.Row`; use `Database.read_only()` for reads and
+   an explicit `Database.transaction()` mode for writes. A service may own a
+   cross-repository transaction and pass its connection into repository
+   methods when one invariant spans several tables.
+3. Add denormalized UI/operational queries to `DashboardQueries`, not to HTTP
+   handlers, CLI commands or write repositories. Accept typed, allowlisted
+   filters and bind all values. Keep hot endpoints to one query where practical.
+4. Exercise repository behavior against a real temporary SQLite database. For
+   hot queries, pin the intended indexes with `EXPLAIN QUERY PLAN`; do not mock
+   SQL strings as a substitute for schema-level coverage.
+
+`tests/test_persistence_architecture.py` enforces these ownership boundaries.
+Direct `sqlite3.connect()` is reserved for `persistence/database.py`, including
+the specialized backup/restore functions. SQL execution is restricted to
+repositories, migrations and the dashboard read model.
+
+## Retention and cleanup ownership
+
+Retention belongs to the repository that writes each dataset; HTTP handlers
+and read models do not delete data as a side effect of reads.
+
+| Data | Owner | Lifecycle |
+| --- | --- | --- |
+| Webhook receipt payloads | `WebhookRepository` | Pruned on receipt ingestion using the configured webhook retention window. |
+| Process samples | `ObservabilityRepository` | Pruned when the monitor records a sample, using the configured sample-retention window. |
+| Job runs, acknowledgements, commit statuses, coalesced notifications, session events and progress | `JobRepository` via the `jobs` parent | Deleted by foreign-key cascade when a future explicit job-retention operation deletes the parent job. Runs are never pruned independently because that would corrupt runtime totals. |
+| Worklog | Future explicit job-retention operation | The legacy table has no job foreign key. Job cleanup must delete matching `job_id` rows in the same transaction before deleting the job; ordinary reads must not prune it. |
+| Ingest receipts and canonical GitHub events | Ingestion/audit retention | They detach from a deleted job with `ON DELETE SET NULL` and remain as deduplication/audit records until a separately configured ingestion-retention policy exists. |
+| Feedback events, proposals and learned rules | Feedback operator workflow | Kept until an explicit operator action removes or supersedes them; job cleanup does not own learned policy data. |
+
+There is intentionally no automatic completed-job retention policy yet. When
+one is added, it must be an explicit repository/CLI operation with a documented
+window, one transaction for parent and non-FK children, and tests proving that
+active jobs and retained audit records are untouched.
+
 ## Dashboard read model
 
 `github_agent_bridge.dashboard_data.DashboardQueries` is the read-only boundary

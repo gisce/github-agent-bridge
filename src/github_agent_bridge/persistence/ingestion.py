@@ -5,8 +5,7 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ..actors import TriggerActor
-from ..models import GitHubContext, Job, Notification, utc_now
+from ..models import GitHubContext, Job, Notification, TriggerActor, utc_now
 from .acknowledgements import AcknowledgementRepository
 from .commit_statuses import CommitStatusRepository
 from .database import Database, TransactionMode
