@@ -11,6 +11,13 @@ def utc_now() -> str:
 
 
 @dataclass(frozen=True)
+class TriggerActor:
+    login: str
+    avatar_url: str | None = None
+    user_id: int | None = None
+
+
+@dataclass(frozen=True)
 class GitHubContext:
     urls: list[str]
     repo: str | None = None

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from importlib import resources
 from pathlib import Path
 
 from .models import GitHubContext, Job, Notification
@@ -24,17 +23,7 @@ from .policy import Policy
 from . import feedback
 from .actors import trigger_actor_details_for_enqueue, trigger_actor_details_from_notification
 from .intent_classifier import ParserResult, classify_notification_with_llm, should_classify_with_llm
-from .sql.migrations import apply_migrations, validate_migrations
-
-SCHEMA_PACKAGE = "github_agent_bridge.sql"
-
-
-def load_schema() -> str:
-    """Read the packaged SQLite schema resource."""
-    return resources.files(SCHEMA_PACKAGE).joinpath("schema.sql").read_text(encoding="utf-8")
-
-
-SCHEMA = load_schema()
+from .sql.migrations import SCHEMA, initialize_database, validate_migrations
 
 
 def canonical_event_key(
@@ -103,37 +92,16 @@ class JobQueue:
                 validate_migrations(con)
             return
         with self.database.read_write() as con:
-            self._initialize_database(con)
+            initialize_database(con)
 
     def migrate(self) -> None:
         """Initialize or migrate a database through an explicit operator path."""
         with self.database.read_write() as con:
-            self._initialize_database(con)
+            initialize_database(con)
 
     def _ensure_initialized(self) -> None:
         if not self.path.exists():
             self.init()
-
-    def _initialize_database(self, con: sqlite3.Connection) -> None:
-        history_exists = con.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
-        ).fetchone()
-        baseline_applied = bool(
-            history_exists
-            and con.execute(
-                "SELECT 1 FROM schema_migrations WHERE version=1"
-            ).fetchone()
-        )
-        if baseline_applied:
-            # Validate/apply immutable steps before the rolling schema snapshot can
-            # touch a database created by this or a newer package version.
-            apply_migrations(con)
-            con.executescript(SCHEMA)
-        else:
-            # Legacy or incomplete histories need the snapshot to create missing
-            # tables before the baseline migration can perform its backfills.
-            con.executescript(SCHEMA)
-            apply_migrations(con)
 
     def enqueue(self, n: Notification, policy: Policy) -> tuple[Job | None, str]:
         """Backward-compatible email enqueue entrypoint."""

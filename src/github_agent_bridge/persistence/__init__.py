@@ -1,6 +1,11 @@
 """Explicit SQLite connection and transaction boundaries."""
 
 from .acknowledgements import AcknowledgementClaim, AcknowledgementRepository
+from .actors import (
+    ActorBackfillCandidate,
+    ActorBackfillRepository,
+    ActorBackfillUpdate,
+)
 from .commit_statuses import CommitStatusClaim, CommitStatusRepository
 from .database import (
     ClosingConnection,
@@ -28,6 +33,9 @@ __all__ = [
     "AcknowledgementClaim",
     "AcknowledgementRepository",
     "ACTIVE_JOB_STATUSES",
+    "ActorBackfillCandidate",
+    "ActorBackfillRepository",
+    "ActorBackfillUpdate",
     "CommitStatusClaim",
     "CommitStatusRepository",
     "ClosingConnection",

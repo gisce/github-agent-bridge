@@ -642,6 +642,10 @@ gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 \
   backfill-trigger-actors
 ```
 
+The write pass requires the current migrated schema and never mutates the
+schema itself. Run `gab migrate-db` first when the command reports a pending
+migration. `--dry-run` can inspect a legacy database without changing it.
+
 ### Detect install drift
 
 Set `GITHUB_AGENT_BRIDGE_RELEASE_REPO` in the systemd environment file to the
