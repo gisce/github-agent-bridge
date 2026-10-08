@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.76.5 (2026-10-08)
+
+### Bug Fixes
+
+- Handle missing database during update planning
+  ([`9841f33`](https://github.com/gisce/github-agent-bridge/commit/9841f33d8861b5689d9871b6738a3b69fed7821a))
+
+- Require explicit SQLite migration preflight
+  ([`8d2769b`](https://github.com/gisce/github-agent-bridge/commit/8d2769bf71981c0bba0ef9158f7932d2f4689b10))
+
+- Retry transient SQLite reader contention
+  ([`15780c5`](https://github.com/gisce/github-agent-bridge/commit/15780c5075a40920b6ac03bf75dcf6b1951636b4))
+
+### Refactoring
+
+- Add explicit dashboard read model
+  ([`0eaae6c`](https://github.com/gisce/github-agent-bridge/commit/0eaae6cb15ce27104ec6183445324d2646e28d26))
+
+
 ## v0.76.4 (2026-10-08)
 
 ### Bug Fixes
