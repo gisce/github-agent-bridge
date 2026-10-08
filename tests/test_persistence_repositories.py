@@ -1,13 +1,17 @@
+import hashlib
 import json
 
 from github_agent_bridge.persistence import (
     AcknowledgementRepository,
     ExecutorPauseState,
+    IngestionRepository,
+    IngestionRequest,
+    JobRepository,
     RuntimeProcess,
     RuntimeRepository,
     StateRepository,
 )
-from github_agent_bridge.models import Notification
+from github_agent_bridge.models import GitHubContext, Notification
 from github_agent_bridge.policy import Policy
 from github_agent_bridge.queue import JobQueue
 
@@ -126,3 +130,60 @@ def test_runtime_repository_persists_process_heartbeat_and_events(tmp_path):
     runtime_process = queue.get(job.id).metadata["runtime_process"]
     assert runtime_process["pid"] == 101
     assert runtime_process["state"] == "exited"
+
+
+def test_job_repository_maps_and_transitions_jobs(tmp_path):
+    queue = JobQueue(tmp_path / "queue.sqlite3")
+    job, status = queue.enqueue(
+        notification(),
+        Policy(trusted_orgs={"gisce"}, bot_logins={"pilipilisbot"}),
+    )
+    assert status == "enqueued"
+    assert isinstance(queue.jobs, JobRepository)
+
+    claimed = queue.jobs.claim_next("repository-worker")
+
+    assert claimed is not None
+    assert claimed.id == job.id
+    assert claimed.status == "running"
+    assert claimed.locked_by == "repository-worker"
+    queue.jobs.finish(job.id, "done", "repository lifecycle complete")
+    assert queue.jobs.get(job.id).status == "done"
+
+
+def test_ingestion_repository_deduplicates_receipts_in_one_transaction(tmp_path):
+    queue = JobQueue(tmp_path / "queue.sqlite3")
+    assert isinstance(queue.ingestion, IngestionRepository)
+    item = notification()
+    context = GitHubContext(
+        urls=["https://github.com/gisce/erp/pull/1#issuecomment-10"],
+        repo="gisce/erp",
+        issue_number=1,
+        comment_id=10,
+        target_kind="issue_comment",
+    )
+    request = IngestionRequest(
+        notification=item,
+        context=context,
+        source="email",
+        source_key=item.message_id,
+        event_key="issue_comment:created:gisce/erp:10",
+        payload_hash=hashlib.sha256(item.body.encode("utf-8")).hexdigest(),
+        status="pending",
+        action="reply_comment",
+        decision="auto_trusted",
+        work_intent="work_allowed",
+        metadata={"received_at": item.received_at},
+    )
+
+    first = queue.ingestion.ingest(request)
+    duplicate = queue.ingestion.ingest(request)
+
+    assert first.state == "enqueued"
+    assert first.job is not None
+    assert duplicate.state == "duplicate"
+    assert duplicate.job is not None
+    assert duplicate.job.id == first.job.id
+    with queue.database.read_only() as con:
+        assert con.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+        assert con.execute("SELECT count(*) FROM ingest_receipts").fetchone()[0] == 1
