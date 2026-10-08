@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v0.76.4 (2026-10-08)
+
+### Bug Fixes
+
+- Bound stream drain after cli exit
+  ([`2c090bb`](https://github.com/gisce/github-agent-bridge/commit/2c090bb889f70f2432e5e46c5bef72cde097188e))
+
+- Retry contended session activity writes
+  ([`7ed9ddb`](https://github.com/gisce/github-agent-bridge/commit/7ed9ddb4a419d3067def68a0d16e0dcf11fc91c5))
+
+
 ## v0.76.3 (2026-10-08)
 
 ### Bug Fixes
