@@ -770,10 +770,13 @@ Agents must also apply the comment value rule before posting: comment only when 
 `intentClassifier` controls an optional enqueue-time LLM classifier for trusted GitHub comments and reviews. It is disabled by default; when enabled, the bridge calls OpenClaw with the packaged `prompt_rules/intent_classifier.md` prompt or `promptOverrides.rules.intent_classifier`, expects JSON output, and uses the result only when confidence is high enough. Low-confidence, invalid, timed-out, or failed webhook comment/review classifier calls fall back to `review_only`; email ingestion keeps the deterministic parser result for backward compatibility.
 
 Classifier calls use `openclaw agent exec`, avoiding the long-lived Gateway
-session path for enqueue-time routing. The bridge retries once, limits classifier
-subprocess concurrency, and treats failure as `review_only` for webhook
-comments/reviews. Normal executor, feedback-learning, and interactive gateway
-calls still need suitable OpenClaw concurrency headroom; see
+session path for enqueue-time routing. The bridge verifies the
+`openclaw agent exec --help` contract before classification, retries once,
+limits classifier subprocess concurrency, and treats failure as `review_only`
+for webhook comments/reviews. Deployments that enable the classifier must run an
+OpenClaw CLI build that exposes `agent exec`, `--message-file`, `--json`,
+`--timeout`, and `--thinking`. Normal executor, feedback-learning, and
+interactive gateway calls still need suitable OpenClaw concurrency headroom; see
 [`operations.md`](operations.md#openclaw-concurrency-headroom).
 
 The classifier returns structured semantics: whether the event is addressed to the configured agent, the requested action, the work intent, write permission, and the scope of any requested state change. Results not addressed to the configured agent are normalized to `archive_notification` + `review_only`. Results that request `work_allowed` without `write_permission=state_change_allowed` are normalized back to `review_only`.

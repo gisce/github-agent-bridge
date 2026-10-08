@@ -80,10 +80,13 @@ starve other gateway work.
 
 The enqueue-time intent classifier is deliberately different: the bridge calls
 `openclaw agent exec` for a one-shot classification. This avoids depending on
-the long-lived Gateway session path for the permission decision. The bridge
-limits classifier subprocess concurrency, retries once, and treats webhook
-comment/review classifier failure as `review_only`, so a classifier outage cannot
-elevate webhook work to `work_allowed`.
+the long-lived Gateway session path for the permission decision. The OpenClaw
+CLI on classifier hosts must expose `openclaw agent exec --message-file --json
+--timeout --thinking`; the bridge checks that contract before invoking the
+classifier. The bridge limits classifier subprocess concurrency, retries once,
+and treats webhook comment/review classifier failure as `review_only`, so a
+classifier outage or unsupported CLI cannot elevate webhook work to
+`work_allowed`.
 
 For the standard four-worker deployment, use eight OpenClaw slots:
 

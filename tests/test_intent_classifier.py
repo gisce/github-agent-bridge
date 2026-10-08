@@ -1,9 +1,11 @@
 import json
+import pytest
 import shutil
 import subprocess
 
 from github_agent_bridge.intent_classifier import (
     ParserResult,
+    assert_openclaw_agent_exec_supported,
     build_intent_prompt,
     classify_notification_with_llm,
     intent_session_id,
@@ -215,9 +217,17 @@ def test_normalize_result_requires_write_permission_for_work_allowed():
 
 def test_classify_notification_with_llm_uses_agent_exec_with_stdin_prompt(monkeypatch):
     calls = []
+    assert_openclaw_agent_exec_supported.cache_clear()
 
     def fake_run(cmd, **kwargs):
         calls.append((cmd, kwargs))
+        if cmd[-1] == "--help":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "Usage: openclaw agent exec\n--message-file <path>\n--json\n--timeout <seconds>\n--thinking <level>\n",
+                "",
+            )
         return subprocess.CompletedProcess(
             cmd,
             0,
@@ -259,16 +269,39 @@ def test_classify_notification_with_llm_uses_agent_exec_with_stdin_prompt(monkey
             prompt_template="Event JSON:\n{event_json}\n",
         )
 
-    assert [cmd[:4] for cmd, _ in calls] == [["/tmp/openclaw", "agent", "exec", "--json"]] * 2
-    assert all("--message-file" in cmd and "-" in cmd for cmd, _ in calls)
-    assert all("Event JSON:" in kwargs["input"] for _, kwargs in calls)
-    assert calls[0][1]["input"] != calls[1][1]["input"]
+    classifier_calls = [(cmd, kwargs) for cmd, kwargs in calls if cmd[-1] != "--help"]
+    assert [cmd[:4] for cmd, _ in classifier_calls] == [["/tmp/openclaw", "agent", "exec", "--json"]] * 2
+    assert all("--message-file" in cmd and "-" in cmd for cmd, _ in classifier_calls)
+    assert all("Event JSON:" in kwargs["input"] for _, kwargs in classifier_calls)
+    assert classifier_calls[0][1]["input"] != classifier_calls[1][1]["input"]
+
+
+def test_openclaw_agent_exec_contract_rejects_unsupported_cli(monkeypatch):
+    assert_openclaw_agent_exec_supported.cache_clear()
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd,
+            0,
+            "Usage: openclaw agent [options] [command]\nCommands:\n  run\n",
+            "",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    try:
+        assert_openclaw_agent_exec_supported("/tmp/openclaw")
+    except RuntimeError as exc:
+        assert "required 'agent exec' contract" in str(exc)
+        assert "Usage: openclaw agent [options] [command]" in str(exc)
+    else:
+        raise AssertionError("expected unsupported OpenClaw CLI to fail the contract check")
 
 
 def test_openclaw_agent_exec_cli_accepts_classifier_contract():
     openclaw_bin = shutil.which("openclaw")
     if not openclaw_bin:
-        return
+        pytest.skip("openclaw CLI is not installed")
 
     proc = subprocess.run(
         [
@@ -295,8 +328,16 @@ def test_openclaw_agent_exec_cli_accepts_classifier_contract():
 
 def test_classify_notification_with_llm_reports_timeout_without_prompt(monkeypatch):
     notif = notification("<1@github.com>", "@pilipilisbot review this")
+    assert_openclaw_agent_exec_supported.cache_clear()
 
     def fake_run(cmd, **kwargs):
+        if cmd[-1] == "--help":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "Usage: openclaw agent exec\n--message-file <path>\n--json\n--timeout <seconds>\n--thinking <level>\n",
+                "",
+            )
         raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -321,9 +362,17 @@ def test_classify_notification_with_llm_reports_timeout_without_prompt(monkeypat
 def test_classify_notification_with_llm_retries_once(monkeypatch):
     notif = notification("<1@github.com>", "@pilipilisbot review this")
     calls = 0
+    assert_openclaw_agent_exec_supported.cache_clear()
 
     def fake_run(cmd, **kwargs):
         nonlocal calls
+        if cmd[-1] == "--help":
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "Usage: openclaw agent exec\n--message-file <path>\n--json\n--timeout <seconds>\n--thinking <level>\n",
+                "",
+            )
         calls += 1
         if calls == 1:
             return subprocess.CompletedProcess(cmd, 1, "", "temporary failure")

@@ -6,6 +6,7 @@ import re
 import subprocess
 import threading
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 from .feedback import _extract_json_object, _openclaw_text_from_json, compact, load_prompt_rule, session_id_for_event
@@ -77,6 +78,38 @@ class IntentClassification:
         if self.subordinate_reason:
             metadata["subordinate_reason"] = self.subordinate_reason
         return metadata
+
+
+@lru_cache(maxsize=8)
+def assert_openclaw_agent_exec_supported(openclaw_bin: str) -> None:
+    try:
+        proc = subprocess.run(
+            [openclaw_bin, "agent", "exec", "--help"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+    )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        detail = compact(str(exc), 300)
+        raise RuntimeError(
+            f"OpenClaw CLI does not support required 'agent exec' contract: {detail}"
+        )
+
+    output = proc.stdout + proc.stderr
+    required = (
+        "Usage: openclaw agent exec",
+        "--message-file",
+        "--json",
+        "--timeout",
+        "--thinking",
+    )
+    if proc.returncode != 0 or not all(token in output for token in required):
+        detail = compact(output.strip() or f"openclaw exited {proc.returncode}", 300)
+        raise RuntimeError(
+            f"OpenClaw CLI does not support required 'agent exec' contract: {detail}"
+        )
 
 
 def should_classify_with_llm(
@@ -219,6 +252,7 @@ def classify_notification_with_llm(
     agent: str | None = None,
     prompt_template: str | None = None,
 ) -> IntentClassification:
+    assert_openclaw_agent_exec_supported(cfg.openclaw_bin)
     prompt = build_intent_prompt(n, ctx, parser_result, prompt_template, policy=policy, agent=agent)
     cmd = [
         cfg.openclaw_bin,
