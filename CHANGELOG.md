@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.76.7 (2026-10-08)
+
+### Refactoring
+
+- Enforce SQLite persistence boundaries
+  ([`88dcc9e`](https://github.com/gisce/github-agent-bridge/commit/88dcc9e33d5cd8d65f872198589119fdcb3e52b7))
+
+
 ## v0.76.6 (2026-10-08)
 
 ### Bug Fixes
