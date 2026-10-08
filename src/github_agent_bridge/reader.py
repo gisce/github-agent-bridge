@@ -4,12 +4,43 @@ import email
 import imaplib
 import sqlite3
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypeVar
 
 from .models import Notification
 from .parser import decode_header_value, extract_body_text, is_github_notification_message, parse_auth_results
 from .policy import Policy
 from .queue import JobQueue
+
+
+T = TypeVar("T")
+SQLITE_CONTENTION_RETRY_DELAYS = (1.0, 2.0)
+
+
+def _is_sqlite_contention_error(exc: sqlite3.OperationalError) -> bool:
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(error_code, int) and error_code & 0xFF in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }:
+        return True
+    message = str(exc).lower()
+    return "database" in message and "locked" in message
+
+
+def _retry_sqlite_contention(operation: Callable[[], T]) -> T:
+    for attempt in range(len(SQLITE_CONTENTION_RETRY_DELAYS) + 1):
+        try:
+            return operation()
+        except sqlite3.OperationalError as exc:
+            if (
+                not _is_sqlite_contention_error(exc)
+                or attempt == len(SQLITE_CONTENTION_RETRY_DELAYS)
+            ):
+                raise
+            time.sleep(SQLITE_CONTENTION_RETRY_DELAYS[attempt])
+    raise AssertionError("unreachable")
 
 
 def imap_mailbox_arg(value: str) -> str:
@@ -52,7 +83,12 @@ class ImapReader:
         raise AssertionError("unreachable")
 
     def _fetch_once(self) -> int:
-        last_uid = int(self.queue.get_state("last_uid", "0") or 0)
+        last_uid = int(
+            _retry_sqlite_contention(
+                lambda: self.queue.get_state("last_uid", "0")
+            )
+            or 0
+        )
         count = 0
         imap = imaplib.IMAP4_SSL(self.config.host, self.config.port)
         try:
@@ -73,27 +109,36 @@ class ImapReader:
                 if is_github_notification_message(msg, from_addr):
                     n = Notification(uid=uid, message_id=message_id, subject=subject, from_addr=from_addr, body=extract_body_text(msg), auth=parse_auth_results(msg))
                     try:
-                        self.queue.ingest(
-                            n,
-                            self.policy,
-                            source="email",
-                            source_key=n.message_id,
+                        _retry_sqlite_contention(
+                            lambda: self.queue.ingest(
+                                n,
+                                self.policy,
+                                source="email",
+                                source_key=n.message_id,
+                            )
                         )
                     except sqlite3.Error:
                         raise
                     except Exception as exc:
-                        self.queue.quarantine_notification(
-                            n,
-                            reason="ingestion_error",
-                            error=f"{type(exc).__name__}: {exc}",
-                            metadata={"uid": uid, "mailbox": self.config.mailbox},
+                        _retry_sqlite_contention(
+                            lambda: self.queue.quarantine_notification(
+                                n,
+                                reason="ingestion_error",
+                                error=f"{type(exc).__name__}: {exc}",
+                                metadata={
+                                    "uid": uid,
+                                    "mailbox": self.config.mailbox,
+                                },
+                            )
                         )
                     # Only GitHub notifications belong to this bounded context.
                     # Generic/non-GitHub mail must remain untouched for the generic inbox worker.
                     if self.mark_seen:
                         imap.uid("store", str(uid), "+FLAGS", "(\\Seen)")
                     count += 1
-                self.queue.set_state("last_uid", str(uid))
+                _retry_sqlite_contention(
+                    lambda: self.queue.set_state("last_uid", str(uid))
+                )
             return count
         finally:
             try:
