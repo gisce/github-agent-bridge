@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.76.6 (2026-10-08)
+
+### Bug Fixes
+
+- Keep session stream alive during SQLite contention
+  ([`e045cc4`](https://github.com/gisce/github-agent-bridge/commit/e045cc4686a9edbf18aefafc1f72f7b295b41ec5))
+
+
 ## v0.76.5 (2026-10-08)
 
 ### Bug Fixes
