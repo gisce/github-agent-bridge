@@ -135,10 +135,12 @@ class ExecutorPool:
         acknowledgement_id, acknowledged_job_id, ctx = acknowledgement
         try:
             ok = self.github.react_eyes(ctx)
-            self.queue.finish_acknowledgement(acknowledgement_id, ok)
         except Exception as exc:
             ok = False
-            self.queue.finish_acknowledgement(acknowledgement_id, False, f"{type(exc).__name__}: {exc}")
+            error = f"{type(exc).__name__}: {exc}"
+        else:
+            error = None
+        self.queue.finish_acknowledgement(acknowledgement_id, ok, error)
         self.queue.add_worklog(
             acknowledged_job_id,
             "acknowledged" if ok else "acknowledgement_failed",

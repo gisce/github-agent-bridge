@@ -1043,7 +1043,11 @@ def test_acknowledgement_loop_does_not_retry_after_external_reaction(tmp_path, m
         lambda job_id=None: (1, job.id, job.context),
     )
 
+    finish_calls = 0
+
     def fail_finish(*args, **kwargs):
+        nonlocal finish_calls
+        finish_calls += 1
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(queue, "finish_acknowledgement", fail_finish)
@@ -1051,6 +1055,7 @@ def test_acknowledgement_loop_does_not_retry_after_external_reaction(tmp_path, m
     with pytest.raises(sqlite3.OperationalError, match="database is locked"):
         pool._acknowledgement_loop()
     assert github.eyes == 1
+    assert finish_calls == 1
 
 
 def test_shutdown_cancels_dispatch_and_blocks_job_without_requeue(tmp_path):
