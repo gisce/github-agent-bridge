@@ -45,7 +45,7 @@ No PyPI publish is configured yet.
 | `BREAKING CHANGE: ...` | major | `0.2.0` → `1.0.0` |
 | `docs: ...` | none | no release |
 | `test: ...` | none | no release |
-| `refactor: ...` | none by default | no release |
+| `refactor: ...` | patch | `0.2.0` → `0.2.1` |
 | `chore: ...` | none | no release |
 
 Useful examples:
@@ -53,8 +53,12 @@ Useful examples:
 ```text
 fix: keep packaged prompt resources in wheels
 feat: add retry policy for blocked jobs
+refactor: extract queue persistence repository
 feat!: change policy action names
 ```
+
+Refactors create patch releases because they change the deployable package even
+when they intentionally preserve external behavior.
 
 ## Manual run
 
