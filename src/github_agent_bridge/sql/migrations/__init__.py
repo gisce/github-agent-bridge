@@ -17,6 +17,10 @@ class MigrationError(RuntimeError):
     """Raised when migration history is inconsistent or a step cannot run."""
 
 
+class MigrationRequiredError(MigrationError):
+    """Raised when an existing database needs an explicit migration run."""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -69,6 +73,74 @@ def _ensure_history_table(con: sqlite3.Connection) -> None:
           applied_at TEXT NOT NULL
         )"""
     )
+
+
+def validate_migrations(
+    con: sqlite3.Connection,
+    migrations: Sequence[Migration] | None = None,
+) -> tuple[int, ...]:
+    """Validate migration history without mutating the database.
+
+    Ordinary bridge processes use this read-only check. Only the explicit
+    migration command is allowed to create history or apply pending steps.
+    """
+    history_exists = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+    ).fetchone()
+    if history_exists is None:
+        raise MigrationRequiredError(
+            "database has no migration history; run `gab migrate-db` before starting services"
+        )
+
+    steps = tuple(migrations if migrations is not None else load_migrations())
+    versions = [migration.version for migration in steps]
+    if versions != sorted(set(versions)):
+        raise MigrationError("migration versions must be unique and ordered")
+
+    rows = con.execute(
+        "SELECT version,name,checksum FROM schema_migrations ORDER BY version"
+    ).fetchall()
+    applied = {int(row[0]): (str(row[1]), str(row[2])) for row in rows}
+    known_versions = set(versions)
+    unknown_versions = sorted(set(applied) - known_versions)
+    if unknown_versions:
+        raise MigrationError(
+            "database contains migrations newer than this package: "
+            + ", ".join(str(version) for version in unknown_versions)
+        )
+
+    pending: list[int] = []
+    for migration in steps:
+        recorded = applied.get(migration.version)
+        if recorded is None:
+            pending.append(migration.version)
+        elif recorded != (migration.name, migration.checksum):
+            raise MigrationError(
+                f"migration {migration.version} does not match recorded name/checksum"
+            )
+    if pending:
+        raise MigrationRequiredError(
+            "database has pending migrations "
+            + ", ".join(str(version) for version in pending)
+            + "; run `gab migrate-db` before starting services"
+        )
+    return tuple(sorted(applied))
+
+
+def migration_history(con: sqlite3.Connection) -> list[dict[str, object]]:
+    """Return the audited migration history through the persistence boundary."""
+    return [
+        {
+            "version": int(row["version"]),
+            "name": str(row["name"]),
+            "checksum": str(row["checksum"]),
+            "applied_at": str(row["applied_at"]),
+        }
+        for row in con.execute(
+            "SELECT version,name,checksum,applied_at "
+            "FROM schema_migrations ORDER BY version"
+        ).fetchall()
+    ]
 
 
 def apply_migrations(

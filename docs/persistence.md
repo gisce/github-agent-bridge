@@ -25,9 +25,29 @@ domain repositories, the service owns one transaction and passes that
 connection to every participating repository; repositories must not open a
 nested independent transaction.
 
-Backup and restore are deliberately excluded. They use SQLite's backup API in
-`autoupdate.py` and remain specialized database operations rather than
-repository methods.
+Backup and restore are deliberately excluded from repositories. The specialized
+`backup_sqlite_database()` and `restore_sqlite_database()` operations use
+SQLite's backup API and are shared by autoupdate and the explicit migration
+command.
+
+## Dashboard read model
+
+`github_agent_bridge.dashboard_data.DashboardQueries` is the read-only boundary
+used by HTTP handlers, CLI status/list commands, and monitoring. It owns
+dashboard SQL and row-to-JSON mapping separately from write repositories so
+denormalized UI queries can evolve without leaking `sqlite3.Row` or SQL into
+application orchestration.
+
+Job-list callers pass a typed `JobListFilters` value. The query maps each field
+to a fixed column and binds every value; callers cannot supply column names.
+The list remains one SQL statement and keeps the indexed dashboard ordering.
+
+The read model assumes the current migrated schema. Health/status first
+validates migration history and reports `schema_ok=false` for an old or partial
+database; normal queries do not carry indefinite `table_exists()` or
+`column_exists()` branches. Apply migrations explicitly before starting a newer
+dashboard. The module-level query functions remain compatibility shims for
+Python callers, while services use `DashboardQueries` directly.
 
 Executor heartbeat writes, acknowledgement claims and streamed session-event
 writes treat `SQLITE_BUSY` and `SQLITE_LOCKED` as transient contention after the

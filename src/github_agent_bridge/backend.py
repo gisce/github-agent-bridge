@@ -42,16 +42,8 @@ from .feedback import (
     update_rule_scope,
 )
 from .dashboard_data import (
-    get_job_detail,
-    inspect_db_read_only,
-    job_logs,
-    job_session,
-    job_session_events,
-    job_session_transcript,
-    list_all_job_actor_logins,
-    list_job_actors,
-    list_jobs,
-    metrics_summary,
+    DashboardQueries,
+    JobListFilters,
     transcript_entry_from_session_event,
 )
 from .monitor import monitor
@@ -517,11 +509,12 @@ async def _sleep_or_shutdown(shutdown_event: asyncio.Event | None, sleep_seconds
 
 
 async def _session_stream_events(db: str | Path, job_id: int, *, after_id: int | None = None, sleep_seconds: float = 2.0, shutdown_event: asyncio.Event | None = None):
+    queries = DashboardQueries(db)
     last_id = after_id or 0
     sent_transcript_keys: set[str] = set()
     while shutdown_event is None or not shutdown_event.is_set():
         emitted = False
-        events = job_session_events(db, job_id, after_id=last_id, limit=100)
+        events = queries.job_session_events(job_id, after_id=last_id, limit=100)
         for event in events:
             if shutdown_event is not None and shutdown_event.is_set():
                 return
@@ -534,7 +527,7 @@ async def _session_stream_events(db: str | Path, job_id: int, *, after_id: int |
                 if key not in sent_transcript_keys:
                     sent_transcript_keys.add(key)
                     yield _sse_event("transcript_entry", {"job_id": job_id, "entry": entry})
-        transcript = job_session_transcript(db, job_id, limit=500)
+        transcript = queries.job_session_transcript(job_id, limit=500)
         for entry in transcript:
             if shutdown_event is not None and shutdown_event.is_set():
                 return
@@ -656,7 +649,7 @@ def _known_mcp_user_profiles(config: DashboardConfig, *, current_login: str = ""
     logins = {login.lower() for login in config.allowed_users | config.admin_users if login}
     if current_login:
         logins.add(current_login.lower())
-    for actor_login in list_all_job_actor_logins(config.db):
+    for actor_login in DashboardQueries(config.db).list_all_job_actor_logins():
         login = str(actor_login).strip().lower()
         if login:
             logins.add(login)
@@ -879,6 +872,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     app.state.dashboard_static_snapshot = static_snapshot
     app.state.dashboard_shutdown_event = shutdown_event
     ensure_webhook_schema = _webhook_schema_initializer(config)
+    queries = DashboardQueries(config.db)
     webhook_repository = WebhookRepository(Database(config.db))
 
     assets_dir = runtime_static_dir / "assets"
@@ -935,7 +929,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
-        metrics = inspect_db_read_only(config.db)
+        metrics = queries.status()
         return {
             "ok": bool(metrics.get("db_exists") and metrics.get("schema_ok", True)),
             "service": "github-agent-bridge-dashboard",
@@ -1248,7 +1242,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
 
     @app.get("/api/status")
     def api_status(request: Request, profile: dict[str, Any] = Depends(current_profile)) -> dict[str, Any]:
-        metrics = inspect_db_read_only(config.db)
+        metrics = queries.status()
         dashboard_url, dashboard_url_source = _dashboard_public_url_with_source(request)
         admin_actions = [
             "retry_job",
@@ -1396,56 +1390,57 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         limit: int = 50,
     ) -> dict[str, Any]:
         return {
-            "jobs": list_jobs(
-                config.db,
-                status_filter=status_filter,
-                repo=repo,
-                thread=thread,
-                action=action,
-                intent=intent,
-                actor=actor,
-                since=since,
-                until=until,
+            "jobs": queries.list_jobs(
+                JobListFilters(
+                    status=status_filter,
+                    repo=repo,
+                    thread=thread,
+                    action=action,
+                    intent=intent,
+                    actor=actor,
+                    since=since,
+                    until=until,
+                ),
                 limit=limit,
             )
         }
 
     @app.get("/api/jobs/actors")
     def api_job_actors(_: str = Depends(current_user), limit: int = 100) -> dict[str, Any]:
-        return {"actors": list_job_actors(config.db, limit=limit)}
+        return {"actors": queries.list_job_actors(limit=limit)}
 
     @app.get("/api/jobs/{job_id}")
     def api_job(job_id: int, _: str = Depends(current_user)) -> dict[str, Any]:
-        job = get_job_detail(config.db, job_id)
+        job = queries.get_job_detail(job_id)
         if job is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
         return {"job": job}
 
     @app.get("/api/jobs/{job_id}/logs")
     def api_job_logs(job_id: int, limit: int = 100, _: str = Depends(current_user)) -> dict[str, Any]:
-        return {"logs": job_logs(config.db, job_id, limit=limit)}
+        return {"logs": queries.job_logs(job_id, limit=limit)}
 
     @app.post("/api/jobs/{job_id}/retry")
     def api_job_retry(job_id: int, profile: dict[str, Any] = Depends(current_admin_profile)) -> dict[str, Any]:
-        if get_job_detail(config.db, job_id) is None:
+        if queries.get_job_detail(job_id) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
         if not JobQueue(config.db).retry(job_id, actor=str(profile["login"])):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="job_not_retryable")
-        job = get_job_detail(config.db, job_id)
+        job = queries.get_job_detail(job_id)
         return {"job": job, "detail": "job_requeued"}
 
     @app.post("/api/jobs/{job_id}/dismiss")
     def api_job_dismiss(job_id: int, profile: dict[str, Any] = Depends(current_admin_profile)) -> dict[str, Any]:
-        if get_job_detail(config.db, job_id) is None:
+        if queries.get_job_detail(job_id) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
         if not JobQueue(config.db).dismiss(job_id, f"dismissed by @{profile['login']}"):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="job_not_dismissable")
-        job = get_job_detail(config.db, job_id)
+        job = queries.get_job_detail(job_id)
         return {"job": job, "detail": "job_dismissed"}
 
     @app.post("/api/jobs/{job_id}/cancel")
     async def api_job_cancel(job_id: int, request: Request, profile: dict[str, Any] = Depends(current_profile)) -> dict[str, Any]:
-        if get_job_detail(config.db, job_id) is None:
+        if queries.get_job_detail(job_id) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
         if not can_cancel_job(job_id, profile):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="job_cancel_not_allowed")
@@ -1459,7 +1454,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         result = cancel_running_job(JobQueue(config.db), job_id, actor=str(profile["login"]), reason=reason)
         if not result.cancelled:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="job_not_running")
-        job = get_job_detail(config.db, job_id)
+        job = queries.get_job_detail(job_id)
         return {
             "job": job,
             "detail": "job_cancelled",
@@ -1470,26 +1465,26 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
 
     @app.get("/api/jobs/{job_id}/session")
     def api_job_session(job_id: int, _: str = Depends(current_user)) -> dict[str, Any]:
-        session = job_session(config.db, job_id)
+        session = queries.job_session(job_id)
         if session is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
         return {"session": session}
 
     @app.get("/api/jobs/{job_id}/session/events")
     def api_job_session_events(job_id: int, after_id: int | None = None, limit: int = 100, _: str = Depends(current_user)) -> dict[str, Any]:
-        if job_session(config.db, job_id) is None:
+        if queries.job_session(job_id) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
-        return {"events": job_session_events(config.db, job_id, after_id=after_id, limit=limit)}
+        return {"events": queries.job_session_events(job_id, after_id=after_id, limit=limit)}
 
     @app.get("/api/jobs/{job_id}/session/transcript")
     def api_job_session_transcript(job_id: int, limit: int = 500, _: str = Depends(current_user)) -> dict[str, Any]:
-        if job_session(config.db, job_id) is None:
+        if queries.job_session(job_id) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
-        return {"entries": job_session_transcript(config.db, job_id, limit=limit)}
+        return {"entries": queries.job_session_transcript(job_id, limit=limit)}
 
     @app.get("/api/jobs/{job_id}/session/stream")
     def api_job_session_stream(job_id: int, after_id: int | None = None, _: str = Depends(current_user)) -> StreamingResponse:
-        if job_session(config.db, job_id) is None:
+        if queries.job_session(job_id) is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="job_not_found")
 
         return StreamingResponse(
@@ -1500,7 +1495,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
 
     @app.get("/api/metrics/summary")
     def api_metrics(timezone: str = "UTC", _: str = Depends(current_user)) -> dict[str, Any]:
-        return {"metrics": metrics_summary(config.db, timezone_name=timezone)}
+        return {"metrics": queries.metrics_summary(timezone_name=timezone)}
 
     @app.get("/api/processes")
     def api_processes(_: str = Depends(current_user)) -> dict[str, Any]:

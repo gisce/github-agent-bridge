@@ -24,7 +24,7 @@ from .policy import Policy
 from . import feedback
 from .actors import trigger_actor_details_for_enqueue, trigger_actor_details_from_notification
 from .intent_classifier import ParserResult, classify_notification_with_llm, should_classify_with_llm
-from .sql.migrations import apply_migrations
+from .sql.migrations import apply_migrations, validate_migrations
 
 SCHEMA_PACKAGE = "github_agent_bridge.sql"
 
@@ -67,10 +67,13 @@ def canonical_event_key(
 
 
 class JobQueue:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, migrate: bool = False):
         self.path = Path(path).expanduser()
         self.database = Database(self.path)
-        self.init()
+        if migrate:
+            self.migrate()
+        else:
+            self.init()
         self.acknowledgements = AcknowledgementRepository(self.database)
         self.commit_statuses = CommitStatusRepository(self.database)
         self.runtime = RuntimeRepository(self.database)
@@ -90,18 +93,21 @@ class JobQueue:
         )
 
     def connect(self) -> sqlite3.Connection:
-        initialize = not self.path.exists()
-        con = self.database.read_write()
-        try:
-            if initialize:
-                self._initialize_database(con)
-        except Exception:
-            con.close()
-            raise
-        return con
+        if not self.path.exists():
+            self.init()
+        return self.database.read_write()
 
     def init(self) -> None:
-        with self.connect() as con:
+        if self.path.exists():
+            with self.database.read_only() as con:
+                validate_migrations(con)
+            return
+        with self.database.read_write() as con:
+            self._initialize_database(con)
+
+    def migrate(self) -> None:
+        """Initialize or migrate a database through an explicit operator path."""
+        with self.database.read_write() as con:
             self._initialize_database(con)
 
     def _ensure_initialized(self) -> None:

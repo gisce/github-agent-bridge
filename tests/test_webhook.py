@@ -1718,6 +1718,7 @@ def test_existing_webhook_receipt_schema_is_migrated_for_hook_inventory(tmp_path
             "action TEXT,event_key TEXT,repository TEXT,payload_hash TEXT NOT NULL,status TEXT NOT NULL,"
             "duplicate_count INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL)"
         )
+    JobQueue(db, migrate=True)
     payload = issue_comment_payload()
     client = TestClient(create_app(DashboardConfig(db=db, require_auth=False, webhook_secrets=(SECRET,))))
 
@@ -1756,9 +1757,10 @@ def test_existing_webhook_hook_targets_are_backfilled_from_github_api_url(tmp_pa
                 "https://api.github.com/orgs/gisce/hooks/43",
                 "2026-10-05T15:29:45+00:00",
             ),
-        )
+            )
         con.execute("DELETE FROM schema_migrations WHERE version=1")
 
+    JobQueue(db, migrate=True)
     client = TestClient(create_app(DashboardConfig(db=db, require_auth=False, webhook_secrets=(SECRET,))))
     hooks = {hook["id"]: hook for hook in client.get("/api/webhooks/github/hooks").json()["hooks"]}
 

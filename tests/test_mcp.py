@@ -68,7 +68,7 @@ def test_existing_mcp_tokens_table_is_upgraded_before_user_index(tmp_path):
     )
     con.close()
 
-    JobQueue(db)
+    JobQueue(db, migrate=True)
 
     con = sqlite3.connect(db)
     columns = {row[1] for row in con.execute("PRAGMA table_info(mcp_tokens)")}

@@ -11,7 +11,7 @@ from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-from .dashboard_data import inspect_db_read_only
+from .dashboard_data import DashboardQueries
 from .observability import DEFAULT_PROCESS_SAMPLE_RETENTION_SECONDS, recent_process_samples, record_monitor_observation
 from .process_inspection import direct_children, process_identity_matches
 
@@ -155,7 +155,7 @@ def _direct_children(pid: int) -> list[dict[str, Any]]:
 
 
 def inspect_db(path: str | Path) -> dict[str, Any]:
-    return inspect_db_read_only(path)
+    return DashboardQueries(path).status()
 
 
 def _package_version() -> str:
