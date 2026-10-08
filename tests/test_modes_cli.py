@@ -475,6 +475,37 @@ def test_live_dispatch_drains_process_while_activity_callback_is_blocked(
     assert results[0].ok is True
 
 
+def test_live_dispatch_bounds_pipe_drain_when_descendant_inherits_streams(tmp_path):
+    openclaw = tmp_path / "openclaw"
+    openclaw.write_text(
+        "#!/usr/bin/env python3\n"
+        "import subprocess\n"
+        "import sys\n"
+        "subprocess.Popen([\n"
+        "    sys.executable,\n"
+        "    '-c',\n"
+        "    'import time; "
+        "[(time.sleep(0.1), print(\"child\", flush=True)) for _ in range(50)]',\n"
+        "])\n"
+        "print('parent complete', flush=True)\n",
+        encoding="utf-8",
+    )
+    openclaw.chmod(0o755)
+    dispatcher = OpenClawDispatcher(
+        openclaw_bin=str(openclaw), mode=RunMode.LIVE, cli_grace_seconds=0.1
+    )
+
+    started = time.monotonic()
+    result = dispatcher.dispatch(
+        make_job(), Policy(trusted_orgs={"gisce"}), reaction_ok=True
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.ok is True
+    assert "parent complete" in result.stdout
+    assert elapsed < 3
+
+
 def test_live_dispatch_streams_partial_openclaw_output_before_process_exits(tmp_path, monkeypatch):
     done = tmp_path / "done"
     openclaw = tmp_path / "openclaw"

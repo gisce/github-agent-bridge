@@ -4,9 +4,11 @@ import json
 import os
 import queue
 import re
+import select
 import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from importlib import resources
 from enum import StrEnum
@@ -786,6 +788,7 @@ class OpenClawDispatcher:
             queue.Queue() if activity_callback else None
         )
         activity_errors: list[BaseException] = []
+        stop_stream_readers = threading.Event()
 
         def deliver_activity() -> None:
             assert activity_queue is not None
@@ -804,9 +807,14 @@ class OpenClawDispatcher:
         def read_stream(stream, chunks: list[str], event_type: str) -> None:
             if stream is None:
                 return
-            while True:
+            while not stop_stream_readers.is_set():
+                ready, _, _ = select.select([stream], [], [], 0.1)
+                if not ready:
+                    continue
                 data = os.read(stream.fileno(), 4096)
                 if not data:
+                    break
+                if stop_stream_readers.is_set():
                     break
                 chunk = data.decode("utf-8", errors="replace")
                 chunks.append(chunk)
@@ -834,8 +842,19 @@ class OpenClawDispatcher:
         stderr_thread.start()
 
         def finish_streaming() -> None:
-            stdout_thread.join()
-            stderr_thread.join()
+            drain_deadline = time.monotonic() + 1
+            for stream_thread in (stdout_thread, stderr_thread):
+                stream_thread.join(
+                    timeout=max(0.0, drain_deadline - time.monotonic())
+                )
+            stop_stream_readers.set()
+            for stream, stream_thread in (
+                (proc.stdout, stdout_thread),
+                (proc.stderr, stderr_thread),
+            ):
+                stream_thread.join(timeout=0.5)
+                if not stream_thread.is_alive() and stream is not None:
+                    stream.close()
             if activity_queue is not None and activity_thread is not None:
                 activity_queue.put(None)
                 activity_thread.join()
