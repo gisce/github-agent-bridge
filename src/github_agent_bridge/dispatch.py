@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
 import signal
 import subprocess
@@ -781,6 +782,24 @@ class OpenClawDispatcher:
 
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
+        activity_queue: queue.Queue[tuple[str, str, str] | None] | None = (
+            queue.Queue() if activity_callback else None
+        )
+        activity_errors: list[BaseException] = []
+
+        def deliver_activity() -> None:
+            assert activity_queue is not None
+            assert activity_callback is not None
+            while True:
+                activity = activity_queue.get()
+                if activity is None:
+                    return
+                if activity_errors:
+                    continue
+                try:
+                    activity_callback(*activity)
+                except BaseException as exc:
+                    activity_errors.append(exc)
 
         def read_stream(stream, chunks: list[str], event_type: str) -> None:
             if stream is None:
@@ -791,28 +810,51 @@ class OpenClawDispatcher:
                     break
                 chunk = data.decode("utf-8", errors="replace")
                 chunks.append(chunk)
-                if activity_callback:
-                    activity_callback(event_type, "OpenClaw CLI output" if event_type == "openclaw_stdout" else "OpenClaw CLI error output", chunk.rstrip("\n"))
+                if activity_queue is not None:
+                    activity_queue.put(
+                        (
+                            event_type,
+                            "OpenClaw CLI output"
+                            if event_type == "openclaw_stdout"
+                            else "OpenClaw CLI error output",
+                            chunk.rstrip("\n"),
+                        )
+                    )
 
         stdout_thread = threading.Thread(target=read_stream, args=(proc.stdout, stdout_chunks, "openclaw_stdout"), daemon=True)
         stderr_thread = threading.Thread(target=read_stream, args=(proc.stderr, stderr_chunks, "openclaw_stderr"), daemon=True)
+        activity_thread = (
+            threading.Thread(target=deliver_activity, daemon=True)
+            if activity_queue is not None
+            else None
+        )
+        if activity_thread is not None:
+            activity_thread.start()
         stdout_thread.start()
         stderr_thread.start()
+
+        def finish_streaming() -> None:
+            stdout_thread.join()
+            stderr_thread.join()
+            if activity_queue is not None and activity_thread is not None:
+                activity_queue.put(None)
+                activity_thread.join()
+            if activity_errors:
+                raise activity_errors[0]
+
         try:
             try:
                 # Let OpenClaw's own --timeout own the agent run deadline. The bridge only
                 # keeps a small grace window so it can capture the CLI result cleanly.
                 proc.wait(timeout=agent_timeout + self.cli_grace_seconds)
-                stdout_thread.join(timeout=1)
-                stderr_thread.join(timeout=1)
+                finish_streaming()
                 out, err = "".join(stdout_chunks), "".join(stderr_chunks)
                 cancelled = self._shutdown_event.is_set() and proc.returncode != 0
                 return DispatchResult(proc.returncode == 0, proc.returncode, (out or "")[:2000], (err or "")[:4000], False, reaction_ok, cmd, cancelled)
             except subprocess.TimeoutExpired:
                 self._signal_process_group(proc, signal.SIGKILL)
                 proc.wait()
-                stdout_thread.join(timeout=1)
-                stderr_thread.join(timeout=1)
+                finish_streaming()
                 out, err = "".join(stdout_chunks), "".join(stderr_chunks)
                 return DispatchResult(False, 124, (out or "")[:2000], (err or "")[:4000], True, reaction_ok, cmd)
         finally:

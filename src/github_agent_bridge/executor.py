@@ -97,6 +97,28 @@ class ExecutorPool:
             )
             self._worker_states[worker_id] = (loop_state, active_job_id, errors + 1)
 
+    def _record_session_activity(
+        self,
+        worker_id: str,
+        job_id: int,
+        event_type: str,
+        summary: str,
+        detail: str | None,
+    ) -> bool:
+        while not self.stop_event.is_set():
+            try:
+                self.queue.add_session_event(
+                    job_id, event_type, summary, redact_event_detail(detail)
+                )
+                return True
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_contention_error(exc):
+                    raise
+                self._record_worker_storage_error(worker_id)
+                if self.stop_event.wait(self.config.idle_sleep_seconds):
+                    return False
+        return False
+
     def _heartbeat_loop(self, worker_id: str) -> None:
         while not self.stop_event.is_set():
             try:
@@ -342,7 +364,9 @@ class ExecutorPool:
                     job,
                     self.policy,
                     reaction_ok=reaction_ok,
-                    activity_callback=lambda event_type, summary, detail: self.queue.add_session_event(job.id, event_type, summary, redact_event_detail(detail)),
+                    activity_callback=lambda event_type, summary, detail: self._record_session_activity(
+                        worker_id, job.id, event_type, summary, detail
+                    ),
                     process_callback=lambda identity: self.queue.register_runtime_process(
                         job.id,
                         worker_id,

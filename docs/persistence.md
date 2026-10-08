@@ -29,13 +29,16 @@ Backup and restore are deliberately excluded. They use SQLite's backup API in
 `autoupdate.py` and remain specialized database operations rather than
 repository methods.
 
-Executor heartbeat writes and acknowledgement claims treat `SQLITE_BUSY` and
-`SQLITE_LOCKED` as transient contention after the connection timeout: they wait
-and retry instead of terminating the background thread. Acknowledgement retries
-stop before the external GitHub reaction, so ambiguous post-side-effect failures
-still surface. Other `OperationalError` failures also propagate so schema or
-storage faults are not hidden. Recovered heartbeat contention increments the
-worker's persisted `recent_error_count` on the next successful heartbeat.
+Executor heartbeat writes, acknowledgement claims and streamed session-event
+writes treat `SQLITE_BUSY` and `SQLITE_LOCKED` as transient contention after the
+connection timeout: they wait and retry instead of terminating the background
+thread. Stream readers enqueue activity before persistence so a blocked SQLite
+writer cannot stop draining the OpenClaw subprocess pipes. Acknowledgement
+retries stop before the external GitHub reaction, so ambiguous post-side-effect
+failures still surface. Other `OperationalError` failures also propagate so
+schema or storage faults are not hidden. Recovered heartbeat or session-event
+contention increments the worker's persisted `recent_error_count` on the next
+successful heartbeat.
 
 ## Queue transaction boundaries
 

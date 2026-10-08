@@ -351,6 +351,100 @@ def test_executor_records_session_activity_events(tmp_path):
     assert stderr_event["detail"] == "token=[redacted] [redacted]"
 
 
+def test_session_activity_recovers_after_transient_database_lock(tmp_path):
+    class PausingActivityDispatcher(RecordingDispatcher):
+        def __init__(self):
+            super().__init__()
+            self.ready = threading.Event()
+            self.resume = threading.Event()
+
+        def dispatch(
+            self,
+            job,
+            policy,
+            reaction_ok=None,
+            activity_callback=None,
+            process_callback=None,
+        ):
+            self.jobs.append(job)
+            if process_callback:
+                process_callback(
+                    {
+                        "pid": 456,
+                        "ppid": 123,
+                        "pgid": 456,
+                        "sid": 456,
+                        "start_time_ticks": 999,
+                    }
+                )
+            self.ready.set()
+            assert self.resume.wait(timeout=2)
+            assert activity_callback is not None
+            activity_callback(
+                "openclaw_stdout", "OpenClaw CLI output", "persist after contention"
+            )
+            return DispatchResult(True, 0, "ok", "", False, reaction_ok, ["openclaw"])
+
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    job = enqueue_pr_comment(queue)
+    queue.database.timeout_seconds = 0.01
+    queue.database.busy_timeout_ms = 10
+    dispatcher = PausingActivityDispatcher()
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=FakeGitHub(assigned=True),
+        config=ExecutorConfig(run_once=True, idle_sleep_seconds=0.01),
+    )
+    worker = threading.Thread(target=pool.work_one, args=("worker-test",))
+    worker.start()
+    assert dispatcher.ready.wait(timeout=2)
+    locker = sqlite3.connect(db, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        dispatcher.resume.set()
+        worker.join(timeout=0.1)
+        assert worker.is_alive() is True
+    finally:
+        locker.commit()
+        locker.close()
+        worker.join(timeout=2)
+
+    assert worker.is_alive() is False
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "done"
+    events = job_session_events(db, job.id)
+    assert any(
+        event["event_type"] == "openclaw_stdout"
+        and event["detail"] == "persist after contention"
+        for event in events
+    )
+
+
+def test_session_activity_does_not_hide_non_contention_database_errors(
+    tmp_path, monkeypatch
+):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    pool = ExecutorPool(queue, Policy(), RecordingDispatcher())
+
+    def fail_session_event(*args, **kwargs):
+        raise sqlite3.OperationalError("no such table: job_session_events")
+
+    monkeypatch.setattr(queue, "add_session_event", fail_session_event)
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        pool._record_session_activity(
+            "worker-test",
+            1,
+            "openclaw_stdout",
+            "OpenClaw CLI output",
+            "detail",
+        )
+
+
 def test_dispatched_job_completion_pushes_trigger_actor(tmp_path, monkeypatch):
     queue = JobQueue(tmp_path / "bridge.sqlite3")
     job, state = enqueue_pr_comment_from(queue, "ecarreras", 1, "<gisce/erp/pull/27315/ecarreras@github.com>", 1)
