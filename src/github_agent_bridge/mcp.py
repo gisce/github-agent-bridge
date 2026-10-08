@@ -4,7 +4,6 @@ import hashlib
 import hmac
 import json
 import secrets
-import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,43 +12,17 @@ from typing import Any, BinaryIO
 from .actors import normalize_github_login
 from .feedback import list_applicable_rules, list_repositories
 from .models import utc_now
+from .persistence import Database, McpToken, McpTokenRepository
 
 TOKEN_PREFIX = "gab_mcp_"
-
-
-def _connect(db_path: str | Path) -> sqlite3.Connection:
-    con = sqlite3.connect(db_path, timeout=30, isolation_level=None)
-    con.row_factory = sqlite3.Row
-    _ensure_schema(con)
-    return con
-
-
-def _ensure_schema(con: sqlite3.Connection) -> None:
-    exists = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mcp_tokens'").fetchone()
-    if exists is None:
-        return
-    existing = {row["name"] for row in con.execute("PRAGMA table_info(mcp_tokens)")}
-    columns = {"user_login": "TEXT", "created_by": "TEXT"}
-    for column, definition in columns.items():
-        if column not in existing:
-            con.execute(f"ALTER TABLE mcp_tokens ADD COLUMN {column} {definition}")
 
 
 def _hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
-def _token_dict(row: sqlite3.Row) -> dict[str, Any]:
-    return {
-        "id": row["id"],
-        "name": row["name"],
-        "user_login": row["user_login"],
-        "created_by": row["created_by"],
-        "created_at": row["created_at"],
-        "last_used_at": row["last_used_at"],
-        "revoked_at": row["revoked_at"],
-        "expires_at": row["expires_at"],
-    }
+def _repository(db_path: str | Path) -> McpTokenRepository:
+    return McpTokenRepository(Database(db_path))
 
 
 def _clean_login(value: str | None, *, require_valid: bool = False) -> str | None:
@@ -69,70 +42,44 @@ def create_token(db_path: str | Path, name: str, *, expires_at: str | None = Non
     token = TOKEN_PREFIX + secrets.token_urlsafe(32)
     token_id = secrets.token_hex(8)
     now = utc_now()
-    with _connect(db_path) as con:
-        con.execute(
-            """INSERT INTO mcp_tokens(id, name, token_hash, user_login, created_by, created_at, expires_at)
-            VALUES(?,?,?,?,?,?,?)""",
-            (token_id, clean_name, _hash_token(token), owner, creator, now, expires_at),
-        )
+    record = McpToken(
+        id=token_id,
+        name=clean_name,
+        user_login=owner,
+        created_by=creator,
+        created_at=now,
+        last_used_at=None,
+        revoked_at=None,
+        expires_at=expires_at,
+    )
+    _repository(db_path).create(record, _hash_token(token))
     return {
         "token": token,
-        "record": {
-            "id": token_id,
-            "name": clean_name,
-            "user_login": owner,
-            "created_by": creator,
-            "created_at": now,
-            "last_used_at": None,
-            "revoked_at": None,
-            "expires_at": expires_at,
-        },
+        "record": record.to_dict(),
     }
 
 
 def update_token_owner(db_path: str | Path, token_id: str, user_login: str | None) -> dict[str, Any] | None:
     owner = _clean_login(user_login, require_valid=True)
-    with _connect(db_path) as con:
-        cur = con.execute("UPDATE mcp_tokens SET user_login=? WHERE id=? AND revoked_at IS NULL", (owner, token_id))
-        if cur.rowcount == 0:
-            return None
-        row = con.execute(
-            """SELECT id, name, user_login, created_by, created_at, last_used_at, revoked_at, expires_at
-            FROM mcp_tokens
-            WHERE id=?""",
-            (token_id,),
-        ).fetchone()
-        return _token_dict(row) if row else None
+    record = _repository(db_path).update_owner(token_id, owner)
+    return record.to_dict() if record else None
 
 
 def list_tokens(db_path: str | Path, *, include_revoked: bool = False, user_login: str | None = None) -> list[dict[str, Any]]:
-    clauses = []
-    args: list[Any] = []
-    if not include_revoked:
-        clauses.append("revoked_at IS NULL")
     owner = _clean_login(user_login)
-    if owner:
-        clauses.append("lower(user_login)=?")
-        args.append(owner)
-    sql = "SELECT id, name, user_login, created_by, created_at, last_used_at, revoked_at, expires_at FROM mcp_tokens"
-    if clauses:
-        sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY created_at DESC, id DESC"
-    with _connect(db_path) as con:
-        return [_token_dict(row) for row in con.execute(sql, args)]
+    return [
+        record.to_dict()
+        for record in _repository(db_path).list(
+            include_revoked=include_revoked, user_login=owner
+        )
+    ]
 
 
 def revoke_token(db_path: str | Path, token_id: str, *, user_login: str | None = None) -> bool:
-    now = utc_now()
-    args: list[Any] = [now, token_id]
     owner = _clean_login(user_login)
-    owner_clause = ""
-    if owner:
-        owner_clause = " AND lower(user_login)=?"
-        args.append(owner)
-    with _connect(db_path) as con:
-        cur = con.execute(f"UPDATE mcp_tokens SET revoked_at=? WHERE id=? AND revoked_at IS NULL{owner_clause}", args)
-        return cur.rowcount > 0
+    return _repository(db_path).revoke(
+        token_id, utc_now(), user_login=owner
+    )
 
 
 def authenticate_token(db_path: str | Path, token: str) -> dict[str, Any] | None:
@@ -141,18 +88,11 @@ def authenticate_token(db_path: str | Path, token: str) -> dict[str, Any] | None
         return None
     digest = _hash_token(token)
     now = utc_now()
-    with _connect(db_path) as con:
-        rows = con.execute(
-            """SELECT id, name, user_login, created_by, created_at, last_used_at, revoked_at, expires_at
-            FROM mcp_tokens
-            WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)""",
-            (now,),
-        ).fetchall()
-        for row in rows:
-            stored_hash = con.execute("SELECT token_hash FROM mcp_tokens WHERE id=?", (row["id"],)).fetchone()["token_hash"]
-            if hmac.compare_digest(stored_hash, digest):
-                con.execute("UPDATE mcp_tokens SET last_used_at=? WHERE id=?", (now, row["id"]))
-                return _token_dict(row)
+    repository = _repository(db_path)
+    for credential in repository.active_credentials(now):
+        if hmac.compare_digest(credential.token_hash, digest):
+            repository.mark_used(credential.record.id, now)
+            return credential.record.to_dict()
     return None
 
 

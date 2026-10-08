@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import re
+import select
 import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from importlib import resources
 from enum import StrEnum
@@ -122,6 +125,55 @@ class GitHubClient:
         if result.returncode != 0:
             return None
         return result.stdout.strip() or None
+
+    def resolve_commit_sha(self, ctx: GitHubContext) -> tuple[str | None, str | None]:
+        if ctx.commit_sha and ctx.target_kind in {"commit", "commit_comment"}:
+            return ctx.commit_sha, None
+        if not ctx.is_pull_request or not ctx.repo or not ctx.issue_number:
+            return None, "GitHub target is not a pull request or commit"
+        result = self._run(
+            ["api", f"repos/{ctx.repo}/pulls/{ctx.issue_number}", "--jq", ".head.sha"]
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            return None, detail or f"gh exited {result.returncode} while resolving PR head"
+        sha = result.stdout.strip()
+        if not sha:
+            return None, "GitHub returned an empty pull request head SHA"
+        return sha, None
+
+    def create_commit_status(
+        self,
+        repo: str,
+        sha: str,
+        state: str,
+        context: str,
+        description: str,
+        target_url: str | None = None,
+    ) -> tuple[bool, str | None]:
+        if self.mode != RunMode.LIVE:
+            return True, None
+        args = [
+            "api",
+            "-X",
+            "POST",
+            f"repos/{repo}/statuses/{sha}",
+            "-f",
+            f"state={state}",
+            "-f",
+            f"context={context[:100]}",
+            "-f",
+            f"description={description[:140]}",
+            "-H",
+            "Accept: application/vnd.github+json",
+        ]
+        if target_url:
+            args.extend(["-f", f"target_url={target_url}"])
+        result = self._run(args)
+        if result.returncode == 0:
+            return True, None
+        detail = result.stderr.strip() or result.stdout.strip()
+        return False, detail or f"gh exited {result.returncode} while publishing commit status"
 
     def pull_request_review(self, ctx: GitHubContext) -> dict | None:
         if not ctx.repo or not ctx.review_id:
@@ -368,8 +420,24 @@ class GitHubClient:
         after = self.issue_created_at(ctx)
         return self.current_user_thread_comment_after(ctx, after) or self.current_user_review_comment_after(ctx, after) or self.current_user_review_after(ctx, after)
 
-    def issue_comment_addresses_current_user(self, ctx: GitHubContext) -> bool:
-        body = self.issue_comment_body(ctx)
+    def event_addresses_current_user(self, ctx: GitHubContext) -> bool:
+        """Return whether the triggering feedback is explicitly addressed to us.
+
+        GitHub can notify a reviewer or subscriber about feedback directed at
+        somebody else. Resolve the immutable target through the API and require
+        the authenticated bot to be the first mention in the actual feedback.
+        """
+        body: str | None = None
+        if ctx.comment_id:
+            body = self.issue_comment_body(ctx)
+        elif ctx.review_comment_id:
+            comment = self.pull_request_review_comment(ctx)
+            body = str(comment.get("body") or "") if comment else None
+        elif ctx.review_id:
+            review = self.pull_request_review(ctx)
+            body = str(review.get("body") or "") if review else None
+        elif ctx.commit_comment_id:
+            body = self.commit_comment_body(ctx)
         login = self.current_login()
         if body is None or not login:
             return False
@@ -380,6 +448,10 @@ class GitHubClient:
         # first mentioned user. A later mention can be merely referential, e.g.
         # "@Marc what do you think about @pilipilisbot's changes?"
         return mentions[0] == login.lower()
+
+    def issue_comment_addresses_current_user(self, ctx: GitHubContext) -> bool:
+        """Backward-compatible alias for the transport-neutral event guard."""
+        return self.event_addresses_current_user(ctx)
 
     def issue_comment_mentions_current_user(self, ctx: GitHubContext) -> bool:
         return self.issue_comment_addresses_current_user(ctx)
@@ -445,6 +517,22 @@ class GitHubClient:
             return False
         author = data.get("user") if isinstance(data, dict) else None
         return isinstance(author, dict) and author.get("login") == login
+
+    def pull_request_merged(self, ctx: GitHubContext) -> bool | None:
+        """Return the live merge state, or ``None`` when it cannot be verified."""
+        repo, issue = ctx.repo, ctx.issue_number
+        if not repo or not issue:
+            return None
+        result = self._run(["api", f"repos/{repo}/pulls/{issue}"])
+        if result.returncode != 0:
+            return None
+        try:
+            data = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict) or "merged_at" not in data:
+            return None
+        return data["merged_at"] is not None
 
     def react_eyes(self, ctx: GitHubContext) -> bool:
         return self.react(ctx, "eyes")
@@ -696,38 +784,96 @@ class OpenClawDispatcher:
 
         stdout_chunks: list[str] = []
         stderr_chunks: list[str] = []
+        activity_queue: queue.Queue[tuple[str, str, str] | None] | None = (
+            queue.Queue() if activity_callback else None
+        )
+        activity_errors: list[BaseException] = []
+        stop_stream_readers = threading.Event()
+
+        def deliver_activity() -> None:
+            assert activity_queue is not None
+            assert activity_callback is not None
+            while True:
+                activity = activity_queue.get()
+                if activity is None:
+                    return
+                if activity_errors:
+                    continue
+                try:
+                    activity_callback(*activity)
+                except BaseException as exc:
+                    activity_errors.append(exc)
 
         def read_stream(stream, chunks: list[str], event_type: str) -> None:
             if stream is None:
                 return
-            while True:
+            while not stop_stream_readers.is_set():
+                ready, _, _ = select.select([stream], [], [], 0.1)
+                if not ready:
+                    continue
                 data = os.read(stream.fileno(), 4096)
                 if not data:
                     break
+                if stop_stream_readers.is_set():
+                    break
                 chunk = data.decode("utf-8", errors="replace")
                 chunks.append(chunk)
-                if activity_callback:
-                    activity_callback(event_type, "OpenClaw CLI output" if event_type == "openclaw_stdout" else "OpenClaw CLI error output", chunk.rstrip("\n"))
+                if activity_queue is not None:
+                    activity_queue.put(
+                        (
+                            event_type,
+                            "OpenClaw CLI output"
+                            if event_type == "openclaw_stdout"
+                            else "OpenClaw CLI error output",
+                            chunk.rstrip("\n"),
+                        )
+                    )
 
         stdout_thread = threading.Thread(target=read_stream, args=(proc.stdout, stdout_chunks, "openclaw_stdout"), daemon=True)
         stderr_thread = threading.Thread(target=read_stream, args=(proc.stderr, stderr_chunks, "openclaw_stderr"), daemon=True)
+        activity_thread = (
+            threading.Thread(target=deliver_activity, daemon=True)
+            if activity_queue is not None
+            else None
+        )
+        if activity_thread is not None:
+            activity_thread.start()
         stdout_thread.start()
         stderr_thread.start()
+
+        def finish_streaming() -> None:
+            drain_deadline = time.monotonic() + 1
+            for stream_thread in (stdout_thread, stderr_thread):
+                stream_thread.join(
+                    timeout=max(0.0, drain_deadline - time.monotonic())
+                )
+            stop_stream_readers.set()
+            for stream, stream_thread in (
+                (proc.stdout, stdout_thread),
+                (proc.stderr, stderr_thread),
+            ):
+                stream_thread.join(timeout=0.5)
+                if not stream_thread.is_alive() and stream is not None:
+                    stream.close()
+            if activity_queue is not None and activity_thread is not None:
+                activity_queue.put(None)
+                activity_thread.join()
+            if activity_errors:
+                raise activity_errors[0]
+
         try:
             try:
                 # Let OpenClaw's own --timeout own the agent run deadline. The bridge only
                 # keeps a small grace window so it can capture the CLI result cleanly.
                 proc.wait(timeout=agent_timeout + self.cli_grace_seconds)
-                stdout_thread.join(timeout=1)
-                stderr_thread.join(timeout=1)
+                finish_streaming()
                 out, err = "".join(stdout_chunks), "".join(stderr_chunks)
                 cancelled = self._shutdown_event.is_set() and proc.returncode != 0
                 return DispatchResult(proc.returncode == 0, proc.returncode, (out or "")[:2000], (err or "")[:4000], False, reaction_ok, cmd, cancelled)
             except subprocess.TimeoutExpired:
                 self._signal_process_group(proc, signal.SIGKILL)
                 proc.wait()
-                stdout_thread.join(timeout=1)
-                stderr_thread.join(timeout=1)
+                finish_streaming()
                 out, err = "".join(stdout_chunks), "".join(stderr_chunks)
                 return DispatchResult(False, 124, (out or "")[:2000], (err or "")[:4000], True, reaction_ok, cmd)
         finally:

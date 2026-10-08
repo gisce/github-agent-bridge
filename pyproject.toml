@@ -1,6 +1,6 @@
 [project]
 name = "github-agent-bridge"
-version = "0.72.0"
+version = "0.76.6"
 description = "GitHub notification to OpenClaw agent bridge for Pilipilis"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -35,6 +35,9 @@ commit_parser = "conventional"
 tag_format = "v{version}"
 build_command = "python -m pip install build && python -m build"
 commit_message = "chore(release): {version} [skip ci]"
+
+[tool.semantic_release.commit_parser_options]
+patch_tags = ["fix", "perf", "refactor"]
 
 [tool.semantic_release.changelog.default_templates]
 changelog_file = "CHANGELOG.md"

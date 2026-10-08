@@ -1,12 +1,16 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
+import github_agent_bridge.queue as queue_module
 from github_agent_bridge.models import GitHubContext, Notification
 from github_agent_bridge.queue import canonical_event_key
 from github_agent_bridge.intent_classifier import IntentClassification
 from github_agent_bridge.policy import FeedbackLearning, IntentClassifier, Policy
 from github_agent_bridge.queue import JobQueue
+from github_agent_bridge.sql.migrations import MigrationRequiredError, load_migrations
 
 BODY1 = "@pilipilisbot one https://github.com/gisce/erp/pull/1#issuecomment-10"
 BODY2 = "@pilipilisbot two https://github.com/gisce/erp/pull/1#issuecomment-11"
@@ -70,6 +74,69 @@ def test_queue_expands_user_in_db_path(tmp_path, monkeypatch):
     assert not (tmp_path / "~").exists()
 
 
+def test_executor_pause_state_round_trips_without_schema_change(tmp_path):
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    assert q.executor_pause_state() == {"paused": False}
+    assert q.executor_paused() is False
+
+    q.pause_executor("upgrade window")
+
+    paused = q.executor_pause_state()
+    assert paused["paused"] is True
+    assert paused["reason"] == "upgrade window"
+    assert paused["updated_at"]
+    assert q.executor_paused() is True
+
+    q.resume_executor()
+
+    assert q.executor_pause_state()["paused"] is False
+    assert q.executor_paused() is False
+
+
+def test_paused_queue_does_not_claim_pending_job(tmp_path):
+    q = JobQueue(tmp_path / "q.sqlite3")
+    q.pause_executor("upgrade window")
+    job, state = q.enqueue(notif(1, "<pause@github.com>", BODY1), policy())
+    assert state == "enqueued"
+
+    assert q.claim_next("worker") is None
+    assert q.get(job.id).status == "pending"
+
+    q.resume_executor()
+    assert q.claim_next("worker").id == job.id
+
+
+def test_claim_next_reads_pause_inside_claim_transaction(tmp_path, monkeypatch):
+    db = tmp_path / "q.sqlite3"
+    q = JobQueue(db)
+    job, state = q.enqueue(notif(1, "<pause-race@github.com>", BODY1), policy())
+    assert state == "enqueued"
+    q.pause_executor("upgrade window")
+
+    events = []
+    original_connect = queue_module.sqlite3.connect
+
+    class TracingConnection(queue_module.ClosingConnection):
+        def execute(self, sql, parameters=(), /):
+            normalized = " ".join(str(sql).split())
+            if normalized == "BEGIN IMMEDIATE":
+                events.append("begin_immediate")
+            elif normalized.startswith("SELECT value FROM state WHERE key="):
+                events.append("pause_state_read")
+            return super().execute(sql, parameters)
+
+    def tracing_connect(*args, **kwargs):
+        kwargs["factory"] = TracingConnection
+        return original_connect(*args, **kwargs)
+
+    monkeypatch.setattr(queue_module.sqlite3, "connect", tracing_connect)
+
+    assert q.claim_next("worker") is None
+    assert events[:2] == ["begin_immediate", "pause_state_read"]
+    assert q.get(job.id).status == "pending"
+
+
 def test_connect_recreates_missing_parent_directory(tmp_path):
     q = JobQueue(tmp_path / "missing" / "q.sqlite3")
     for child in q.path.parent.iterdir():
@@ -83,12 +150,12 @@ def test_connect_recreates_missing_parent_directory(tmp_path):
         ).fetchone()[0] == 1
 
 
-def test_init_adds_quarantine_schema_to_existing_database(tmp_path):
+def test_explicit_migration_adds_quarantine_schema_to_existing_database(tmp_path):
     db = tmp_path / "q.sqlite3"
     with sqlite3.connect(db) as con:
         con.execute("CREATE TABLE state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
 
-    JobQueue(db)
+    JobQueue(db, migrate=True)
 
     with sqlite3.connect(db) as con:
         tables = {
@@ -107,6 +174,57 @@ def test_init_adds_quarantine_schema_to_existing_database(tmp_path):
     assert "quarantined_notifications" in tables
     assert "idx_quarantined_notifications_message_id" in indexes
     assert "idx_quarantined_notifications_unresolved" in indexes
+
+
+def test_fresh_database_records_packaged_migrations(tmp_path):
+    db = tmp_path / "q.sqlite3"
+
+    JobQueue(db)
+
+    with sqlite3.connect(db) as con:
+        rows = con.execute(
+            "SELECT version,name,checksum,applied_at FROM schema_migrations ORDER BY version"
+        ).fetchall()
+
+    packaged = load_migrations()
+    assert [(row[0], row[1], row[2]) for row in rows] == [
+        (migration.version, migration.name, migration.checksum)
+        for migration in packaged
+    ]
+    assert all(row[3].endswith("Z") for row in rows)
+
+
+def test_queue_requires_explicit_migration_for_existing_database(tmp_path):
+    db = tmp_path / "q.sqlite3"
+    q = JobQueue(db)
+    with q.connect() as con:
+        con.execute("ALTER TABLE jobs DROP COLUMN trigger_actor")
+        con.execute("ALTER TABLE jobs DROP COLUMN trigger_actor_avatar_url")
+        con.execute("DELETE FROM schema_migrations WHERE version=1")
+
+    with pytest.raises(MigrationRequiredError, match="pending migrations 1"):
+        JobQueue(db)
+
+    with sqlite3.connect(db) as con:
+        columns = {row[1] for row in con.execute("PRAGMA table_info(jobs)")}
+        applied = con.execute(
+            "SELECT count(*) FROM schema_migrations WHERE version=1"
+        ).fetchone()[0]
+
+    assert "trigger_actor" not in columns
+    assert "trigger_actor_avatar_url" not in columns
+    assert applied == 0
+
+    JobQueue(db, migrate=True)
+
+    with sqlite3.connect(db) as con:
+        columns = {row[1] for row in con.execute("PRAGMA table_info(jobs)")}
+        applied = con.execute(
+            "SELECT count(*) FROM schema_migrations WHERE version=1"
+        ).fetchone()[0]
+
+    assert {"trigger_actor", "trigger_actor_avatar_url"} <= columns
+    assert applied == 1
 
 
 def test_queue_expands_user_in_db_path(tmp_path, monkeypatch):
@@ -179,6 +297,22 @@ def test_canonical_event_key_falls_back_to_source_receipt_when_identity_is_uncer
     )
 
 
+def test_canonical_event_key_deduplicates_merge_across_email_and_webhook():
+    ctx = GitHubContext(
+        ["https://github.com/gisce/github-agent-bridge/pull/272"],
+        "gisce/github-agent-bridge",
+        272,
+        target_kind="issue",
+    )
+
+    assert canonical_event_key(
+        "sync_after_merge", ctx, "email", "<merge-mail@github.com>"
+    ) == "pull_request:merged:gisce/github-agent-bridge:272"
+    assert canonical_event_key(
+        "sync_after_merge", ctx, "webhook", "pr-272-merged"
+    ) == "pull_request:merged:gisce/github-agent-bridge:272"
+
+
 def test_ingest_records_receipt_and_event_and_deduplicates_same_event(tmp_path, monkeypatch):
     monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
     q = JobQueue(tmp_path / "q.sqlite3")
@@ -209,6 +343,55 @@ def test_ingest_records_receipt_and_event_and_deduplicates_same_event(tmp_path, 
     assert len(events) == 1
     assert events[0]["event_key"] == "issue_comment:created:gisce/erp:10"
     assert events[0]["job_id"] == first.id
+
+
+def test_concurrent_ingestion_creates_one_canonical_job_per_event(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "github_agent_bridge.actors.github_actor_details_for_context",
+        lambda ctx, *, gh_bin="gh": None,
+    )
+    q = JobQueue(tmp_path / "q.sqlite3")
+    barrier = Barrier(2)
+
+    def ingest(uid, message_id, source):
+        barrier.wait()
+        return q.ingest(notif(uid, message_id, BODY1), policy(), source=source, source_key=message_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                lambda args: ingest(*args),
+                [
+                    (1, "<email@github.com>", "email"),
+                    (2, "delivery-1", "webhook"),
+                ],
+            )
+        )
+
+    assert sorted(state for _, state in results) == ["duplicate", "enqueued"]
+    assert len({job.id for job, _ in results}) == 1
+    with q.connect() as con:
+        assert con.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+        assert con.execute("SELECT count(*) FROM github_events").fetchone()[0] == 1
+        assert con.execute("SELECT count(*) FROM ingest_receipts").fetchone()[0] == 2
+
+
+def test_enqueue_rolls_back_job_when_acknowledgement_cannot_be_persisted(tmp_path, monkeypatch):
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    def fail_acknowledgement(*args, **kwargs):
+        raise RuntimeError("acknowledgement persistence failed")
+
+    monkeypatch.setattr(q.acknowledgements, "add_pending", fail_acknowledgement)
+
+    with pytest.raises(RuntimeError, match="acknowledgement persistence failed"):
+        q.enqueue(notif(1, "<atomic-ack@github.com>", BODY1), policy())
+
+    with q.connect() as con:
+        assert con.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM job_acknowledgements").fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM github_events").fetchone()[0] == 0
+        assert con.execute("SELECT count(*) FROM ingest_receipts").fetchone()[0] == 0
 
 
 def test_equivalent_open_issue_notification_coalesces_after_claim(tmp_path, monkeypatch):
@@ -422,6 +605,42 @@ def test_claim_parallel_different_work_keys_but_not_same(tmp_path):
     assert q.claim_next("w3") is None
 
 
+def test_concurrent_workers_cannot_claim_the_same_job(tmp_path):
+    q = JobQueue(tmp_path / "q.sqlite3")
+    job, _ = q.enqueue(notif(1, "<claim-race@github.com>", BODY1), policy())
+    barrier = Barrier(2)
+
+    def claim(worker_id):
+        barrier.wait()
+        return q.claim_next(worker_id)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        claims = list(executor.map(claim, ["worker-1", "worker-2"]))
+
+    claimed = [candidate for candidate in claims if candidate is not None]
+    assert [candidate.id for candidate in claimed] == [job.id]
+    assert q.get(job.id).attempts == 1
+
+
+def test_claim_rolls_back_job_and_run_when_audit_write_fails(tmp_path, monkeypatch):
+    q = JobQueue(tmp_path / "q.sqlite3")
+    job, _ = q.enqueue(notif(1, "<atomic-run@github.com>", BODY1), policy())
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit persistence failed")
+
+    monkeypatch.setattr(q.runtime, "record_worklog", fail_audit)
+
+    with pytest.raises(RuntimeError, match="audit persistence failed"):
+        q.claim_next("worker")
+
+    stored = q.get(job.id)
+    assert stored.status == "pending"
+    assert stored.attempts == 0
+    with q.connect() as con:
+        assert con.execute("SELECT count(*) FROM job_runs WHERE job_id=?", (job.id,)).fetchone()[0] == 0
+
+
 def test_worker_heartbeat_upserts_liveness_and_active_job(tmp_path):
     q = JobQueue(tmp_path / "bridge.sqlite3")
     job, _ = q.enqueue(notif(1, "<heartbeat@github.com>", BODY1), policy())
@@ -520,6 +739,7 @@ def test_init_backfills_only_the_known_legacy_interval_as_estimated(tmp_path):
     job, _ = q.enqueue(notif(1, "<1@github.com>", BODY1), policy())
     with q.connect() as con:
         con.execute("DROP TABLE job_runs")
+        con.execute("DELETE FROM schema_migrations WHERE version=1")
         con.execute(
             """UPDATE jobs
             SET attempts=3, started_at=?, finished_at=?, metadata_json=?
@@ -532,7 +752,7 @@ def test_init_backfills_only_the_known_legacy_interval_as_estimated(tmp_path):
             ),
         )
 
-    JobQueue(db)
+    JobQueue(db, migrate=True)
     JobQueue(db)
 
     with sqlite3.connect(db) as con:
@@ -734,6 +954,70 @@ def test_enqueue_can_apply_llm_intent_classifier_to_review_comments(tmp_path, mo
     assert job.work_intent == "work_allowed"
 
 
+def test_enqueue_cannot_downgrade_changes_requested_on_bot_authored_pr(
+    tmp_path, monkeypatch
+):
+    def fake_classify(n, ctx, parser_result, cfg, **kwargs):
+        return IntentClassification(
+            action="archive_notification",
+            work_intent="review_only",
+            confidence=0.99,
+            reason="The reviewer does not mention the bot.",
+            applied=True,
+            addressed_to_agent=False,
+            write_permission="none",
+        )
+
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.classify_notification_with_llm", fake_classify
+    )
+    notification = Notification(
+        uid=None,
+        message_id="<changes-requested@github.com>",
+        subject="Re: [gisce/github-agent-bridge] fix: webhook actionability (PR #272)",
+        from_addr="pilipilisbot <notifications@github.com>",
+        body=(
+            "Please defer ambiguous PR issue_comment actionability to the executor "
+            "and add coverage.\n\n"
+            "https://github.com/gisce/github-agent-bridge/pull/272"
+            "#pullrequestreview-4815162342"
+        ),
+        auth={"spf": True, "dkim": True, "dmarc": True},
+        metadata={
+            "github_event": "pull_request_review",
+            "github_action": "submitted",
+            "review_state": "changes_requested",
+            "feedback_actionability": "pr_authored_by_bot",
+        },
+    )
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = q.enqueue(
+        notification,
+        Policy(
+            trusted_orgs={"gisce"},
+            bot_logins={"giscebot"},
+            intent_classifier=IntentClassifier(
+                enabled=True,
+                model="gpt-5.4-mini",
+                only_when_parser_defaulted=False,
+            ),
+        ),
+    )
+
+    assert state == "enqueued"
+    assert job is not None
+    assert job.status == "pending"
+    assert job.action == "reply_comment"
+    assert job.work_intent == "work_allowed"
+    assert job.metadata["intent_guardrail"] == (
+        "bot_authored_pr_changes_requested_work_allowed"
+    )
+    assert job.metadata["intent_classifier"]["llm"]["action"] == (
+        "archive_notification"
+    )
+
+
 def test_enqueue_falls_back_when_llm_intent_confidence_is_low(tmp_path, monkeypatch):
     def fake_classify(n, ctx, parser_result, cfg, **kwargs):
         return IntentClassification(
@@ -889,6 +1173,37 @@ def test_enqueue_skips_llm_intent_classifier_when_disabled(tmp_path, monkeypatch
     )
 
     assert calls == []
+
+
+def test_enqueue_merge_issue_event_forces_review_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "github_agent_bridge.actors.github_actor_details_for_context",
+        lambda ctx, *, gh_bin="gh": None,
+    )
+    notification = Notification(
+        uid=10417,
+        message_id="<gisce/github-agent-bridge/pull/268/issue_event/32668850070@github.com>",
+        subject="Re: [gisce/github-agent-bridge] fix: allow updates with paused pending jobs (PR #268)",
+        from_addr="ecarreras <notifications@github.com>",
+        body=(
+            "Merged #268 into main.\n\n"
+            "https://github.com/gisce/github-agent-bridge/pull/268#event-32668850070\n"
+            "You are receiving this because you were assigned."
+        ),
+        auth={"spf": True, "dkim": True, "dmarc": True},
+    )
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = q.enqueue(
+        notification,
+        Policy(trusted_orgs={"gisce"}, bot_logins={"giscebot"}),
+    )
+
+    assert state == "enqueued"
+    assert job is not None
+    assert job.action == "sync_after_merge"
+    assert job.work_intent == "review_only"
+    assert job.metadata["intent_guardrail"] == "sync_after_merge_read_only"
 
 
 def test_enqueue_workflow_run_failed_notification(tmp_path):

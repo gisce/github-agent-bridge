@@ -179,6 +179,34 @@ honored for compatibility, but prefer the `GITHUB_AGENT_BRIDGE_*` names in this
 service's env file. If a DSN is set without `sentry-sdk` installed, the bridge
 continues running without external error reporting.
 
+## Drain the executor for maintenance
+
+After all executor instances have been upgraded to a version with pause support,
+pause claims on the shared queue before an update window:
+
+Admins can also use the confirmed **Pause** switch in the dashboard's **System**
+page. Other dashboard users can see the state but cannot change it. The switch
+and CLI use the same persisted state; the page refreshes it while open.
+
+```bash
+gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 \
+  pause-executor --reason "upgrade window"
+gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 status
+```
+
+Readers and webhooks still enqueue pending jobs. Running jobs are not stopped;
+wait until the `running` count reaches zero before restarting the executor.
+The pause survives executor restarts. Resume after the update and health checks:
+
+```bash
+gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 resume-executor
+```
+
+While the executor is paused, update planning only counts `running` jobs as
+active. Pending and waiting-approval jobs remain queued across the update and do
+not block migrations or the executor reload. Refresh the update plan after
+pausing, wait for `running=0`, apply the update, and resume the executor.
+
 ## Safe update planning
 
 Use `gab update` to inspect a published release and decide which reloads are
@@ -203,7 +231,9 @@ gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 \
 The planner is deliberately conservative. Dashboard-only changes can be staged
 while executor jobs are active, executor/shared changes set a pending reload
 when the queue is busy, and SQLite schema changes are deferred while active jobs
-exist.
+exist. Normally `pending`, `running`, and `waiting_approval` are active; once the
+executor is paused, only `running` blocks an update because queued jobs cannot be
+claimed.
 
 The JSON output also includes a `service_plan` for user-level systemd. It names
 the executor, dashboard, reader, monitor, and feedback units, shows whether a
@@ -258,14 +288,36 @@ Python executable, or another package source. Use `--skip-install` or
 For releases that include SQLite schema/migration changes, `--apply` stays
 conservative. If the active queue is not quiet, it refuses before installing and
 records `active_jobs_block_migration`. If the queue is quiet, it backs up the
-SQLite database first, installs the target package, runs the packaged schema
-initialization from a fresh Python subprocess, restarts the safe immediate
-systemd units, and then runs post-checks for installed version, queue state, and
-restarted services. Set `GITHUB_AGENT_BRIDGE_AUTOUPDATE_BACKUP_DIR` or pass
+SQLite database first, installs the target package, runs `gab migrate-db` from
+a fresh Python subprocess, restarts the safe immediate systemd units, and then
+runs post-checks for installed version, queue state, and restarted services.
+Set `GITHUB_AGENT_BRIDGE_AUTOUPDATE_BACKUP_DIR` or pass
 `--backup-dir` to choose where the pre-migration SQLite backups are written.
 Migration or post-check failures are recorded in autoupdate state with
 `degraded=true`, the backup path, command output, and the blocker that needs
 operator recovery.
+
+The packaged migrations are ordered, transactional steps under
+`src/github_agent_bridge/sql/migrations/`. Successful steps are recorded with
+their version, name, checksum, and application time in `schema_migrations`.
+`schema.sql` remains the current snapshot for fresh databases; migrations make
+existing databases converge on that snapshot and perform required backfills.
+Applied migration files are immutable: a checksum mismatch or a database newer
+than the installed package aborts startup instead of guessing. Ordinary queue,
+CLI, dashboard and webhook startup validates migration history without applying
+pending steps or the rolling schema snapshot. For an explicit operator run
+outside autoupdate, use:
+
+```bash
+gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 migrate-db
+```
+
+`migrate-db` refuses to run while any `pending`, `running` or
+`waiting_approval` job exists, even if the executor is paused. For an existing
+database it creates an online backup before applying the snapshot and versioned
+steps; use `--backup-dir` to choose the destination. A failed migration restores
+that backup before returning an error. Fresh database creation remains allowed
+without a backup because there is no prior state to preserve.
 
 Dashboard admins can run the same first-step workflow from the autoupdate notice:
 `Check now` refreshes and records the plan, `Apply update` runs the immediate

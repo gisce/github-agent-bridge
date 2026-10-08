@@ -11,6 +11,7 @@ from github_agent_bridge.autoupdate import (
     apply_update_plan,
     complete_pending_reload,
     default_install_command,
+    default_migration_command,
     latest_release,
     load_update_state,
     plan_systemd_actions,
@@ -29,6 +30,19 @@ def test_latest_release_reports_missing_gh_as_runtime_error():
 
 def completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
     return subprocess.CompletedProcess(["fake"], returncode, stdout, "")
+
+
+def test_default_migration_command_uses_explicit_cli(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+
+    assert default_migration_command(db, python_bin="python") == [
+        "python",
+        "-m",
+        "github_agent_bridge.cli",
+        "--db",
+        str(db),
+        "migrate-db",
+    ]
 
 
 def release_runner(tag: str, files: list[str]):
@@ -131,6 +145,25 @@ def test_update_plan_noops_when_release_matches_installed_version(tmp_path, monk
     assert plan["executor_reload_pending"] is False
 
 
+def test_update_plan_treats_missing_database_as_an_empty_queue(tmp_path):
+    db = tmp_path / "missing.sqlite3"
+
+    plan = plan_update(
+        db,
+        repo_dir=tmp_path,
+        installed_version="1.2.3",
+        runner=release_runner("v1.2.3", []),
+    )
+
+    assert plan["decision"] == "noop"
+    assert plan["queue"] == {
+        "active_counts": {"pending": 0, "running": 0, "waiting_approval": 0},
+        "active_total": 0,
+        "executor_paused": False,
+    }
+    assert not db.exists()
+
+
 def test_dashboard_only_update_can_stage_while_jobs_are_active(tmp_path, monkeypatch):
     monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
     db = tmp_path / "bridge.sqlite3"
@@ -230,15 +263,73 @@ def test_migration_update_is_deferred_while_jobs_are_active(tmp_path, monkeypatc
         db,
         repo_dir=tmp_path,
         installed_version="1.2.3",
-        runner=release_runner("v1.2.4", ["src/github_agent_bridge/sql/schema.sql"]),
+        runner=release_runner(
+            "v1.2.4",
+            ["src/github_agent_bridge/sql/migrations/v0002_example.py"],
+        ),
     )
 
     assert plan["decision"] == "defer_migration"
-    assert plan["classification"]["migration_files"] == ["src/github_agent_bridge/sql/schema.sql"]
+    assert plan["classification"]["migration_files"] == [
+        "src/github_agent_bridge/sql/migrations/v0002_example.py"
+    ]
     assert plan["executor_restart_allowed"] is False
     assert plan["blocked_reason"] == "active_jobs_block_migration"
     assert plan["service_plan"]["immediate"] == []
     assert plan["service_plan"]["deferred"][0]["unit"] == "github-agent-bridge.service"
+
+
+def test_migration_counts_pending_jobs_while_executor_is_paused(tmp_path, monkeypatch):
+    monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
+    db = tmp_path / "bridge.sqlite3"
+    q = JobQueue(db)
+    enqueue_job(q)
+    q.pause_executor("upgrade window")
+
+    plan = plan_update(
+        db,
+        repo_dir=tmp_path,
+        installed_version="1.2.3",
+        runner=release_runner(
+            "v1.2.4",
+            ["src/github_agent_bridge/sql/migrations/v0002_example.py"],
+        ),
+    )
+
+    assert plan["queue"] == {
+        "active_counts": {"pending": 1, "running": 0, "waiting_approval": 0},
+        "active_total": 1,
+        "executor_paused": True,
+    }
+    assert plan["decision"] == "defer_migration"
+    assert plan["executor_restart_allowed"] is False
+
+
+def test_paused_executor_still_counts_running_jobs_as_active(tmp_path, monkeypatch):
+    monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
+    db = tmp_path / "bridge.sqlite3"
+    q = JobQueue(db)
+    enqueue_job(q)
+    assert q.claim_next("worker") is not None
+    q.pause_executor("upgrade window")
+
+    plan = plan_update(
+        db,
+        repo_dir=tmp_path,
+        installed_version="1.2.3",
+        runner=release_runner(
+            "v1.2.4",
+            ["src/github_agent_bridge/sql/migrations/v0002_example.py"],
+        ),
+    )
+
+    assert plan["queue"] == {
+        "active_counts": {"pending": 0, "running": 1, "waiting_approval": 0},
+        "active_total": 1,
+        "executor_paused": True,
+    }
+    assert plan["decision"] == "defer_migration"
+    assert plan["blocked_reason"] == "active_jobs_block_migration"
 
 
 def test_full_update_is_allowed_when_queue_is_quiet(tmp_path, monkeypatch):
@@ -410,6 +501,77 @@ def test_apply_update_plan_blocks_migration_execution_while_jobs_are_active(tmp_
     assert state["migration"]["status"] == "deferred"
 
 
+def test_apply_update_plan_rechecks_live_queue_while_executor_is_paused(tmp_path, monkeypatch):
+    monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
+    db = tmp_path / "bridge.sqlite3"
+    q = JobQueue(db)
+    q.pause_executor("upgrade window")
+    plan = plan_update(
+        db,
+        repo_dir=tmp_path,
+        installed_version="1.2.3",
+        runner=release_runner(
+            "v1.2.4",
+            ["src/github_agent_bridge/sql/migrations/v0002_example.py"],
+        ),
+    )
+    assert plan["queue"]["active_total"] == 0
+    enqueue_job(q)
+    calls: list[list[str]] = []
+
+    execution = apply_update_plan(
+        plan,
+        db=db,
+        runner=lambda args, cwd: calls.append(list(args)) or completed("should not run"),
+    )
+
+    assert execution["applied"] is False
+    assert execution["blocked"] == ["active_jobs_block_migration"]
+    assert execution["queue"] == {
+        "active_counts": {"pending": 1, "running": 0, "waiting_approval": 0},
+        "active_total": 1,
+        "executor_paused": True,
+    }
+    assert load_update_state(q)["queue"] == execution["queue"]
+    assert calls == []
+
+
+def test_apply_update_plan_rechecks_live_queue_before_executor_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
+    db = tmp_path / "bridge.sqlite3"
+    q = JobQueue(db)
+    plan = plan_update(
+        db,
+        repo_dir=tmp_path,
+        installed_version="1.2.3",
+        runner=release_runner("v1.2.4", ["src/github_agent_bridge/executor.py"]),
+    )
+    calls: list[list[str]] = []
+
+    def runner(args, cwd):
+        calls.append(list(args))
+        if args == ["install-package"]:
+            enqueue_job(q)
+        return completed("ok")
+
+    execution = apply_update_plan(
+        plan,
+        db=db,
+        install_command=["install-package"],
+        runner=runner,
+        run_postchecks=False,
+    )
+
+    assert execution["applied"] is False
+    assert execution["blocked"] == ["active_jobs_block_executor_reload"]
+    assert execution["queue"] == {
+        "active_counts": {"pending": 1, "running": 0, "waiting_approval": 0},
+        "active_total": 1,
+        "executor_paused": False,
+    }
+    assert calls == [["install-package"]]
+
+
 def test_apply_update_plan_backs_up_migrates_restarts_and_postchecks(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     JobQueue(db)
@@ -560,6 +722,37 @@ def test_complete_pending_reload_blocks_until_queue_is_quiet(tmp_path, monkeypat
     assert completion["commands"] == []
     assert load_update_state(q)["executor_reload_pending"] is True
     assert load_update_state(q)["queue"]["active_total"] == 1
+
+
+def test_complete_pending_reload_ignores_pending_jobs_while_executor_is_paused(tmp_path, monkeypatch):
+    monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
+    db = tmp_path / "bridge.sqlite3"
+    q = JobQueue(db)
+    enqueue_job(q)
+    plan = plan_update(
+        db,
+        repo_dir=tmp_path,
+        installed_version="1.2.3",
+        runner=release_runner("v1.2.4", ["src/github_agent_bridge/executor.py"]),
+    )
+    record_update_plan(db, plan)
+    q.pause_executor("upgrade window")
+    calls: list[list[str]] = []
+
+    completion = complete_pending_reload(
+        db,
+        systemctl_bin="systemctl-test",
+        runner=lambda args, cwd: calls.append(list(args)) or completed("ok"),
+    )
+
+    assert completion["completed"] is True
+    assert completion["blocked"] == []
+    assert completion["queue"] == {
+        "active_counts": {"running": 0},
+        "active_total": 0,
+        "executor_paused": True,
+    }
+    assert calls == [["systemctl-test", "--user", "restart", "github-agent-bridge.service"]]
 
 
 def test_complete_pending_reload_runs_deferred_actions_and_clears_state(tmp_path, monkeypatch):

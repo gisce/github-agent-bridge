@@ -62,6 +62,7 @@ type DashboardStatus = {
   admin_actions: string[];
   webhook_configured?: boolean;
   autoupdate: AutoupdateState;
+  executor_pause?: ExecutorPauseState;
   metrics?: {
     knowledge?: {
       proposed?: number;
@@ -70,6 +71,13 @@ type DashboardStatus = {
       errors?: number;
     };
   };
+};
+
+type ExecutorPauseState = {
+  paused: boolean;
+  reason?: string;
+  updated_at?: string;
+  error?: string;
 };
 
 type WebhookSummary = {
@@ -1018,6 +1026,8 @@ function App() {
   const [webhookWindow, setWebhookWindow] = React.useState(() => webhookMonitoringWindow());
   const [autoupdateAction, setAutoupdateAction] = React.useState<"refresh" | "apply" | "complete" | null>(null);
   const [autoupdateError, setAutoupdateError] = React.useState("");
+  const [executorPausePending, setExecutorPausePending] = React.useState(false);
+  const [executorPauseError, setExecutorPauseError] = React.useState("");
   const [pathname, setPathname] = React.useState(() => window.location.pathname);
   const [inAppPush, setInAppPush] = React.useState<InAppPushNotification | null>(null);
   const jobRouteId = selectedJobIdFromPath(pathname);
@@ -1031,7 +1041,7 @@ function App() {
   const isDashboardRoute = !isJobDetailRoute && !isKnowledgeRoute && !isMcpRoute && !isSystemRoute && !isWebhooksRoute;
   const selectedJobId = jobRouteId;
   const metrics = useQuery({ queryKey: ["metrics", dashboardTimeZone], queryFn: () => api<{ metrics: MetricsSummary }>(metricsSummaryPath()), enabled: isDashboardRoute || isSystemRoute });
-  const dashboardStatus = useQuery({ queryKey: ["dashboard-status"], queryFn: () => api<DashboardStatus>("/api/status") });
+  const dashboardStatus = useQuery({ queryKey: ["dashboard-status"], queryFn: () => api<DashboardStatus>("/api/status"), refetchInterval: isSystemRoute ? 10000 : false });
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<{ user: UserProfile }>("/api/me"), refetchInterval: false });
   const webhookEnabled = isWebhooksRoute && Boolean(me.data?.user?.is_admin && dashboardStatus.data?.webhook_configured);
   const webhookQuery = webhookQuerySelection(webhookSection);
@@ -1202,6 +1212,19 @@ function App() {
       setAutoupdateError(error instanceof Error ? error.message : String(error));
     } finally {
       setAutoupdateAction(null);
+    }
+  }, [queryClient]);
+  const setExecutorPaused = React.useCallback(async (paused: boolean) => {
+    setExecutorPausePending(true);
+    setExecutorPauseError("");
+    try {
+      const result = await api<{ executor_pause: ExecutorPauseState }>(`/api/executor/${paused ? "pause" : "resume"}`, { method: "POST" });
+      queryClient.setQueryData<DashboardStatus>(["dashboard-status"], (current) => current ? { ...current, executor_pause: result.executor_pause } : current);
+      await queryClient.invalidateQueries({ queryKey: ["dashboard-status"] });
+    } catch (error) {
+      setExecutorPauseError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setExecutorPausePending(false);
     }
   }, [queryClient]);
   const enableWebPush = React.useCallback(async () => {
@@ -1474,6 +1497,13 @@ function App() {
               onCompletePending={() => runAutoupdateAction("complete")}
             />
             <SystemPage
+              executorPause={dashboardStatus.data?.executor_pause}
+              executorPauseLoading={dashboardStatus.isLoading}
+              executorPauseStatusError={dashboardStatus.error}
+              executorPausePending={executorPausePending}
+              executorPauseError={executorPauseError}
+              isAdmin={Boolean(me.data?.user?.is_admin)}
+              onExecutorPauseChange={setExecutorPaused}
               processes={processes.data}
               processesLoading={processes.isLoading}
               processesError={processes.error}
@@ -1589,7 +1619,7 @@ function AutoupdateNotice({
   const migrationCount = state.classification?.migration_files?.length ?? 0;
   const riskyCount = state.classification?.risky_files?.length ?? 0;
   const canComplete = Boolean(state.executor_reload_pending && state.dashboard_applied_at && onCompletePending);
-  const canApply = Boolean(onApply && migrationCount === 0);
+  const canApply = Boolean(onApply && (migrationCount === 0 || activeTotal === 0));
 
   return (
     <section className="rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-950 shadow-sm" aria-label="Update available">
@@ -1999,6 +2029,13 @@ function WebhookDeliveryDetailPage({ data, loading, error, onBack, onRefresh, on
 }
 
 function SystemPage({
+  executorPause,
+  executorPauseLoading,
+  executorPauseStatusError,
+  executorPausePending,
+  executorPauseError,
+  isAdmin,
+  onExecutorPauseChange,
   processes,
   processesLoading,
   processesError,
@@ -2013,6 +2050,13 @@ function SystemPage({
   onRefreshSystemd,
   onRefreshAlerts,
 }: {
+  executorPause: ExecutorPauseState | undefined;
+  executorPauseLoading: boolean;
+  executorPauseStatusError: Error | null;
+  executorPausePending: boolean;
+  executorPauseError: string;
+  isAdmin: boolean;
+  onExecutorPauseChange: (paused: boolean) => void;
   processes: ProcessesResponse | undefined;
   processesLoading: boolean;
   processesError: Error | null;
@@ -2029,6 +2073,15 @@ function SystemPage({
 }) {
   return (
     <section className="grid gap-4" aria-label="Bridge system">
+      <ExecutorPauseControl
+        state={executorPause}
+        loading={executorPauseLoading}
+        statusError={executorPauseStatusError}
+        pending={executorPausePending}
+        actionError={executorPauseError}
+        isAdmin={isAdmin}
+        onChange={onExecutorPauseChange}
+      />
       <Panel title="Systemd" action={<RefreshButton onClick={onRefreshSystemd} />}>
         {systemdError ? <Banner tone="error" text={systemdError.message} /> : null}
         <SystemdUnits data={systemd} loading={systemdLoading} />
@@ -2042,6 +2095,52 @@ function SystemPage({
         <AlertsPanel alerts={alerts} loading={alertsLoading} now={now} />
       </Panel>
     </section>
+  );
+}
+
+function ExecutorPauseControl({ state, loading, statusError, pending, actionError, isAdmin, onChange }: {
+  state: ExecutorPauseState | undefined;
+  loading: boolean;
+  statusError: Error | null;
+  pending: boolean;
+  actionError: string;
+  isAdmin: boolean;
+  onChange: (paused: boolean) => void;
+}) {
+  const paused = Boolean(state?.paused);
+  return (
+    <Panel title="Executor">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold">{state ? (paused ? "Paused" : "Accepting jobs") : (loading ? "Loading state..." : "State unavailable")}</p>
+          {paused ? <p className="text-xs text-muted">New jobs remain pending; running jobs continue.</p> : null}
+          {state?.reason ? <p className="mt-1 text-xs text-muted">Reason: {state.reason}</p> : null}
+          {!isAdmin ? <p className="mt-1 text-xs text-muted">Admin only</p> : null}
+        </div>
+        <label className="inline-flex items-center gap-2 text-sm font-medium">
+          <span>Pause</span>
+          <input
+            aria-label="Pause executor"
+            role="switch"
+            type="checkbox"
+            checked={paused}
+            disabled={!isAdmin || !state || Boolean(state.error) || Boolean(statusError) || pending}
+            onChange={() => {
+              const nextPaused = !paused;
+              const message = nextPaused
+                ? "Pause executor? New jobs will remain pending; running jobs will continue."
+                : "Resume executor? Pending jobs may start running.";
+              if (window.confirm(message)) onChange(nextPaused);
+            }}
+            className="peer sr-only"
+          />
+          <span aria-hidden className="relative h-6 w-11 rounded-full bg-slate-300 transition-colors peer-checked:bg-primary peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-primary peer-disabled:opacity-50 after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform peer-checked:after:translate-x-5" />
+        </label>
+      </div>
+      {statusError ? <Banner tone="error" text={statusError.message} /> : null}
+      {state?.error ? <Banner tone="error" text={state.error} /> : null}
+      {actionError ? <Banner tone="error" text={`Action failed: ${actionError}`} /> : null}
+    </Panel>
   );
 }
 
@@ -4561,6 +4660,7 @@ export {
   SectionNav,
   StatusBadge,
   SystemdUnits,
+  ExecutorPauseControl,
   UserMenu,
   WebPushControl,
   WebhookDeliveryDetailPage,

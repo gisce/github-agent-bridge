@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import threading
 from dataclasses import dataclass
@@ -28,6 +29,14 @@ COMMENT_TARGET_KINDS = {"issue_comment", "review_comment", "commit_comment", "re
 INTENT_CLASSIFIER_CONCURRENCY = 2
 INTENT_CLASSIFIER_ATTEMPTS = 2
 _INTENT_CLASSIFIER_SEMAPHORE = threading.BoundedSemaphore(INTENT_CLASSIFIER_CONCURRENCY)
+GITHUB_EMAIL_FOOTER_RE = re.compile(
+    r"(?:\n\s*--\s*)?\n\s*Reply to this email directly or view it on GitHub:.*$",
+    re.IGNORECASE | re.DOTALL,
+)
+GITHUB_REASON_FOOTER_RE = re.compile(
+    r"\n\s*You are receiving this because\b.*$",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 @dataclass(frozen=True)
@@ -101,6 +110,13 @@ def agent_identity(policy: Policy | None, agent: str | None = None) -> dict[str,
     }
 
 
+def strip_github_email_footer(body: str) -> str:
+    """Remove delivery metadata that is not part of the human request."""
+    clean = GITHUB_EMAIL_FOOTER_RE.sub("", body or "")
+    clean = GITHUB_REASON_FOOTER_RE.sub("", clean)
+    return clean.rstrip()
+
+
 def build_intent_prompt(
     n: Notification,
     ctx: GitHubContext,
@@ -112,7 +128,7 @@ def build_intent_prompt(
 ) -> str:
     event = {
         "subject": n.subject,
-        "body": compact(n.body, 2400),
+        "body": compact(strip_github_email_footer(n.body), 2400),
         "from_addr": n.from_addr,
         "message_id": n.message_id,
         "agent_identity": agent_identity(policy, agent),

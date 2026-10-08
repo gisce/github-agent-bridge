@@ -1,4 +1,5 @@
 import json
+import shutil
 import subprocess
 
 from github_agent_bridge.intent_classifier import (
@@ -102,6 +103,34 @@ def test_build_intent_prompt_uses_configured_agent_identity():
     assert '"github_logins": ["acme-agent"]' in prompt
     assert '"openclaw_agent": "erp-reviewer"' in prompt
     assert "giscebot" not in prompt
+
+
+def test_build_intent_prompt_excludes_github_email_delivery_footer():
+    notif = notification(
+        "<gisce/ab-modules/pull/247/review/5439481624@github.com>",
+        (
+            "@lcbautista requested changes on this pull request.\n\n"
+            "Mou-lo tot a un modul `gisceov_distri_ab`.\n\n"
+            "-- \n"
+            "Reply to this email directly or view it on GitHub:\n"
+            "https://github.com/gisce/ab-modules/pull/247#pullrequestreview-5439481624\n"
+            "You are receiving this because your review was requested."
+        ),
+    )
+
+    prompt = build_intent_prompt(
+        notif,
+        extract_github_context(notif.body),
+        ParserResult("reply_comment", "review_only"),
+        prompt_template="{event_json}",
+    )
+    event = json.loads(prompt)
+
+    assert event["body"] == (
+        "@lcbautista requested changes on this pull request. "
+        "Mou-lo tot a un modul `gisceov_distri_ab`."
+    )
+    assert "review was requested" not in event["body"]
 
 
 def test_normalize_result_preserves_semantic_decomposition_metadata():
@@ -234,6 +263,34 @@ def test_classify_notification_with_llm_uses_agent_exec_with_stdin_prompt(monkey
     assert all("--message-file" in cmd and "-" in cmd for cmd, _ in calls)
     assert all("Event JSON:" in kwargs["input"] for _, kwargs in calls)
     assert calls[0][1]["input"] != calls[1][1]["input"]
+
+
+def test_openclaw_agent_exec_cli_accepts_classifier_contract():
+    openclaw_bin = shutil.which("openclaw")
+    if not openclaw_bin:
+        return
+
+    proc = subprocess.run(
+        [
+            openclaw_bin,
+            "agent",
+            "exec",
+            "--help",
+        ],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=10,
+    )
+
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0
+    assert "Usage: openclaw agent exec" in output
+    assert "--message-file <path>" in output
+    assert "--json" in output
+    assert "--timeout <seconds>" in output
+    assert "--thinking <level>" in output
 
 
 def test_classify_notification_with_llm_reports_timeout_without_prompt(monkeypatch):

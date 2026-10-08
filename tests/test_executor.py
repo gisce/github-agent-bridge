@@ -1,3 +1,4 @@
+import sqlite3
 import threading
 
 import pytest
@@ -11,12 +12,13 @@ from github_agent_bridge.queue import JobQueue
 
 
 class FakeGitHub:
-    def __init__(self, assigned: bool, mentioned: bool = True, non_actionable_review: bool = False, authored: bool = False, answered_url: str | None = None):
+    def __init__(self, assigned: bool, mentioned: bool = True, non_actionable_review: bool = False, authored: bool = False, answered_url: str | None = None, merged: bool | None = False):
         self.assigned = assigned
         self.mentioned = mentioned
         self.non_actionable_review = non_actionable_review
         self.authored = authored
         self.answered_url = answered_url
+        self.merged = merged
         self.followup_url = answered_url or "https://github.com/gisce/erp/issues/27315#issuecomment-2"
         self.eyes = 0
         self.acks = 0
@@ -28,7 +30,13 @@ class FakeGitHub:
     def is_pull_request_authored_by_current_user(self, ctx):
         return self.authored
 
+    def pull_request_merged(self, ctx):
+        return self.merged
+
     def issue_comment_addresses_current_user(self, ctx):
+        return self.mentioned
+
+    def event_addresses_current_user(self, ctx):
         return self.mentioned
 
     def is_non_actionable_review(self, ctx):
@@ -117,6 +125,41 @@ def enqueue_pr_review(queue: JobQueue):
     return job
 
 
+def enqueue_unaddressed_pr_review(queue: JobQueue):
+    notification = Notification(
+        uid=6,
+        message_id="<gisce/ab-modules/pull/247/review/5439481624@github.com>",
+        subject=(
+            "Re: [gisce/ab-modules] Notificar las altas pendientes de aprobación "
+            "y nuevas solicitudes/reclamaciones en la OV (PR #247)"
+        ),
+        from_addr="'Luis Ka' via GISCE Bot <giscebot@gisce.net>",
+        body=(
+            "@lcbautista requested changes on this pull request.\n\n"
+            "Mou-lo tot a un modul `gisceov_distri_ab`, tot el que sigui OV de "
+            "distri d'AB, que vagi a aquest modul.\n\n"
+            "-- \n"
+            "Reply to this email directly or view it on GitHub:\n"
+            "https://github.com/gisce/ab-modules/pull/247#pullrequestreview-5439481624\n"
+            "You are receiving this because your review was requested."
+        ),
+    )
+    job, state = queue.enqueue(
+        notification,
+        Policy(
+            source_from=("notifications@github.com", "giscebot@gisce.net"),
+            trusted_orgs={"gisce"},
+        ),
+    )
+    assert state == "enqueued"
+    assert job is not None
+    assert job.action == "reply_comment"
+    queue.update_work_intent(job.id, "work_allowed", "reproduce job 7549 classifier result")
+    updated = queue.get(job.id)
+    assert updated is not None
+    return updated
+
+
 def enqueue_pr_comment(queue: JobQueue):
     notification = Notification(
         uid=1,
@@ -176,6 +219,96 @@ def enqueue_sync_after_merge(queue: JobQueue):
     return job
 
 
+def enqueue_pr_root_open_issue(queue: JobQueue):
+    notification = Notification(
+        uid=5,
+        message_id="<gisce/github-agent-bridge/pull/268/issue_event/32668850070@github.com>",
+        subject="Re: [gisce/github-agent-bridge] fix: allow updates with paused pending jobs (PR #268)",
+        from_addr="ecarreras <notifications@github.com>",
+        body=(
+            "Timeline notification.\n"
+            "https://github.com/gisce/github-agent-bridge/pull/268#event-32668850070\n"
+            "You are receiving this because you were assigned."
+        ),
+    )
+    job, state = queue.enqueue(
+        notification,
+        Policy(trusted_orgs={"gisce"}, bot_logins={"giscebot"}),
+    )
+    assert state == "enqueued"
+    assert job is not None
+    assert job.action == "open_issue"
+    assert job.work_intent == "work_allowed"
+    return job
+
+
+def test_pr_root_work_event_is_skipped_when_pr_is_already_merged(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_root_open_issue(queue)
+    dispatcher = RecordingDispatcher()
+    github = FakeGitHub(assigned=True, merged=True)
+
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=github,
+        config=ExecutorConfig(run_once=True),
+    )
+
+    assert pool.work_one("worker-test") is True
+    assert dispatcher.jobs == []
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "done"
+    assert stored.last_error is None
+    events = job_session_events(queue.path, job.id)
+    assert any(event["event_type"] == "stale_pr_event" for event in events)
+
+
+def test_pr_root_work_event_blocks_when_pr_state_cannot_be_revalidated(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_root_open_issue(queue)
+    dispatcher = RecordingDispatcher()
+    github = FakeGitHub(assigned=True, merged=None)
+
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=github,
+        config=ExecutorConfig(run_once=True),
+    )
+
+    assert pool.work_one("worker-test") is True
+    assert dispatcher.jobs == []
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "blocked"
+    assert "could not revalidate pull request state" in stored.last_error
+
+
+def test_pr_root_work_event_dispatches_when_pr_is_still_open(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_root_open_issue(queue)
+    dispatcher = RecordingDispatcher()
+    github = FakeGitHub(assigned=True, merged=False)
+
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=github,
+        config=ExecutorConfig(run_once=True),
+    )
+
+    assert pool.work_one("worker-test") is True
+    assert [dispatched.id for dispatched in dispatcher.jobs] == [job.id]
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "done"
+
+
 def test_assigned_pr_comment_keeps_review_only_without_explicit_write_request(tmp_path):
     queue = JobQueue(tmp_path / "bridge.sqlite3")
     enqueue_pr_comment(queue)
@@ -216,6 +349,100 @@ def test_executor_records_session_activity_events(tmp_path):
     assert route_event["detail"] == "OpenClaw default model route"
     stderr_event = job_session_events(db, dispatcher.jobs[0].id)[5]
     assert stderr_event["detail"] == "token=[redacted] [redacted]"
+
+
+def test_session_activity_recovers_after_transient_database_lock(tmp_path):
+    class PausingActivityDispatcher(RecordingDispatcher):
+        def __init__(self):
+            super().__init__()
+            self.ready = threading.Event()
+            self.resume = threading.Event()
+
+        def dispatch(
+            self,
+            job,
+            policy,
+            reaction_ok=None,
+            activity_callback=None,
+            process_callback=None,
+        ):
+            self.jobs.append(job)
+            if process_callback:
+                process_callback(
+                    {
+                        "pid": 456,
+                        "ppid": 123,
+                        "pgid": 456,
+                        "sid": 456,
+                        "start_time_ticks": 999,
+                    }
+                )
+            self.ready.set()
+            assert self.resume.wait(timeout=2)
+            assert activity_callback is not None
+            activity_callback(
+                "openclaw_stdout", "OpenClaw CLI output", "persist after contention"
+            )
+            return DispatchResult(True, 0, "ok", "", False, reaction_ok, ["openclaw"])
+
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    job = enqueue_pr_comment(queue)
+    queue.database.timeout_seconds = 0.01
+    queue.database.busy_timeout_ms = 10
+    dispatcher = PausingActivityDispatcher()
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=FakeGitHub(assigned=True),
+        config=ExecutorConfig(run_once=True, idle_sleep_seconds=0.01),
+    )
+    worker = threading.Thread(target=pool.work_one, args=("worker-test",))
+    worker.start()
+    assert dispatcher.ready.wait(timeout=2)
+    locker = sqlite3.connect(db, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        dispatcher.resume.set()
+        worker.join(timeout=0.1)
+        assert worker.is_alive() is True
+    finally:
+        locker.commit()
+        locker.close()
+        worker.join(timeout=2)
+
+    assert worker.is_alive() is False
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "done"
+    events = job_session_events(db, job.id)
+    assert any(
+        event["event_type"] == "openclaw_stdout"
+        and event["detail"] == "persist after contention"
+        for event in events
+    )
+
+
+def test_session_activity_does_not_hide_non_contention_database_errors(
+    tmp_path, monkeypatch
+):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    pool = ExecutorPool(queue, Policy(), RecordingDispatcher())
+
+    def fail_session_event(*args, **kwargs):
+        raise sqlite3.OperationalError("no such table: job_session_events")
+
+    monkeypatch.setattr(queue, "add_session_event", fail_session_event)
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        pool._record_session_activity(
+            "worker-test",
+            1,
+            "openclaw_stdout",
+            "OpenClaw CLI output",
+            "detail",
+        )
 
 
 def test_dispatched_job_completion_pushes_trigger_actor(tmp_path, monkeypatch):
@@ -273,6 +500,21 @@ def test_skipped_job_does_not_emit_completion_push(tmp_path, monkeypatch):
 
     assert dispatcher.jobs == []
     assert notifications == []
+
+
+def test_paused_executor_does_not_claim_pending_jobs(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_comment(queue)
+    queue.pause_executor("upgrade window")
+    dispatcher = RecordingDispatcher()
+
+    pool = ExecutorPool(queue, Policy(trusted_orgs={"gisce"}), dispatcher, github=FakeGitHub(assigned=True), config=ExecutorConfig(run_once=True))
+
+    assert pool.work_one("worker-test") is False
+    assert dispatcher.jobs == []
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "pending"
 
 
 def test_executor_records_selected_model_route_session_event(tmp_path):
@@ -411,6 +653,74 @@ def test_unassigned_unmentioned_pr_comment_reacts_without_dispatch(tmp_path):
     stored = queue.get(job.id)
     assert stored is not None
     assert stored.status == "done"
+
+
+def test_unassigned_unmentioned_pr_review_is_skipped_without_dispatch(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_unaddressed_pr_review(queue)
+    dispatcher = RecordingDispatcher()
+    github = FakeGitHub(assigned=False, mentioned=False, authored=False)
+
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=github,
+        config=ExecutorConfig(run_once=True),
+    )
+
+    assert pool.work_one("worker-test") is True
+    assert dispatcher.jobs == []
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "done"
+    events = job_session_events(queue.path, job.id)
+    assert any(event["event_type"] == "non_actionable_feedback" for event in events)
+
+
+def test_bot_authored_pr_review_remains_actionable_without_mention(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_unaddressed_pr_review(queue)
+    dispatcher = RecordingDispatcher()
+    github = FakeGitHub(assigned=False, mentioned=False, authored=True)
+
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=github,
+        config=ExecutorConfig(run_once=True),
+    )
+
+    assert pool.work_one("worker-test") is True
+    assert [dispatched.id for dispatched in dispatcher.jobs] == [job.id]
+
+
+def test_feedback_guard_cannot_be_bypassed_by_action_reclassification(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_unaddressed_pr_review(queue)
+    with queue.connect() as con:
+        con.execute("UPDATE jobs SET action='open_issue' WHERE id=?", (job.id,))
+    dispatcher = RecordingDispatcher()
+    github = FakeGitHub(assigned=False, mentioned=False, authored=False)
+
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=github,
+        config=ExecutorConfig(run_once=True),
+    )
+
+    assert pool.work_one("worker-test") is True
+    assert dispatcher.jobs == []
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "done"
+    assert any(
+        event["event_type"] == "non_actionable_feedback"
+        for event in job_session_events(queue.path, job.id)
+    )
 
 
 def test_first_attempt_dispatches_even_when_bot_already_commented_after_trigger(tmp_path):
@@ -690,6 +1000,156 @@ def test_run_blocks_orphaned_jobs_before_claiming_new_work(tmp_path):
     assert heartbeat is not None
     assert heartbeat["executor_id"] == pool.executor_id
     assert heartbeat["pid"] > 0
+
+
+def test_heartbeat_loop_recovers_after_transient_database_lock(tmp_path, monkeypatch):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    queue.database.timeout_seconds = 0.01
+    queue.database.busy_timeout_ms = 10
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        RecordingDispatcher(),
+        github=FakeGitHub(assigned=True),
+        config=ExecutorConfig(idle_sleep_seconds=0.01, heartbeat_interval_seconds=0.01),
+    )
+    worker_id = f"{pool.executor_id}/worker-0"
+    pool._set_worker_state(worker_id, "idle")
+    attempted = threading.Event()
+    succeeded = threading.Event()
+    original = queue.record_worker_heartbeat
+
+    def record_heartbeat(*args, **kwargs):
+        attempted.set()
+        result = original(*args, **kwargs)
+        succeeded.set()
+        return result
+
+    monkeypatch.setattr(queue, "record_worker_heartbeat", record_heartbeat)
+    locker = sqlite3.connect(queue.path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    thread = threading.Thread(target=pool._heartbeat_loop, args=(worker_id,))
+    thread.start()
+    try:
+        assert attempted.wait(timeout=1)
+        assert succeeded.wait(timeout=0.05) is False
+        assert thread.is_alive() is True
+        locker.commit()
+        assert succeeded.wait(timeout=2)
+    finally:
+        if locker.in_transaction:
+            locker.rollback()
+        locker.close()
+        pool.stop_event.set()
+        thread.join(timeout=2)
+    assert thread.is_alive() is False
+    with queue.connect() as con:
+        heartbeat = con.execute(
+            "SELECT recent_error_count FROM worker_heartbeats WHERE worker_id=?",
+            (worker_id,),
+        ).fetchone()
+    assert heartbeat["recent_error_count"] >= 1
+
+
+def test_acknowledgement_loop_recovers_after_transient_database_lock(tmp_path, monkeypatch):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_comment(queue)
+    queue.database.timeout_seconds = 0.01
+    queue.database.busy_timeout_ms = 10
+    github = FakeGitHub(assigned=True)
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        RecordingDispatcher(),
+        github=github,
+        config=ExecutorConfig(idle_sleep_seconds=0.01),
+    )
+    attempted = threading.Event()
+    reacted = threading.Event()
+    original_claim = queue.claim_acknowledgement
+    original_react = github.react_eyes
+
+    def claim_acknowledgement(*args, **kwargs):
+        attempted.set()
+        return original_claim(*args, **kwargs)
+
+    def react_eyes(ctx):
+        result = original_react(ctx)
+        reacted.set()
+        return result
+
+    monkeypatch.setattr(queue, "claim_acknowledgement", claim_acknowledgement)
+    monkeypatch.setattr(github, "react_eyes", react_eyes)
+    locker = sqlite3.connect(queue.path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    thread = threading.Thread(target=pool._acknowledgement_loop)
+    thread.start()
+    try:
+        assert attempted.wait(timeout=1)
+        assert reacted.wait(timeout=0.05) is False
+        assert thread.is_alive() is True
+        locker.commit()
+        assert reacted.wait(timeout=2)
+    finally:
+        if locker.in_transaction:
+            locker.rollback()
+        locker.close()
+        pool.stop_event.set()
+        thread.join(timeout=2)
+    assert thread.is_alive() is False
+    assert queue.acknowledgement_ok(job.id) is True
+
+
+def test_heartbeat_loop_does_not_hide_non_contention_database_errors(tmp_path, monkeypatch):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    pool = ExecutorPool(queue, Policy(), RecordingDispatcher())
+
+    def fail_heartbeat(*args, **kwargs):
+        raise sqlite3.OperationalError("no such table: worker_heartbeats")
+
+    monkeypatch.setattr(queue, "record_worker_heartbeat", fail_heartbeat)
+
+    with pytest.raises(sqlite3.OperationalError, match="no such table"):
+        pool._heartbeat_loop("worker-test")
+
+
+def test_acknowledgement_loop_does_not_hide_non_contention_database_errors(tmp_path, monkeypatch):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    pool = ExecutorPool(queue, Policy(), RecordingDispatcher())
+
+    def fail_acknowledgement():
+        raise sqlite3.OperationalError("malformed database schema")
+
+    monkeypatch.setattr(pool, "acknowledge_one", fail_acknowledgement)
+
+    with pytest.raises(sqlite3.OperationalError, match="malformed database schema"):
+        pool._acknowledgement_loop()
+
+
+def test_acknowledgement_loop_does_not_retry_after_external_reaction(tmp_path, monkeypatch):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_comment(queue)
+    github = FakeGitHub(assigned=True)
+    pool = ExecutorPool(queue, Policy(), RecordingDispatcher(), github=github)
+    monkeypatch.setattr(
+        queue,
+        "claim_acknowledgement",
+        lambda job_id=None: (1, job.id, job.context),
+    )
+
+    finish_calls = 0
+
+    def fail_finish(*args, **kwargs):
+        nonlocal finish_calls
+        finish_calls += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(queue, "finish_acknowledgement", fail_finish)
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        pool._acknowledgement_loop()
+    assert github.eyes == 1
+    assert finish_calls == 1
 
 
 def test_shutdown_cancels_dispatch_and_blocks_job_without_requeue(tmp_path):

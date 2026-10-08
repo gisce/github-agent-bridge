@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from github_agent_bridge import __version__
 from github_agent_bridge import feedback
 from github_agent_bridge.backend import DashboardConfig, _encode_session, _is_admin, _is_allowed, _journal_stream_events, _session_stream_events, _sign, create_app
-from github_agent_bridge.dashboard_data import JOB_LIST_ORDER_SQL, get_job_detail, job_session, job_session_events, job_session_transcript, jobs_select_sql, list_all_job_actor_logins, list_job_actors, list_jobs, metrics_summary
+from github_agent_bridge.dashboard_data import DashboardQueries, JOB_LIST_ORDER_SQL, get_job_detail, job_session, job_session_events, job_session_transcript, jobs_select_sql, list_all_job_actor_logins, list_job_actors, list_jobs, metrics_summary
 from github_agent_bridge.monitor import MonitorReport
 from github_agent_bridge.models import GitHubContext, Notification
 from github_agent_bridge.mcp import create_token
@@ -82,8 +82,11 @@ def test_dashboard_status_is_read_only_and_lists_recent_jobs(tmp_path):
         "refresh_autoupdate_plan",
         "apply_autoupdate",
         "complete_autoupdate_reload",
+        "pause_executor",
+        "resume_executor",
     ]
     assert response.json()["autoupdate"] == {}
+    assert response.json()["executor_pause"] == {"paused": False}
     assert response.json()["metrics"]["pending"] == 1
     assert response.json()["metrics"]["knowledge"]["proposed"] == 1
     assert jobs.json()["jobs"][0]["work_key"] == "gisce/erp#1"
@@ -183,6 +186,34 @@ def test_dashboard_autoupdate_state_requires_admin_profile(tmp_path):
     assert "view_autoupdate_plan" not in reader["admin_actions"]
     assert admin["autoupdate"]["target"]["tag_name"] == "v0.28.0"
     assert "view_autoupdate_plan" in admin["admin_actions"]
+
+
+def test_dashboard_executor_pause_is_visible_but_only_admin_can_change_it(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice"}, admin_users={"admin"}))
+    client = TestClient(app)
+
+    assert client.post("/api/executor/pause").status_code == 401
+    client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Alice"})))
+    assert client.get("/api/status").json()["executor_pause"] == {"paused": False}
+    assert "pause_executor" not in client.get("/api/status").json()["admin_actions"]
+    assert client.post("/api/executor/pause").status_code == 403
+    assert client.post("/api/executor/resume").status_code == 403
+    assert queue.executor_paused() is False
+
+    client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Admin"}, is_admin=True)))
+    paused = client.post("/api/executor/pause")
+    assert paused.status_code == 200
+    assert paused.json()["executor_pause"]["paused"] is True
+    assert paused.json()["executor_pause"]["reason"] == "dashboard:admin"
+    assert client.get("/api/status").json()["executor_pause"]["paused"] is True
+    assert queue.executor_paused() is True
+
+    resumed = client.post("/api/executor/resume")
+    assert resumed.status_code == 200
+    assert resumed.json()["executor_pause"]["paused"] is False
+    assert queue.executor_paused() is False
 
 
 def test_dashboard_autoupdate_refresh_requires_admin_and_records_plan(tmp_path, monkeypatch):
@@ -1053,6 +1084,56 @@ def test_dashboard_sse_streams_live_trajectory_entries_before_session_file(tmp_p
     body = asyncio.run(first_chunks())
     assert "event: transcript_entry" in body
     assert "live trajectory output" in body
+
+
+def test_dashboard_sse_retries_sqlite_contention_without_closing_stream(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    q = JobQueue(db)
+    job, _ = q.enqueue(notif(), Policy(trusted_orgs=["gisce"]))
+    original_events = DashboardQueries.job_session_events
+    attempts = {"count": 0}
+
+    def fail_once_then_read(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_events(*args, **kwargs)
+
+    monkeypatch.setattr(DashboardQueries, "job_session_events", fail_once_then_read)
+
+    async def first_chunks():
+        stream = _session_stream_events(db, job.id, sleep_seconds=0)
+        try:
+            return await anext(stream), await anext(stream)
+        finally:
+            await stream.aclose()
+
+    heartbeat, recovered = asyncio.run(first_chunks())
+
+    assert attempts["count"] == 2
+    assert "event: session_heartbeat" in heartbeat
+    assert "event: session_heartbeat" in recovered
+
+
+def test_dashboard_sse_does_not_hide_non_contention_database_errors(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    q = JobQueue(db)
+    job, _ = q.enqueue(notif(), Policy(trusted_orgs=["gisce"]))
+
+    def fail_read(*args, **kwargs):
+        raise sqlite3.OperationalError("malformed database schema")
+
+    monkeypatch.setattr(DashboardQueries, "job_session_events", fail_read)
+
+    async def read_chunk():
+        stream = _session_stream_events(db, job.id, sleep_seconds=0)
+        try:
+            return await anext(stream)
+        finally:
+            await stream.aclose()
+
+    with pytest.raises(sqlite3.OperationalError, match="malformed database schema"):
+        asyncio.run(read_chunk())
 
 
 def test_dashboard_sse_stream_exits_when_shutdown_is_signaled(tmp_path):

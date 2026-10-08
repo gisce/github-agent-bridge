@@ -11,13 +11,20 @@ from typing import Any
 
 from . import __version__
 from .models import utc_now
+from .persistence import (
+    ACTIVE_JOB_STATUSES,
+    Database,
+    StateRepository,
+    active_job_counts,
+    backup_sqlite_database,
+    restore_sqlite_database,
+)
 from .policy import Policy
 from .queue import JobQueue
 
 CommandRunner = Callable[[Sequence[str], Path | None], subprocess.CompletedProcess[str]]
 
 UPDATE_STATE_KEY = "autoupdate"
-ACTIVE_JOB_STATUSES = ("pending", "running", "waiting_approval")
 RISKY_PATH_PREFIXES = (
     "src/github_agent_bridge/cli.py",
     "src/github_agent_bridge/dispatch.py",
@@ -241,8 +248,57 @@ def plan_systemd_actions(decision: str, classification: dict[str, Any], *, units
 
 
 def active_queue_counts(queue: JobQueue) -> dict[str, int]:
+    return dict(update_queue_state(queue)["active_counts"])
+
+
+def update_queue_state(queue: JobQueue) -> dict[str, Any]:
     stats = queue.stats()
-    return {status: int(stats.get(status, 0)) for status in ACTIVE_JOB_STATUSES}
+    executor_paused = queue.executor_paused()
+    active_statuses = ("running",) if executor_paused else ACTIVE_JOB_STATUSES
+    active_counts = {status: int(stats.get(status, 0)) for status in active_statuses}
+    return {
+        "active_counts": active_counts,
+        "active_total": sum(active_counts.values()),
+        "executor_paused": executor_paused,
+    }
+
+
+def database_queue_state(
+    db: str | Path,
+    *,
+    migration_preflight: bool = False,
+) -> dict[str, Any]:
+    """Inspect queue state without triggering schema initialization or migration."""
+    database = Database(db)
+    if not database.path.exists():
+        return {
+            "active_counts": {status: 0 for status in ACTIVE_JOB_STATUSES},
+            "active_total": 0,
+            "executor_paused": False,
+        }
+    counts = active_job_counts(database)
+    executor_paused = StateRepository(database).executor_paused()
+    active_statuses = (
+        ACTIVE_JOB_STATUSES
+        if migration_preflight or not executor_paused
+        else ("running",)
+    )
+    active_counts = {status: int(counts.get(status, 0)) for status in active_statuses}
+    return {
+        "active_counts": active_counts,
+        "active_total": sum(active_counts.values()),
+        "executor_paused": executor_paused,
+    }
+
+
+def _service_plan_restarts_executor(service_plan: dict[str, Any]) -> bool:
+    units = service_plan.get("units") if isinstance(service_plan.get("units"), dict) else {}
+    executor_unit = str(units.get("executor") or DEFAULT_SYSTEMD_UNITS["executor"])
+    return any(
+        action.get("unit") == executor_unit and action.get("command") in {"restart", "try-restart"}
+        for action in service_plan.get("immediate") or []
+        if isinstance(action, dict)
+    )
 
 
 def load_update_state(queue: JobQueue) -> dict[str, Any]:
@@ -288,40 +344,22 @@ def _command_result(
 
 
 def _backup_sqlite_db(db: str | Path, backup_dir: str | Path | None = None) -> dict[str, Any]:
-    db_path = Path(db).expanduser()
     backup_root = Path(backup_dir).expanduser() if backup_dir else DEFAULT_BACKUP_DIR
-    backup_root.mkdir(parents=True, exist_ok=True)
-    timestamp = utc_now().replace(":", "").replace("-", "")
-    backup_path = backup_root / f"{db_path.stem}-{timestamp}.sqlite3"
-    with sqlite3.connect(db_path) as source, sqlite3.connect(backup_path) as target:
-        source.backup(target)
-    return {
-        "path": str(backup_path),
-        "created_at": utc_now(),
-        "source": str(db_path),
-        "size_bytes": backup_path.stat().st_size,
-    }
+    return backup_sqlite_database(db, backup_root)
 
 
 def _restore_sqlite_db(db: str | Path, backup_path: str | Path) -> dict[str, Any]:
-    db_path = Path(db).expanduser()
-    backup = Path(backup_path).expanduser()
-    with sqlite3.connect(backup) as source, sqlite3.connect(db_path) as target:
-        source.backup(target)
-    return {
-        "restored_at": utc_now(),
-        "source": str(backup),
-        "target": str(db_path),
-        "size_bytes": db_path.stat().st_size,
-    }
+    return restore_sqlite_database(db, backup_path)
 
 
 def default_migration_command(db: str | Path, *, python_bin: str = sys.executable) -> list[str]:
     return [
         python_bin,
-        "-c",
-        "import sys; from github_agent_bridge.queue import JobQueue; JobQueue(sys.argv[1])",
+        "-m",
+        "github_agent_bridge.cli",
+        "--db",
         str(Path(db).expanduser()),
+        "migrate-db",
     ]
 
 
@@ -483,6 +521,7 @@ def _record_degraded_update_state(
         return
     state = record_update_plan(db, plan)
     now = utc_now()
+    live_queue = execution.get("queue") if isinstance(execution.get("queue"), dict) else None
     state.update(
         {
             "updated_at": now,
@@ -496,6 +535,8 @@ def _record_degraded_update_state(
             },
         }
     )
+    if live_queue is not None:
+        state["queue"] = live_queue
     save_update_state(JobQueue(db), state)
 
 
@@ -537,11 +578,21 @@ def apply_update_plan(
         return result
     migration_files = list(classification.get("migration_files") or [])
     migration_state: dict[str, Any] = {}
-    queue_info = plan.get("queue") if isinstance(plan.get("queue"), dict) else {}
+    service_plan = plan.get("service_plan") if isinstance(plan.get("service_plan"), dict) else {}
+    queue_info = (
+        database_queue_state(db, migration_preflight=bool(migration_files))
+        if db is not None
+        else plan.get("queue") if isinstance(plan.get("queue"), dict) else {}
+    )
+    result["queue"] = queue_info
     active_total = int(queue_info.get("active_total") or 0)
     if migration_files and active_total:
         result["blocked"].append("active_jobs_block_migration")
         _record_degraded_update_state(db, plan, migration={"required": True, "files": migration_files, "status": "deferred"}, execution=result, degraded=False)
+        return result
+    if active_total and _service_plan_restarts_executor(service_plan):
+        result["blocked"].append("active_jobs_block_executor_reload")
+        _record_degraded_update_state(db, plan, migration={}, execution=result, degraded=False)
         return result
     if migration_files and db is None:
         result["blocked"].append("missing_db_for_migration")
@@ -576,10 +627,17 @@ def apply_update_plan(
             return result
 
     if migration_files and run_migrations:
+        queue_info = database_queue_state(db, migration_preflight=True)
+        result["queue"] = queue_info
+        if int(queue_info.get("active_total") or 0):
+            migration_state["status"] = "deferred"
+            result["blocked"].append("active_jobs_block_migration")
+            _record_degraded_update_state(db, plan, migration=migration_state, execution=result, degraded=False)
+            return result
         migration_state["status"] = "applying"
         command = list(migration_command or default_migration_command(db))
         proc = runner(command, None)
-        result["commands"].append(_command_result("migration", command, proc, reason="apply packaged SQLite schema"))
+        result["commands"].append(_command_result("migration", command, proc, reason="apply versioned SQLite migrations"))
         if proc.returncode != 0:
             migration_state["status"] = "failed"
             migration_state["error"] = proc.stderr.strip() or proc.stdout.strip()
@@ -598,7 +656,19 @@ def apply_update_plan(
         migration_state["applied_at"] = utc_now()
 
     if run_systemd:
-        service_plan = plan.get("service_plan") if isinstance(plan.get("service_plan"), dict) else {}
+        if db is not None and _service_plan_restarts_executor(service_plan):
+            queue_info = update_queue_state(JobQueue(db))
+            result["queue"] = queue_info
+            if int(queue_info.get("active_total") or 0):
+                result["blocked"].append("active_jobs_block_executor_reload")
+                _record_degraded_update_state(
+                    db,
+                    plan,
+                    migration=migration_state,
+                    execution=result,
+                    degraded=bool(migration_state.get("status") == "applied"),
+                )
+                return result
         if not _run_systemd_actions(service_plan.get("immediate") or [], result, systemctl_bin=systemctl_bin, runner=runner):
             _record_degraded_update_state(db, plan, migration=migration_state, execution=result)
             return result
@@ -663,16 +733,13 @@ def complete_pending_reload(
 
     queue = JobQueue(db)
     state = load_update_state(queue)
-    active_counts = active_queue_counts(queue)
-    active_total = sum(active_counts.values())
+    queue_state = update_queue_state(queue)
+    active_total = int(queue_state["active_total"])
     result: dict[str, Any] = {
         "completed": False,
         "blocked": [],
         "commands": [],
-        "queue": {
-            "active_counts": active_counts,
-            "active_total": active_total,
-        },
+        "queue": queue_state,
         "state": state,
     }
 
@@ -744,12 +811,9 @@ def plan_update(
     systemd_units: dict[str, str] | None = None,
     runner: CommandRunner = _default_runner,
 ) -> dict[str, Any]:
-    queue = JobQueue(db)
     repo_path = Path(repo_dir).expanduser().resolve()
     current_tag = f"v{installed_version.lstrip('v')}"
     release = ReleaseInfo(tag_name=target_tag, source="explicit_target") if target_tag else latest_release(repo, gh_bin=gh_bin, runner=runner)
-    active_counts = active_queue_counts(queue)
-    active_total = sum(active_counts.values())
 
     warnings: list[str] = []
     try:
@@ -760,6 +824,11 @@ def plan_update(
     classification = classify_changed_files(files)
     up_to_date = release.tag_name == current_tag
     migration_required = bool(classification["migration_files"])
+    queue_state = database_queue_state(
+        db,
+        migration_preflight=migration_required,
+    )
+    active_total = int(queue_state["active_total"])
     executor_reload_pending = False
     dashboard_restart_allowed = False
     executor_restart_allowed = False
@@ -796,10 +865,7 @@ def plan_update(
         "installed_tag": current_tag,
         "target": release.to_json(),
         "up_to_date": up_to_date,
-        "queue": {
-            "active_counts": active_counts,
-            "active_total": active_total,
-        },
+        "queue": queue_state,
         "classification": classification,
         "decision": decision,
         "dashboard_restart_allowed": dashboard_restart_allowed,

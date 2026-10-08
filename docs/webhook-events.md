@@ -17,11 +17,41 @@ Support levels:
 
 | Support | GitHub event names |
 | --- | --- |
-| Canonical | `commit_comment`, `issue_comment`, `pull_request_review`, `pull_request_review_comment`, `workflow_run` |
-| Observed only / not selected | `branch_protection_configuration`, `branch_protection_rule`, `check_run`, `check_suite`, `code_scanning_alert`, `create`, `custom_property`, `custom_property_values`, `delete`, `dependabot_alert`, `deploy_key`, `deployment`, `deployment_protection_rule`, `deployment_review`, `deployment_status`, `discussion`, `discussion_comment`, `fork`, `github_app_authorization`, `gollum`, `installation`, `installation_repositories`, `installation_target`, `issue_dependencies`, `issue_relates_to`, `issues`, `label`, `marketplace_purchase`, `member`, `membership`, `merge_group`, `meta`, `milestone`, `org_block`, `organization`, `package`, `page_build`, `personal_access_token_request`, `ping`, `project`, `project_card`, `project_column`, `projects_v2`, `projects_v2_item`, `projects_v2_status_update`, `public`, `pull_request`, `pull_request_review_thread`, `push`, `registry_package`, `release`, `repository`, `repository_advisory`, `repository_dispatch`, `repository_import`, `repository_ruleset`, `repository_vulnerability_alert`, `secret_scanning_alert`, `secret_scanning_alert_location`, `secret_scanning_scan`, `security_advisory`, `security_and_analysis`, `sponsorship`, `star`, `status`, `sub_issues`, `team`, `team_add`, `watch`, `workflow_dispatch`, `workflow_job` |
+| Canonical | `commit_comment`, `issue_comment`, `issues`, `pull_request`, `pull_request_review`, `pull_request_review_comment`, `workflow_run` |
+| Observed only / not selected | `branch_protection_configuration`, `branch_protection_rule`, `check_run`, `check_suite`, `code_scanning_alert`, `create`, `custom_property`, `custom_property_values`, `delete`, `dependabot_alert`, `deploy_key`, `deployment`, `deployment_protection_rule`, `deployment_review`, `deployment_status`, `discussion`, `discussion_comment`, `fork`, `github_app_authorization`, `gollum`, `installation`, `installation_repositories`, `installation_target`, `issue_dependencies`, `issue_relates_to`, `label`, `marketplace_purchase`, `member`, `membership`, `merge_group`, `meta`, `milestone`, `org_block`, `organization`, `package`, `page_build`, `personal_access_token_request`, `ping`, `project`, `project_card`, `project_column`, `projects_v2`, `projects_v2_item`, `projects_v2_status_update`, `public`, `pull_request_review_thread`, `push`, `registry_package`, `release`, `repository`, `repository_advisory`, `repository_dispatch`, `repository_import`, `repository_ruleset`, `repository_vulnerability_alert`, `secret_scanning_alert`, `secret_scanning_alert_location`, `secret_scanning_scan`, `security_advisory`, `security_and_analysis`, `sponsorship`, `star`, `status`, `sub_issues`, `team`, `team_add`, `watch`, `workflow_dispatch`, `workflow_job` |
 
 The inventory names event families, not every `action` value. Actions are
 tracked separately because their delivery semantics differ. For comments and
 reviews, `created`/`submitted` has the actionable canonical identity; `edited`
 and other actions remain distinct observational identities and must not
-retrigger work without an explicit Phase 2 policy decision.
+retrigger work without an explicit Phase 2 policy decision. For `issues`, only
+`assigned` is actionable when the payload assignee matches a configured bot
+login. For `pull_request`, `assigned` and `review_requested` retain their
+configured-bot checks, while `closed` is actionable only when `merged=true`;
+that delivery becomes a read-only `sync_after_merge` job. Comment and review
+deliveries must additionally be addressed to the bot, belong to a PR authored
+by the bot, or target a PR/issue assigned to the bot. Being a reviewer,
+subscriber, or email recipient is not authorization to work.
+
+## Commit status feedback
+
+Jobs accepted through webhook ingestion publish a best-effort commit status
+when their target is a pull request or commit. The rollout intentionally follows
+the repositories that already have actionable webhooks enabled; there is no
+second commit-status canary list.
+
+- `pending`: queued, running, or waiting for a retry;
+- `success`: the bridge finished and its GitHub follow-up is visible, or the
+  event was conclusively non-actionable;
+- `error`: the bridge blocked or cancelled the job.
+
+The stable context is `github-agent-bridge/agent`. It reports bridge processing,
+not test or review quality, and must not be configured as a required branch
+protection check. The PR head SHA is resolved once and pinned to the job, so a
+later push cannot receive the result of work started on an older commit.
+
+Delivery uses a SQLite outbox and is independent of the job result: exhausted
+GitHub API retries leave an auditable delivery error but do not block an
+otherwise successful job. `shadow` and `dry-run` consume outbox entries without
+calling GitHub. When `GITHUB_AGENT_BRIDGE_DASHBOARD_PUBLIC_URL` is configured,
+the status links to `/jobs/<job-id>`; otherwise it has no target URL.

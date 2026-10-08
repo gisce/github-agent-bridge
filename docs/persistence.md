@@ -1,0 +1,127 @@
+# SQLite persistence contract
+
+The bridge keeps explicit SQL and SQLite-specific concurrency primitives. The
+persistence boundary standardizes connections and transactions; it is not an
+ORM and must not absorb policy or orchestration decisions.
+
+## Connection policy
+
+`github_agent_bridge.persistence.Database` is the target owner for normal
+application connections. New connection sites must use it; existing
+feature-local helpers are migrated to it slice by slice without combining that
+mechanical change with repository extraction. Callers choose the capability
+they need:
+
+| Entry point | Capability | Enforced policy |
+| --- | --- | --- |
+| `read_write()` | Schema and data writes | 30-second timeout, 30-second busy timeout, `sqlite3.Row`, foreign keys, WAL, autocommit outside explicit transactions |
+| `read_only()` | Queries only | SQLite URI `mode=ro`, 30-second timeout, 30-second busy timeout, `sqlite3.Row`, foreign keys, `query_only=ON` |
+| `transaction(DEFERRED)` | Unit of work whose first statement determines the lock | Read-write policy plus explicit `BEGIN`, commit on success and rollback on failure |
+| `transaction(IMMEDIATE)` | Read-modify-write unit that must reserve the writer before reading decisions | Read-write policy plus `BEGIN IMMEDIATE`, commit on success and rollback on failure |
+
+Read models should use `read_only()`. A write workflow should use the weakest
+transaction mode that protects its invariant. If one unit of work spans future
+domain repositories, the service owns one transaction and passes that
+connection to every participating repository; repositories must not open a
+nested independent transaction.
+
+Backup and restore are deliberately excluded from repositories. The specialized
+`backup_sqlite_database()` and `restore_sqlite_database()` operations use
+SQLite's backup API and are shared by autoupdate and the explicit migration
+command.
+
+## Dashboard read model
+
+`github_agent_bridge.dashboard_data.DashboardQueries` is the read-only boundary
+used by HTTP handlers, CLI status/list commands, and monitoring. It owns
+dashboard SQL and row-to-JSON mapping separately from write repositories so
+denormalized UI queries can evolve without leaking `sqlite3.Row` or SQL into
+application orchestration.
+
+Job-list callers pass a typed `JobListFilters` value. The query maps each field
+to a fixed column and binds every value; callers cannot supply column names.
+The list remains one SQL statement and keeps the indexed dashboard ordering.
+
+The read model assumes the current migrated schema. Health/status first
+validates migration history and reports `schema_ok=false` for an old or partial
+database; normal queries do not carry indefinite `table_exists()` or
+`column_exists()` branches. Apply migrations explicitly before starting a newer
+dashboard. The module-level query functions remain compatibility shims for
+Python callers, while services use `DashboardQueries` directly.
+
+Executor heartbeat writes, acknowledgement claims, streamed session-event
+writes, and individual IMAP reader storage operations treat `SQLITE_BUSY` and
+`SQLITE_LOCKED` as transient contention after the connection timeout: they wait
+and retry instead of terminating the worker, reader pass, or background thread.
+Reader retries stay inside the failed SQLite operation, so they do not fetch the
+message again or repeat the IMAP `\Seen` side effect. Stream readers enqueue
+activity before persistence so a blocked SQLite writer cannot stop draining the
+OpenClaw subprocess pipes. Once the main CLI process exits, readers get a
+bounded drain window before the bridge stops them and closes its pipe ends; a
+descendant that inherited stdout or stderr cannot hold the worker indefinitely.
+Acknowledgement retries stop before the external GitHub reaction, so ambiguous
+post-side-effect failures still surface. Other `OperationalError` failures
+also propagate so schema or storage faults are not hidden. Recovered heartbeat
+or session-event contention increments the worker's persisted
+`recent_error_count` on the next successful heartbeat.
+
+## Queue transaction boundaries
+
+The following boundaries are behavioral contracts. Repository extraction may
+move SQL, but it must not split these units of work.
+
+### Ingestion, deduplication and coalescing
+
+One `BEGIN IMMEDIATE` transaction owns all of these changes:
+
+1. reserve the source receipt;
+2. resolve or create the canonical GitHub event;
+3. deduplicate or coalesce against active jobs;
+4. create/update the job and worklog;
+5. create the durable acknowledgement request;
+6. link the receipt and canonical event to the selected job.
+
+The transaction commits before optional feedback enrichment. A failed
+enrichment must not make an accepted notification disappear; conversely, a
+failure before commit must leave no partial receipt, event, job or
+acknowledgement.
+
+### Claiming a job
+
+Claiming uses one `BEGIN IMMEDIATE` transaction. The executor pause state is
+read only after that transaction begins. Candidate selection, the transition
+to `running`, attempt/session metadata, `job_runs` creation and audit/progress
+events commit together. This preserves all three locking invariants:
+
+- two workers cannot claim the same job;
+- a running `work_key` excludes another active job for that key;
+- a completed pause blocks every later claim.
+
+### Finishing or requeueing a job
+
+Finishing, cancelling, blocking and requeueing are read-modify-write
+operations and use `BEGIN IMMEDIATE`. Job status/lock changes, the active
+`job_runs` result and the associated worklog/session/progress events are one
+unit. A failure must roll back the whole transition so operational state does
+not claim a result that its run history cannot explain.
+
+### Acknowledgement delivery
+
+Creating an acknowledgement is part of ingestion. Reserving an acknowledgement
+for delivery is a separate `BEGIN IMMEDIATE` transaction so two executors
+cannot deliver the same pending acknowledgement. The external GitHub reaction
+happens after that commit; its success or failure is then recorded in a short,
+independent update because an external side effect cannot be made atomic with
+SQLite.
+
+## Regression contract
+
+Real temporary SQLite databases, not SQL-string mocks, must protect these
+invariants before queue SQL moves behind repositories:
+
+- one canonical job per immutable GitHub event across transports;
+- one successful worker claim per job under concurrent access;
+- serialization of active jobs sharing a `work_key`;
+- pause-state reads inside the claim transaction;
+- rollback of acknowledgement/job creation and job/job-run transitions as
+  complete units.

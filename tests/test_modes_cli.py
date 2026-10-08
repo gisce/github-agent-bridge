@@ -1,6 +1,8 @@
 import threading
 import time
 
+import pytest
+
 from github_agent_bridge.dispatch import GitHubClient, OpenClawDispatcher, RunMode
 from github_agent_bridge.models import GitHubContext, Job
 from github_agent_bridge.policy import ModelRoute, ModelRoutes, Policy
@@ -15,6 +17,20 @@ def test_shadow_github_reaction_has_no_external_failure():
     assert GitHubClient(gh_bin="definitely-not-present", mode=RunMode.SHADOW).react_eyes(make_job().context) is True
 
 
+def test_shadow_commit_status_has_no_external_side_effect():
+    client = RecordingGitHubClient()
+    client.mode = RunMode.SHADOW
+
+    assert client.create_commit_status(
+        "gisce/erp",
+        "fbd7bc1",
+        "pending",
+        "github-agent-bridge/agent",
+        "Agent queued (job #1)",
+    ) == (True, None)
+    assert client.calls == []
+
+
 def test_live_github_command_handles_missing_gh_binary():
     client = GitHubClient(gh_bin="definitely-not-present", mode=RunMode.LIVE)
 
@@ -23,6 +39,97 @@ def test_live_github_command_handles_missing_gh_binary():
     assert result.returncode == 127
     assert result.stdout == ""
     assert "definitely-not-present" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "expected"),
+    [
+        (0, '{"merged_at":"2026-10-07T07:37:33Z"}', True),
+        (0, '{"merged_at":null}', False),
+        (1, "", None),
+        (0, "not-json", None),
+    ],
+)
+def test_pull_request_merged_is_tristate(returncode, stdout, expected):
+    client = GitHubClient()
+
+    class Result:
+        stderr = ""
+
+        def __init__(self):
+            self.returncode = returncode
+            self.stdout = stdout
+
+    client._run = lambda args: Result()
+    ctx = GitHubContext(
+        ["https://github.com/gisce/github-agent-bridge/pull/268"],
+        "gisce/github-agent-bridge",
+        268,
+        target_kind="issue",
+    )
+
+    assert client.pull_request_merged(ctx) is expected
+
+
+@pytest.mark.parametrize(
+    "ctx",
+    [
+        GitHubContext(
+            ["https://github.com/gisce/erp/issues/1#issuecomment-2"],
+            "gisce/erp",
+            1,
+            comment_id=2,
+            target_kind="issue_comment",
+        ),
+        GitHubContext(
+            ["https://github.com/gisce/erp/pull/1#discussion_r2"],
+            "gisce/erp",
+            1,
+            review_comment_id=2,
+            target_kind="review_comment",
+        ),
+        GitHubContext(
+            ["https://github.com/gisce/erp/pull/1#pullrequestreview-2"],
+            "gisce/erp",
+            1,
+            review_id=2,
+            target_kind="review",
+        ),
+        GitHubContext(
+            ["https://github.com/gisce/erp/commit/abc#commitcomment-2"],
+            "gisce/erp",
+            commit_comment_id=2,
+            commit_sha="abc",
+            target_kind="commit_comment",
+        ),
+    ],
+)
+def test_event_addresses_current_user_covers_all_comment_targets(ctx):
+    client = GitHubClient()
+    client.current_login = lambda: "giscebot"
+    client.issue_comment_body = lambda current: "@giscebot issue"
+    client.pull_request_review_comment = lambda current: {"body": "@giscebot inline"}
+    client.pull_request_review = lambda current: {"body": "@giscebot review"}
+    client.commit_comment_body = lambda current: "@giscebot commit"
+
+    assert client.event_addresses_current_user(ctx) is True
+
+
+def test_event_addresses_current_user_rejects_referential_later_mention():
+    client = GitHubClient()
+    client.current_login = lambda: "giscebot"
+    client.pull_request_review = lambda ctx: {
+        "body": "@hperezgisce apply the feedback from @giscebot"
+    }
+    ctx = GitHubContext(
+        ["https://github.com/gisce/erp/pull/1#pullrequestreview-2"],
+        "gisce/erp",
+        1,
+        review_id=2,
+        target_kind="review",
+    )
+
+    assert client.event_addresses_current_user(ctx) is False
 
 
 class RecordingGitHubClient(GitHubClient):
@@ -35,10 +142,36 @@ class RecordingGitHubClient(GitHubClient):
 
         class Result:
             returncode = 0
-            stdout = '[{"id": 123}, {"id": 456}]' if args[-1].endswith("/comments") else "{}"
+            stdout = (
+                '[{"id": 123}, {"id": 456}]'
+                if args[-1].endswith("/comments")
+                else "fbd7bc190e4f63b00785671144e834a3c99c3fb1"
+                if len(args) > 1 and "/pulls/" in args[1]
+                else "{}"
+            )
             stderr = ""
 
         return Result()
+
+
+def test_pull_request_sha_resolution_ignores_commit_links_from_comment_body():
+    client = RecordingGitHubClient()
+    ctx = GitHubContext(
+        ["https://github.com/gisce/erp/pull/1#issuecomment-2"],
+        "gisce/erp",
+        1,
+        comment_id=2,
+        commit_sha="deadbeef",
+        target_kind="issue_comment",
+    )
+
+    sha, error = client.resolve_commit_sha(ctx)
+
+    assert sha == "fbd7bc190e4f63b00785671144e834a3c99c3fb1"
+    assert error is None
+    assert client.calls == [
+        ["api", "repos/gisce/erp/pulls/1", "--jq", ".head.sha"]
+    ]
 
 
 def test_review_reaction_targets_review_comments():
@@ -251,6 +384,126 @@ def test_live_dispatch_streams_openclaw_output_to_activity_callback(tmp_path):
     assert len(processes) == 1
     assert processes[0]["pid"] > 0
     assert processes[0]["start_time_ticks"] > 0
+
+
+def test_live_dispatch_propagates_activity_callback_failure(tmp_path):
+    openclaw = tmp_path / "openclaw"
+    openclaw.write_text(
+        "#!/bin/sh\n"
+        "printf 'thinking line\\n'\n"
+        "printf 'final line\\n'\n",
+        encoding="utf-8",
+    )
+    openclaw.chmod(0o755)
+
+    def fail_activity_callback(event_type, summary, detail):
+        raise RuntimeError("activity persistence failed")
+
+    dispatcher = OpenClawDispatcher(
+        openclaw_bin=str(openclaw), mode=RunMode.LIVE, cli_grace_seconds=1
+    )
+    with pytest.raises(RuntimeError, match="activity persistence failed"):
+        dispatcher.dispatch(
+            make_job(),
+            Policy(trusted_orgs={"gisce"}),
+            reaction_ok=True,
+            activity_callback=fail_activity_callback,
+        )
+
+
+def test_live_dispatch_drains_process_while_activity_callback_is_blocked(
+    tmp_path, monkeypatch
+):
+    done = tmp_path / "done"
+    openclaw = tmp_path / "openclaw"
+    openclaw.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import pathlib\n"
+        "import sys\n"
+        "sys.stdout.write('first chunk\\n')\n"
+        "sys.stdout.flush()\n"
+        "sys.stdout.write('x' * 1048576)\n"
+        "sys.stdout.flush()\n"
+        "pathlib.Path(os.environ['DONE_FILE']).write_text('done', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    openclaw.chmod(0o755)
+    monkeypatch.setenv("DONE_FILE", str(done))
+    callback_started = threading.Event()
+    release_callback = threading.Event()
+    results = []
+    errors = []
+
+    def block_first_activity(event_type, summary, detail):
+        if not callback_started.is_set():
+            callback_started.set()
+            assert release_callback.wait(timeout=2)
+
+    dispatcher = OpenClawDispatcher(
+        openclaw_bin=str(openclaw), mode=RunMode.LIVE, cli_grace_seconds=1
+    )
+
+    def dispatch():
+        try:
+            results.append(
+                dispatcher.dispatch(
+                    make_job(),
+                    Policy(trusted_orgs={"gisce"}),
+                    reaction_ok=True,
+                    activity_callback=block_first_activity,
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=dispatch)
+    thread.start()
+    try:
+        assert callback_started.wait(timeout=1)
+        deadline = time.monotonic() + 1
+        while not done.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert done.exists() is True
+    finally:
+        release_callback.set()
+        thread.join(timeout=2)
+
+    assert thread.is_alive() is False
+    assert errors == []
+    assert len(results) == 1
+    assert results[0].ok is True
+
+
+def test_live_dispatch_bounds_pipe_drain_when_descendant_inherits_streams(tmp_path):
+    openclaw = tmp_path / "openclaw"
+    openclaw.write_text(
+        "#!/usr/bin/env python3\n"
+        "import subprocess\n"
+        "import sys\n"
+        "subprocess.Popen([\n"
+        "    sys.executable,\n"
+        "    '-c',\n"
+        "    'import time; "
+        "[(time.sleep(0.1), print(\"child\", flush=True)) for _ in range(50)]',\n"
+        "])\n"
+        "print('parent complete', flush=True)\n",
+        encoding="utf-8",
+    )
+    openclaw.chmod(0o755)
+    dispatcher = OpenClawDispatcher(
+        openclaw_bin=str(openclaw), mode=RunMode.LIVE, cli_grace_seconds=0.1
+    )
+
+    started = time.monotonic()
+    result = dispatcher.dispatch(
+        make_job(), Policy(trusted_orgs={"gisce"}), reaction_ok=True
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.ok is True
+    assert "parent complete" in result.stdout
+    assert elapsed < 3
 
 
 def test_live_dispatch_streams_partial_openclaw_output_before_process_exits(tmp_path, monkeypatch):

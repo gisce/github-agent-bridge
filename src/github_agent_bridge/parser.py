@@ -23,7 +23,10 @@ ASSIGNMENT_PATTERNS = ("assigned you", "assigned to you", "you were assigned", "
 REVIEW_REQUEST_PATTERNS = ("requested your review", "requested a review from you", "you were requested for review", "review requested")
 COPILOT_REVIEW_PATTERNS = ("copilot-pull-request-reviewer", "github-copilot", "github copilot", "copilot reviewed", "copilot commented", "copilot left a comment", "copilot suggested", "copilot requested changes")
 WORKFLOW_RUN_FAILED_PATTERNS = ("run failed", "workflow run failed", "workflow failed", "job failed", "failing after")
-MERGE_EVENT_RE = re.compile(r"\b[\w.-]+\s+merged\s+(?:commit(?:\s+[0-9a-f]{7,40})?|[0-9a-f]{7,40}|#\d+)\s+(?:into|to)\s+[\w./-]+\b")
+MERGE_EVENT_RE = re.compile(
+    r"(?:\b[\w.-]+\s+merged\s+(?:commit(?:\s+[0-9a-f]{7,40})?|[0-9a-f]{7,40}|#\d+)|\bmerged\s+#\d+)"
+    r"\s+(?:into|to)\s+[\w./-]+\b"
+)
 
 
 def decode_header_value(value: str | None) -> str:

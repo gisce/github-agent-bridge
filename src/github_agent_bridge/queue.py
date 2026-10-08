@@ -1,19 +1,30 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import sqlite3
 from importlib import resources
 from pathlib import Path
-from urllib.parse import urlparse
 
-from .models import GitHubContext, Job, Notification, utc_now
+from .models import GitHubContext, Job, Notification
 from .parser import classify_github_action, classify_work_intent, extract_github_context
+from .persistence import (
+    AcknowledgementRepository,
+    ClosingConnection,
+    CommitStatusClaim,
+    CommitStatusRepository,
+    Database,
+    IngestionRepository,
+    IngestionRequest,
+    JobRepository,
+    RuntimeProcess,
+    RuntimeRepository,
+    StateRepository,
+)
 from .policy import Policy
-from .session_correlation import session_id_for_job, session_id_for_job_attempt
 from . import feedback
 from .actors import trigger_actor_details_for_enqueue, trigger_actor_details_from_notification
 from .intent_classifier import COMMENT_TARGET_KINDS, ParserResult, classify_notification_with_llm, should_classify_with_llm
+from .sql.migrations import apply_migrations, validate_migrations
 
 SCHEMA_PACKAGE = "github_agent_bridge.sql"
 
@@ -24,33 +35,6 @@ def load_schema() -> str:
 
 
 SCHEMA = load_schema()
-ACTIVE_STATUSES = ("pending", "running", "waiting_approval")
-COALESCE_STATUSES = ("pending", "waiting_approval")
-ACK_RETRY_LIMIT = 2
-
-
-def _webhook_hook_target_from_api_url(api_url: str) -> tuple[str, str] | None:
-    parts = [part for part in urlparse(api_url).path.split("/") if part]
-    if len(parts) >= 4 and parts[0] == "repos" and parts[3] == "hooks":
-        return f"{parts[1]}/{parts[2]}", "repository"
-    if len(parts) >= 3 and parts[0] == "orgs" and parts[2] == "hooks":
-        return parts[1], "organization"
-    return None
-
-
-def semantic_event_identity(
-    action: str, ctx: GitHubContext, trigger_actor: str | None
-) -> tuple[object, ...]:
-    """Return the stable GitHub target identity used across notification variants."""
-    target_id = (
-        ctx.comment_id
-        or ctx.review_comment_id
-        or ctx.review_id
-        or ctx.commit_comment_id
-        or ctx.workflow_run_id
-        or ctx.commit_sha
-    )
-    return (ctx.work_key, action, ctx.target_kind, target_id, (trigger_actor or "").lower())
 
 
 def canonical_event_key(
@@ -75,67 +59,81 @@ def canonical_event_key(
     for event_type, target_id in identities:
         if repo and target_id:
             return f"{event_type}:created:{repo}:{target_id}"
+    if action == "sync_after_merge" and repo and ctx.issue_number:
+        return f"pull_request:merged:{repo}:{ctx.issue_number}"
     if repo and ctx.workflow_run_id:
         return f"workflow_run:{action}:{repo}:{ctx.workflow_run_id}"
     return f"{source}:{source_key}"
 
 
-def acknowledgement_target_key(ctx: GitHubContext) -> str:
-    """Return a stable identity for one GitHub reaction target."""
-    return json.dumps(
-        {
-            "repo": ctx.repo,
-            "issue_number": ctx.issue_number,
-            "comment_id": ctx.comment_id,
-            "review_comment_id": ctx.review_comment_id,
-            "review_id": ctx.review_id,
-            "commit_comment_id": ctx.commit_comment_id,
-        },
-        sort_keys=True,
-    )
-
-
-class ClosingConnection(sqlite3.Connection):
-    """Commit or roll back a context-managed connection, then close it."""
-
-    def __exit__(self, exc_type, exc_value, traceback) -> bool:
-        try:
-            return super().__exit__(exc_type, exc_value, traceback)
-        finally:
-            self.close()
-
-
 class JobQueue:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, migrate: bool = False):
         self.path = Path(path).expanduser()
-        self.init()
+        self.database = Database(self.path)
+        if migrate:
+            self.migrate()
+        else:
+            self.init()
+        self.acknowledgements = AcknowledgementRepository(self.database)
+        self.commit_statuses = CommitStatusRepository(self.database)
+        self.runtime = RuntimeRepository(self.database)
+        self.state = StateRepository(self.database)
+        self.jobs = JobRepository(
+            self.database,
+            self.runtime,
+            self.state,
+            self.commit_statuses,
+        )
+        self.ingestion = IngestionRepository(
+            self.database,
+            self.jobs,
+            self.runtime,
+            self.acknowledgements,
+            self.commit_statuses,
+        )
 
     def connect(self) -> sqlite3.Connection:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        initialize = not self.path.exists()
-        con = sqlite3.connect(
-            self.path,
-            timeout=30,
-            isolation_level=None,
-            factory=ClosingConnection,
-        )
-        con.row_factory = sqlite3.Row
-        con.execute("PRAGMA foreign_keys=ON")
-        if initialize:
-            con.executescript(SCHEMA)
-            self._ensure_columns(con)
-            self._ensure_indexes(con)
-            self._backfill_job_runs(con)
-            self._backfill_webhook_hook_targets(con)
-        return con
+        if not self.path.exists():
+            self.init()
+        return self.database.read_write()
 
     def init(self) -> None:
-        with self.connect() as con:
+        if self.path.exists():
+            with self.database.read_only() as con:
+                validate_migrations(con)
+            return
+        with self.database.read_write() as con:
+            self._initialize_database(con)
+
+    def migrate(self) -> None:
+        """Initialize or migrate a database through an explicit operator path."""
+        with self.database.read_write() as con:
+            self._initialize_database(con)
+
+    def _ensure_initialized(self) -> None:
+        if not self.path.exists():
+            self.init()
+
+    def _initialize_database(self, con: sqlite3.Connection) -> None:
+        history_exists = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+        ).fetchone()
+        baseline_applied = bool(
+            history_exists
+            and con.execute(
+                "SELECT 1 FROM schema_migrations WHERE version=1"
+            ).fetchone()
+        )
+        if baseline_applied:
+            # Validate/apply immutable steps before the rolling schema snapshot can
+            # touch a database created by this or a newer package version.
+            apply_migrations(con)
             con.executescript(SCHEMA)
-            self._ensure_columns(con)
-            self._ensure_indexes(con)
-            self._backfill_job_runs(con)
-            self._backfill_webhook_hook_targets(con)
+        else:
+            # Legacy or incomplete histories need the snapshot to create missing
+            # tables before the baseline migration can perform its backfills.
+            con.executescript(SCHEMA)
+            apply_migrations(con)
 
     def enqueue(self, n: Notification, policy: Policy) -> tuple[Job | None, str]:
         """Backward-compatible email enqueue entrypoint."""
@@ -149,6 +147,7 @@ class JobQueue:
         source: str = "email",
         source_key: str | None = None,
     ) -> tuple[Job | None, str]:
+        self._ensure_initialized()
         source_key = source_key or n.message_id
         ctx = extract_github_context(n.body)
         action = classify_github_action(
@@ -159,6 +158,24 @@ class JobQueue:
         )
         intent = classify_work_intent(n.subject, n.body, policy.bot_logins)
         metadata: dict[str, object] = {"received_at": n.received_at}
+        feedback_actionability = str(n.metadata.get("feedback_actionability") or "")
+        structured_feedback = feedback_actionability in {
+            "mentioned",
+            "assigned",
+            "pr_authored_by_bot",
+            "defer_to_executor",
+        }
+        bot_authored_changes_requested = bool(
+            n.metadata.get("github_event") == "pull_request_review"
+            and n.metadata.get("review_state") == "changes_requested"
+            and feedback_actionability == "pr_authored_by_bot"
+        )
+        if n.metadata:
+            metadata.update(n.metadata)
+        if structured_feedback:
+            action = "reply_comment"
+        if bot_authored_changes_requested:
+            intent = "work_allowed"
         parser_result = ParserResult(action, intent)
         classifier_required = (
             source == "webhook"
@@ -199,15 +216,30 @@ class JobQueue:
                     **metadata["intent_classifier"],
                     "error": str(exc)[:500],
                 }
-        if classifier_required and not classifier_applied and intent == "work_allowed":
+        if structured_feedback:
+            action = "reply_comment"
+            metadata["action_guardrail"] = "structured_feedback_actionable"
+        if bot_authored_changes_requested:
+            intent = "work_allowed"
+            metadata["intent_guardrail"] = (
+                "bot_authored_pr_changes_requested_work_allowed"
+            )
+        elif (
+            classifier_required
+            and feedback_actionability != "pr_authored_by_bot"
+            and not classifier_applied
+            and intent == "work_allowed"
+        ):
             intent = "review_only"
             metadata["intent_guardrail"] = "webhook_classifier_required_read_only"
         if action == "submit_review":
             intent = "review_only"
             metadata["intent_guardrail"] = "submit_review_read_only"
+        elif action == "sync_after_merge":
+            intent = "review_only"
+            metadata["intent_guardrail"] = "sync_after_merge_read_only"
         decision = policy.decision(n, ctx, action)
         status = {"auto": "done", "ask": "waiting_approval", "deny": "denied"}.get(decision, "pending")
-        now = utc_now()
         trigger_actor = (
             trigger_actor_details_from_notification(n)
             if source == "webhook"
@@ -217,194 +249,72 @@ class JobQueue:
         payload_hash = hashlib.sha256(n.body.encode("utf-8")).hexdigest()
         if trigger_actor and trigger_actor.user_id:
             metadata["trigger_actor_id"] = trigger_actor.user_id
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            try:
-                try:
-                    con.execute(
-                        "INSERT INTO ingest_receipts(source,source_key,payload_hash,event_key,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
-                        (source, source_key, payload_hash, event_key, "received", now, now),
-                    )
-                    receipt_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
-                except sqlite3.IntegrityError:
-                    receipt = con.execute(
-                        "SELECT job_id FROM ingest_receipts WHERE source=? AND source_key=?",
-                        (source, source_key),
-                    ).fetchone()
-                    con.commit()
-                    job = self.get(int(receipt["job_id"])) if receipt and receipt["job_id"] else None
-                    return job, "duplicate"
-                event = con.execute(
-                    "SELECT job_id FROM github_events WHERE event_key=?",
-                    (event_key,),
-                ).fetchone()
-                if event is not None:
-                    con.execute(
-                        "UPDATE ingest_receipts SET status='duplicate',job_id=?,updated_at=? WHERE id=?",
-                        (event["job_id"], now, receipt_id),
-                    )
-                    con.commit()
-                    job = self.get(int(event["job_id"])) if event["job_id"] else None
-                    return job, "duplicate"
-                con.execute(
-                    "INSERT INTO github_events(event_key,first_source,context_json,created_at,updated_at) VALUES(?,?,?,?,?)",
-                    (event_key, source, ctx.to_json(), now, now),
-                )
-                existing = con.execute(
-                    f"SELECT * FROM jobs WHERE work_key=? AND status IN ({','.join('?' for _ in COALESCE_STATUSES)}) ORDER BY id LIMIT 1",
-                    (ctx.work_key, *COALESCE_STATUSES),
-                ).fetchone()
-                if existing is None and decision == "auto_trusted":
-                    running_rows = con.execute(
-                        "SELECT * FROM jobs WHERE work_key=? AND status='running' ORDER BY id",
-                        (ctx.work_key,),
-                    ).fetchall()
-                    event_identity = semantic_event_identity(
-                        action, ctx, trigger_actor.login if trigger_actor else None
-                    )
-                    existing = next(
-                        (
-                            row
-                            for row in running_rows
-                            if semantic_event_identity(
-                                row["action"],
-                                GitHubContext.from_json(row["context_json"]),
-                                row["trigger_actor"],
-                            )
-                            == event_identity
-                        ),
-                        None,
-                    )
-                if existing and decision == "auto_trusted":
-                    con.execute(
-                        "INSERT OR IGNORE INTO coalesced_notifications(job_id,uid,message_id,subject,trigger_actor,trigger_actor_avatar_url,context_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
-                        (existing["id"], n.uid, n.message_id, n.subject, trigger_actor.login if trigger_actor else None, trigger_actor.avatar_url if trigger_actor else None, ctx.to_json(), now),
-                    )
-                    if existing["status"] == "running":
-                        con.execute(
-                            "UPDATE jobs SET coalesced_count=coalesced_count+1, uid=?, updated_at=? WHERE id=?",
-                            (n.uid, now, existing["id"]),
-                        )
-                    else:
-                        con.execute("UPDATE jobs SET coalesced_count=coalesced_count+1, uid=?, message_id=message_id, subject=?, context_json=?, updated_at=? WHERE id=?", (n.uid, n.subject, ctx.to_json(), now, existing["id"]))
-                    self._log(con, existing["id"], ctx.work_key, "coalesced", "Notification coalesced into active job", n.message_id)
-                    self._queue_acknowledgement(con, int(existing["id"]), ctx, now)
-                    con.execute(
-                        "UPDATE github_events SET job_id=?,updated_at=? WHERE event_key=?",
-                        (existing["id"], now, event_key),
-                    )
-                    con.execute(
-                        "UPDATE ingest_receipts SET status='accepted',job_id=?,updated_at=? WHERE id=?",
-                        (existing["id"], now, receipt_id),
-                    )
-                    con.commit()
-                    if policy.feedback_learning.enabled and existing["message_id"] != n.message_id:
-                        feedback.capture_feedback(
-                            self.path,
-                            n,
-                            ctx,
-                            action,
-                            decision,
-                            intent,
-                            trigger_actor=trigger_actor.login if trigger_actor else None,
-                            trigger_actor_avatar_url=trigger_actor.avatar_url if trigger_actor else None,
-                        )
-                    return self._row_to_job(existing), "coalesced"
-                con.execute(
-                    "INSERT INTO jobs(work_key,repo,thread,status,action,decision,work_intent,subject,message_id,uid,trigger_actor,trigger_actor_avatar_url,context_json,metadata_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (ctx.work_key, ctx.repo, ctx.issue_number, status, action, decision, intent, n.subject, n.message_id, n.uid, trigger_actor.login if trigger_actor else None, trigger_actor.avatar_url if trigger_actor else None, ctx.to_json(), json.dumps(metadata), now, now),
-                )
-                job_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
-                con.execute(
-                    "UPDATE github_events SET job_id=?,updated_at=? WHERE event_key=?",
-                    (job_id, now, event_key),
-                )
-                con.execute(
-                    "UPDATE ingest_receipts SET status='accepted',job_id=?,updated_at=? WHERE id=?",
-                    (job_id, now, receipt_id),
-                )
-                self._log(con, job_id, ctx.work_key, "queued" if status == "pending" else status, f"decision={decision} action={action}", n.message_id)
-                if status == "pending":
-                    self._queue_acknowledgement(con, job_id, ctx, now)
-                con.commit()
-                if policy.feedback_learning.enabled:
-                    feedback.capture_feedback(
-                        self.path,
-                        n,
-                        ctx,
-                        action,
-                        decision,
-                        intent,
-                        trigger_actor=trigger_actor.login if trigger_actor else None,
-                        trigger_actor_avatar_url=trigger_actor.avatar_url if trigger_actor else None,
-                    )
-                return self.get(job_id), "enqueued"
-            except sqlite3.IntegrityError:
-                con.rollback()
-                row = con.execute("SELECT * FROM jobs WHERE message_id=?", (n.message_id,)).fetchone()
-                return self._row_to_job(row) if row else None, "duplicate"
+        result = self.ingestion.ingest(
+            IngestionRequest(
+                notification=n,
+                context=ctx,
+                source=source,
+                source_key=source_key,
+                event_key=event_key,
+                payload_hash=payload_hash,
+                status=status,
+                action=action,
+                decision=decision,
+                work_intent=intent,
+                metadata=metadata,
+                trigger_actor=trigger_actor,
+                commit_status_feedback=self._commit_status_feedback,
+            )
+        )
+        if policy.feedback_learning.enabled and result.capture_feedback:
+            feedback.capture_feedback(
+                self.path,
+                n,
+                ctx,
+                action,
+                decision,
+                intent,
+                trigger_actor=trigger_actor.login if trigger_actor else None,
+                trigger_actor_avatar_url=(
+                    trigger_actor.avatar_url if trigger_actor else None
+                ),
+            )
+        return result.job, result.state
 
     def claim_acknowledgement(self, job_id: int | None = None) -> tuple[int, int, GitHubContext] | None:
         """Reserve one durable GitHub acknowledgement without claiming its job."""
-        now = utc_now()
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            job_filter = "AND a.job_id=?" if job_id is not None else ""
-            status_filter = "a.status IN ('pending','failed')" if job_id is not None else "a.status='pending'"
-            args = (ACK_RETRY_LIMIT, job_id) if job_id is not None else (ACK_RETRY_LIMIT,)
-            row = con.execute(
-                f"""SELECT a.id,a.job_id,a.context_json
-                FROM job_acknowledgements a
-                JOIN jobs j ON j.id=a.job_id
-                WHERE {status_filter} AND a.attempts < ?
-                AND j.status IN ('pending','running') {job_filter}
-                ORDER BY a.created_at,a.id LIMIT 1""",
-                args,
-            ).fetchone()
-            if row is None:
-                con.commit()
-                return None
-            con.execute(
-                "UPDATE job_acknowledgements SET status='processing',attempts=attempts+1,updated_at=? WHERE id=?",
-                (now, row["id"]),
-            )
-            con.commit()
-            return int(row["id"]), int(row["job_id"]), GitHubContext.from_json(row["context_json"])
+        claim = self.acknowledgements.claim(job_id)
+        if claim is None:
+            return None
+        return claim.id, claim.job_id, claim.context
 
     def recover_acknowledgements(self) -> int:
         """Release acknowledgements interrupted by an executor restart."""
-        now = utc_now()
-        with self.connect() as con:
-            cursor = con.execute(
-                "UPDATE job_acknowledgements SET status='pending',updated_at=? WHERE status='processing'",
-                (now,),
-            )
-            return cursor.rowcount
+        return self.acknowledgements.recover_interrupted()
 
     def finish_acknowledgement(self, acknowledgement_id: int, ok: bool, error: str | None = None) -> None:
-        now = utc_now()
-        with self.connect() as con:
-            con.execute(
-                "UPDATE job_acknowledgements SET status=?,last_error=?,updated_at=? WHERE id=?",
-                ("succeeded" if ok else "failed", None if ok else (error or "reaction failed")[:1000], now, acknowledgement_id),
-            )
+        self.acknowledgements.finish(acknowledgement_id, ok, error)
 
     def acknowledgement_ok(self, job_id: int) -> bool:
-        with self.connect() as con:
-            row = con.execute(
-                "SELECT COUNT(*) AS total,SUM(status='succeeded') AS succeeded FROM job_acknowledgements WHERE job_id=?",
-                (job_id,),
-            ).fetchone()
-        return bool(row and row["total"] and row["total"] == row["succeeded"])
+        return self.acknowledgements.all_succeeded(job_id)
 
-    @staticmethod
-    def _queue_acknowledgement(con: sqlite3.Connection, job_id: int, ctx: GitHubContext, now: str) -> None:
-        con.execute(
-            """INSERT OR IGNORE INTO job_acknowledgements(
-            job_id,target_key,context_json,status,created_at,updated_at
-            ) VALUES(?,?,?,'pending',?,?)""",
-            (job_id, acknowledgement_target_key(ctx), ctx.to_json(), now, now),
-        )
+    def claim_commit_status(self, job_id: int | None = None) -> CommitStatusClaim | None:
+        return self.commit_statuses.claim(job_id)
+
+    def pin_commit_status_sha(self, status_id: int, sha: str) -> str:
+        return self.commit_statuses.pin_sha(status_id, sha)
+
+    def finish_commit_status(
+        self,
+        status_id: int,
+        revision: int,
+        ok: bool,
+        error: str | None = None,
+    ) -> None:
+        self.commit_statuses.finish(status_id, revision, ok, error)
+
+    def recover_commit_statuses(self) -> int:
+        return self.commit_statuses.recover_interrupted()
 
     def quarantine_notification(
         self,
@@ -415,85 +325,18 @@ class JobQueue:
         metadata: dict[str, object] | None = None,
         body_excerpt_chars: int = 2000,
     ) -> int:
-        body_excerpt = n.body[:body_excerpt_chars]
-        now = utc_now()
-        metadata_json = json.dumps(metadata or {}, ensure_ascii=False, sort_keys=True)
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            try:
-                con.execute(
-                    """
-                    INSERT INTO quarantined_notifications(
-                        uid,message_id,subject,from_addr,reason,error,body_excerpt,metadata_json,created_at
-                    ) VALUES(?,?,?,?,?,?,?,?,?)
-                    """,
-                    (n.uid, n.message_id, n.subject, n.from_addr, reason, error[:1000], body_excerpt, metadata_json, now),
-                )
-                quarantine_id = int(con.execute("SELECT last_insert_rowid()").fetchone()[0])
-                self._log(
-                    con,
-                    None,
-                    None,
-                    "quarantined",
-                    f"GitHub notification quarantined: {reason}",
-                    n.message_id or error[:500],
-                )
-                con.commit()
-                return quarantine_id
-            except sqlite3.IntegrityError:
-                con.rollback()
-                if n.message_id:
-                    row = con.execute(
-                        "SELECT id FROM quarantined_notifications WHERE message_id=?",
-                        (n.message_id,),
-                    ).fetchone()
-                    if row:
-                        return int(row["id"])
-                raise
+        self._ensure_initialized()
+        return self.ingestion.quarantine(
+            n,
+            reason=reason,
+            error=error,
+            metadata=metadata,
+            body_excerpt_chars=body_excerpt_chars,
+        )
 
     def claim_next(self, worker_id: str, work_intents: frozenset[str] | set[str] | None = None) -> Job | None:
-        now = utc_now()
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            intent_filter = ""
-            args: list[object] = []
-            if work_intents is not None:
-                if not work_intents:
-                    con.commit()
-                    return None
-                intent_filter = f"AND j.work_intent IN ({','.join('?' for _ in work_intents)})"
-                args.extend(sorted(work_intents))
-            row = con.execute(
-                f"""SELECT * FROM jobs j WHERE j.status='pending'
-                {intent_filter}
-                AND NOT EXISTS (SELECT 1 FROM jobs r WHERE r.work_key=j.work_key AND r.status='running')
-                ORDER BY j.created_at LIMIT 1""",
-                args,
-            ).fetchone()
-            if not row:
-                con.commit(); return None
-            metadata = json.loads(row["metadata_json"] or "{}")
-            metadata.pop("runtime_process", None)
-            fresh_session = bool(metadata.get("fresh_session_on_retry")) and int(row["attempts"]) > 0
-            if fresh_session or row["work_intent"] == "work_allowed":
-                metadata["openclaw_session_id"] = session_id_for_job_attempt(int(row["id"]), int(row["attempts"]) + 1)
-            else:
-                metadata.setdefault("openclaw_session_id", session_id_for_job(int(row["id"])))
-            attempt = int(row["attempts"]) + 1
-            con.execute(
-                "UPDATE jobs SET status='running', locked_by=?, attempts=attempts+1, started_at=?, finished_at=NULL, updated_at=?, metadata_json=? WHERE id=?",
-                (worker_id, now, now, json.dumps(metadata, sort_keys=True), row["id"]),
-            )
-            con.execute(
-                """INSERT INTO job_runs(job_id,attempt,started_at,worker_id,session_id)
-                VALUES(?,?,?,?,?)""",
-                (row["id"], attempt, now, worker_id, metadata["openclaw_session_id"]),
-            )
-            self._log(con, row["id"], row["work_key"], "running", f"claimed by {worker_id}", None)
-            self._session_event(con, row["id"], row["work_key"], metadata["openclaw_session_id"], "claimed", f"claimed by {worker_id}", None)
-            self._progress(con, row["id"], row["work_key"], "semantic", "claimed", f"claimed by {worker_id}", None)
-            con.commit()
-            return self.get(int(row["id"]))
+        self._ensure_initialized()
+        return self.jobs.claim_next(worker_id, work_intents)
 
     def record_worker_heartbeat(
         self,
@@ -504,30 +347,17 @@ class JobQueue:
         active_job_id: int | None = None,
         recent_error_count: int = 0,
     ) -> None:
-        now = utc_now()
-        with self.connect() as con:
-            con.execute(
-                """INSERT INTO worker_heartbeats(
-                       worker_id, executor_id, pid, last_seen, active_job_id, loop_state, recent_error_count
-                   ) VALUES(?,?,?,?,?,?,?)
-                   ON CONFLICT(worker_id) DO UPDATE SET
-                       executor_id=excluded.executor_id,
-                       pid=excluded.pid,
-                       last_seen=excluded.last_seen,
-                       active_job_id=excluded.active_job_id,
-                       loop_state=excluded.loop_state,
-                       recent_error_count=excluded.recent_error_count""",
-                (worker_id, executor_id, pid, now, active_job_id, loop_state, recent_error_count),
-            )
+        self.runtime.record_worker_heartbeat(
+            worker_id,
+            executor_id,
+            pid,
+            loop_state,
+            active_job_id,
+            recent_error_count,
+        )
 
     def delete_worker_heartbeats_except(self, executor_id: str) -> int:
-        """Remove heartbeat rows left by previous executor processes."""
-        with self.connect() as con:
-            cur = con.execute(
-                "DELETE FROM worker_heartbeats WHERE executor_id != ?",
-                (executor_id,),
-            )
-            return cur.rowcount
+        return self.runtime.delete_worker_heartbeats_except(executor_id)
 
     def register_runtime_process(
         self,
@@ -536,100 +366,15 @@ class JobQueue:
         executor_id: str,
         identity: dict[str, int],
     ) -> bool:
-        """Persist the exact process that owns a running job."""
-        now = utc_now()
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            row = con.execute(
-                "SELECT work_key, metadata_json FROM jobs WHERE id=? AND status='running' AND locked_by=?",
-                (job_id, worker_id),
-            ).fetchone()
-            if row is None:
-                con.commit()
-                return False
-            metadata = json.loads(row["metadata_json"] or "{}")
-            runtime_process = {
-                "state": "running",
-                "executor_id": executor_id,
-                "worker_id": worker_id,
-                "pid": int(identity["pid"]),
-                "ppid": int(identity["ppid"]),
-                "pgid": int(identity["pgid"]),
-                "sid": int(identity["sid"]),
-                "start_time_ticks": int(identity["start_time_ticks"]),
-                "registered_at": now,
-            }
-            metadata["runtime_process"] = runtime_process
-            con.execute(
-                "UPDATE jobs SET metadata_json=?, updated_at=? WHERE id=? AND status='running' AND locked_by=?",
-                (json.dumps(metadata, sort_keys=True), now, job_id, worker_id),
-            )
-            self._session_event(
-                con,
-                job_id,
-                row["work_key"],
-                str(metadata.get("openclaw_session_id") or session_id_for_job(job_id)),
-                "process_registered",
-                f"runtime process {runtime_process['pid']} registered",
-                json.dumps(runtime_process, sort_keys=True),
-            )
-            con.commit()
-            return True
+        process = RuntimeProcess.from_identity(executor_id, worker_id, identity)
+        return self.runtime.register_process(job_id, process)
 
     def mark_runtime_process_exited(self, job_id: int, worker_id: str) -> bool:
-        """Mark a registered process as exited while result handling finishes."""
-        now = utc_now()
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            row = con.execute(
-                "SELECT metadata_json FROM jobs WHERE id=? AND status='running' AND locked_by=?",
-                (job_id, worker_id),
-            ).fetchone()
-            if row is None:
-                con.commit()
-                return False
-            metadata = json.loads(row["metadata_json"] or "{}")
-            runtime_process = metadata.get("runtime_process")
-            if not isinstance(runtime_process, dict):
-                con.commit()
-                return False
-            runtime_process["state"] = "exited"
-            runtime_process["exited_at"] = now
-            metadata["runtime_process"] = runtime_process
-            cur = con.execute(
-                "UPDATE jobs SET metadata_json=?, updated_at=? WHERE id=? AND status='running' AND locked_by=?",
-                (json.dumps(metadata, sort_keys=True), now, job_id, worker_id),
-            )
-            con.commit()
-            return bool(cur.rowcount)
+        return self.runtime.mark_process_exited(job_id, worker_id)
 
     def finish(self, job_id: int, status: str, summary: str, detail: str | None = None) -> None:
-        now = utc_now()
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            row = con.execute("SELECT work_key FROM jobs WHERE id=?", (job_id,)).fetchone()
-            metadata = self._job_metadata(con, job_id)
-            cancellation = metadata.get("cancellation")
-            if isinstance(cancellation, dict) and cancellation.get("state") in {"requested", "cancelled"}:
-                status = "done"
-                summary = str(cancellation.get("summary") or summary)
-                detail = str(cancellation.get("detail") or detail or "")
-                con.execute(
-                    "UPDATE jobs SET status=?, last_error=?, locked_by=NULL, finished_at=COALESCE(finished_at, ?), updated_at=? WHERE id=?",
-                    (status, detail if status == "blocked" else None, now, now, job_id),
-                )
-            else:
-                con.execute(
-                    "UPDATE jobs SET status=?, last_error=?, locked_by=NULL, finished_at=?, updated_at=? WHERE id=?",
-                    (status, detail if status == "blocked" else None, now, now, job_id),
-                )
-            run_result = "cancelled" if isinstance(cancellation, dict) and cancellation.get("state") in {"requested", "cancelled"} else status
-            self._finish_run(con, job_id, run_result, now)
-            self._log(con, job_id, row["work_key"] if row else None, status, summary, detail)
-            session_id = metadata.get("openclaw_session_id") or session_id_for_job(job_id)
-            self._session_event(con, job_id, row["work_key"] if row else None, str(session_id), status, summary, detail)
-            self._progress(con, job_id, row["work_key"] if row else None, "semantic", status, summary, detail)
-            con.commit()
+        self._ensure_initialized()
+        self.jobs.finish(job_id, status, summary, detail)
 
     def request_cancel_running(
         self,
@@ -639,40 +384,8 @@ class JobQueue:
         reason: str | None = None,
     ) -> Job | None:
         """Record a manual cancellation request for a running job."""
-        now = utc_now()
-        clean_actor = actor.strip().lstrip("@") or "unknown"
-        clean_reason = (reason or "").strip()
-        summary = f"job cancellation requested by @{clean_actor}"
-        detail = f"reason={clean_reason}" if clean_reason else "reason not provided"
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            row = con.execute(
-                "SELECT work_key, metadata_json FROM jobs WHERE id=? AND status='running'",
-                (job_id,),
-            ).fetchone()
-            if row is None:
-                con.commit()
-                return None
-            metadata = json.loads(row["metadata_json"] or "{}")
-            existing_cancellation = metadata.get("cancellation")
-            metadata["cancellation"] = {
-                "state": "requested",
-                "actor": clean_actor,
-                "reason": clean_reason,
-                "requested_at": now,
-                "summary": summary,
-                "detail": detail,
-            }
-            con.execute(
-                "UPDATE jobs SET updated_at=?, metadata_json=? WHERE id=? AND status='running'",
-                (now, json.dumps(metadata, sort_keys=True), job_id),
-            )
-            self._log(con, job_id, row["work_key"], "cancel_requested", summary, detail)
-            session_id = str(metadata.get("openclaw_session_id") or session_id_for_job(job_id))
-            self._session_event(con, job_id, row["work_key"], session_id, "cancel_requested", summary, detail)
-            self._progress(con, job_id, row["work_key"], "semantic", "cancel_requested", summary, detail)
-            con.commit()
-        return self.get(job_id)
+        self._ensure_initialized()
+        return self.jobs.request_cancel_running(job_id, actor=actor, reason=reason)
 
     def mark_cancelled(
         self,
@@ -684,59 +397,14 @@ class JobQueue:
         followup_url: str | None = None,
     ) -> Job | None:
         """Mark a running job as manually cancelled."""
-        now = utc_now()
-        clean_actor = actor.strip().lstrip("@") or "unknown"
-        clean_reason = (reason or "").strip()
-        summary = f"job cancelled by @{clean_actor}"
-        detail_parts = []
-        if clean_reason:
-            detail_parts.append(f"reason={clean_reason}")
-        if signal_detail:
-            detail_parts.append(signal_detail)
-        if followup_url:
-            detail_parts.append(f"followup_url={followup_url}")
-        detail = "; ".join(detail_parts) if detail_parts else "manual cancellation"
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            row = con.execute(
-                "SELECT status, work_key, metadata_json FROM jobs WHERE id=?",
-                (job_id,),
-            ).fetchone()
-            if row is None:
-                con.commit()
-                return None
-            metadata = json.loads(row["metadata_json"] or "{}")
-            existing_cancellation = metadata.get("cancellation")
-            metadata["cancellation"] = {
-                "state": "cancelled",
-                "actor": clean_actor,
-                "reason": clean_reason,
-                "cancelled_at": now,
-                "signal_detail": signal_detail,
-                "followup_url": followup_url,
-                "summary": summary,
-                "detail": detail,
-            }
-            if row["status"] != "running":
-                if not (isinstance(existing_cancellation, dict) and existing_cancellation.get("state") == "requested"):
-                    con.commit()
-                    return None
-            cur = con.execute(
-                """UPDATE jobs
-                SET status='done', locked_by=NULL, last_error=NULL, finished_at=COALESCE(finished_at, ?), updated_at=?, metadata_json=?
-                WHERE id=?""",
-                (now, now, json.dumps(metadata, sort_keys=True), job_id),
-            )
-            if not cur.rowcount:
-                con.commit()
-                return None
-            self._finish_run(con, job_id, "cancelled", now)
-            self._log(con, job_id, row["work_key"], "cancelled", summary, detail)
-            session_id = str(metadata.get("openclaw_session_id") or session_id_for_job(job_id))
-            self._session_event(con, job_id, row["work_key"], session_id, "cancelled", summary, detail)
-            self._progress(con, job_id, row["work_key"], "semantic", "cancelled", summary, detail)
-            con.commit()
-        return self.get(job_id)
+        self._ensure_initialized()
+        return self.jobs.mark_cancelled(
+            job_id,
+            actor=actor,
+            reason=reason,
+            signal_detail=signal_detail,
+            followup_url=followup_url,
+        )
 
     def requeue_running(
         self,
@@ -746,28 +414,10 @@ class JobQueue:
         *,
         fresh_session: bool = False,
     ) -> bool:
-        now = utc_now()
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            row = con.execute(
-                "SELECT work_key, metadata_json FROM jobs WHERE id=? AND status='running'",
-                (job_id,),
-            ).fetchone()
-            if row is None:
-                con.commit()
-                return False
-            metadata = json.loads(row["metadata_json"] or "{}")
-            if fresh_session:
-                metadata["fresh_session_on_retry"] = True
-            cur = con.execute(
-                "UPDATE jobs SET status='pending', locked_by=NULL, last_error=NULL, finished_at=?, updated_at=?, metadata_json=? WHERE id=? AND status='running'",
-                (now, now, json.dumps(metadata, sort_keys=True), job_id),
-            )
-            if cur.rowcount:
-                self._finish_run(con, job_id, "requeued", now)
-                self._log(con, job_id, row["work_key"], "retry", summary, detail)
-            con.commit()
-            return bool(cur.rowcount)
+        self._ensure_initialized()
+        return self.jobs.requeue_running(
+            job_id, summary, detail, fresh_session=fresh_session
+        )
 
     def block_running(
         self,
@@ -779,330 +429,105 @@ class JobQueue:
         older_than_seconds: int | None = None,
     ) -> list[int]:
         """Mark selected running jobs as blocked without requeuing them."""
-        now = utc_now()
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            clauses = ["status='running'"]
-            args: list[object] = []
-            if job_ids is not None:
-                if not job_ids:
-                    con.commit()
-                    return []
-                clauses.append(f"id IN ({','.join('?' for _ in job_ids)})")
-                args.extend(job_ids)
-            if locked_by is not None:
-                if not locked_by:
-                    con.commit()
-                    return []
-                clauses.append(f"locked_by IN ({','.join('?' for _ in locked_by)})")
-                args.extend(sorted(locked_by))
-            if older_than_seconds is not None:
-                clauses.append(
-                    "started_at IS NOT NULL AND "
-                    "(julianday('now') - julianday(started_at)) * 86400 > ?"
-                )
-                args.append(older_than_seconds)
-            rows = con.execute(
-                f"SELECT id, work_key, metadata_json FROM jobs WHERE {' AND '.join(clauses)} ORDER BY id",
-                args,
-            ).fetchall()
-            blocked_ids: list[int] = []
-            for row in rows:
-                cur = con.execute(
-                    """UPDATE jobs
-                    SET status='blocked', locked_by=NULL, last_error=?,
-                        finished_at=?, updated_at=?
-                    WHERE id=? AND status='running'""",
-                    (detail, now, now, row["id"]),
-                )
-                if not cur.rowcount:
-                    continue
-                job_id = int(row["id"])
-                blocked_ids.append(job_id)
-                self._finish_run(con, job_id, "blocked", now)
-                self._log(con, job_id, row["work_key"], "blocked", summary, detail)
-                metadata = json.loads(row["metadata_json"] or "{}")
-                session_id = str(metadata.get("openclaw_session_id") or session_id_for_job(job_id))
-                self._session_event(con, job_id, row["work_key"], session_id, "blocked", summary, detail)
-                self._progress(con, job_id, row["work_key"], "semantic", "blocked", summary, detail)
-            con.commit()
-            return blocked_ids
+        self._ensure_initialized()
+        return self.jobs.block_running(
+            summary,
+            detail,
+            job_ids=job_ids,
+            locked_by=locked_by,
+            older_than_seconds=older_than_seconds,
+        )
 
     def update_work_intent(self, job_id: int, work_intent: str, summary: str) -> Job | None:
-        now = utc_now()
-        with self.connect() as con:
-            row = con.execute("SELECT work_key, action FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if row is None:
-                return None
-            if row["action"] == "submit_review":
-                work_intent = "review_only"
-            con.execute("UPDATE jobs SET work_intent=?, updated_at=? WHERE id=?", (work_intent, now, job_id))
-            self._log(con, job_id, row["work_key"], "intent_update", summary, None)
-        return self.get(job_id)
+        self._ensure_initialized()
+        job = self.jobs.get(job_id)
+        if job is None:
+            return None
+        if job.action == "submit_review":
+            work_intent = "review_only"
+        return self.jobs.update_work_intent(job_id, work_intent, summary)
 
     def add_session_event(self, job_id: int, event_type: str, summary: str, detail: str | None = None) -> None:
-        now = utc_now()
-        with self.connect() as con:
-            row = con.execute("SELECT work_key, metadata_json FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if row is None:
-                return
-            metadata = json.loads(row["metadata_json"] or "{}")
-            session_id = str(metadata.get("openclaw_session_id") or session_id_for_job(job_id))
-            con.execute("UPDATE jobs SET updated_at=? WHERE id=?", (now, job_id))
-            self._session_event(con, job_id, row["work_key"], session_id, event_type, summary, detail)
-            kind = "visible" if event_type.startswith("openclaw_") else "semantic"
-            self._progress(con, job_id, row["work_key"], kind, event_type[:80], summary, detail)
+        progress_kind = "visible" if event_type.startswith("openclaw_") else "semantic"
+        self.runtime.add_job_session_event(
+            job_id,
+            event_type,
+            summary,
+            detail,
+            progress_kind=progress_kind,
+        )
 
     def add_worklog(self, job_id: int, phase: str, summary: str, detail: str | None = None) -> None:
-        with self.connect() as con:
-            row = con.execute("SELECT work_key FROM jobs WHERE id=?", (job_id,)).fetchone()
-            if row is not None:
-                self._log(con, job_id, row["work_key"], phase, summary, detail)
+        self.runtime.add_job_worklog(job_id, phase, summary, detail)
 
     def list_jobs(self, status: str | None = None, limit: int = 20) -> list[Job]:
-        sql = "SELECT * FROM jobs"
-        args: tuple[object, ...] = ()
-        if status:
-            sql += " WHERE status=?"
-            args = (status,)
-        sql += " ORDER BY id DESC LIMIT ?"
-        args = (*args, limit)
-        with self.connect() as con:
-            return [j for j in (self._row_to_job(r) for r in con.execute(sql, args)) if j]
+        self._ensure_initialized()
+        return self.jobs.list(status, limit)
 
     def retry(self, job_id: int, *, actor: str | None = None) -> bool:
-        now = utc_now()
-        summary = f"job requeued by @{actor}" if actor else "job requeued"
-        with self.connect() as con:
-            cur = con.execute("UPDATE jobs SET status='pending', locked_by=NULL, last_error=NULL, updated_at=? WHERE id=? AND status='blocked' AND decision='auto_trusted'", (now, job_id))
-            if cur.rowcount:
-                row = con.execute("SELECT work_key FROM jobs WHERE id=?", (job_id,)).fetchone()
-                self._log(con, job_id, row["work_key"] if row else None, "retry", summary, None)
-            return bool(cur.rowcount)
+        self._ensure_initialized()
+        return self.jobs.retry(job_id, actor=actor)
 
     def dismiss(self, job_id: int, reason: str) -> bool:
-        now = utc_now()
-        with self.connect() as con:
-            cur = con.execute(
-                "UPDATE jobs SET status='done', locked_by=NULL, last_error=NULL, finished_at=COALESCE(finished_at, ?), updated_at=? WHERE id=? AND status IN ('blocked','denied','waiting_approval')",
-                (now, now, job_id),
-            )
-            if cur.rowcount:
-                row = con.execute("SELECT work_key FROM jobs WHERE id=?", (job_id,)).fetchone()
-                self._log(con, job_id, row["work_key"] if row else None, "dismissed", "job dismissed manually", reason)
-            return bool(cur.rowcount)
+        self._ensure_initialized()
+        return self.jobs.dismiss(job_id, reason)
 
     def unlock_stale(self, older_than_seconds: int, job_ids: list[int] | None = None) -> int:
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            args: list[object] = [older_than_seconds]
-            sql = "SELECT id, work_key FROM jobs WHERE status='running' AND started_at IS NOT NULL AND (julianday('now') - julianday(started_at)) * 86400 > ?"
-            if job_ids is not None:
-                if not job_ids:
-                    con.commit()
-                    return 0
-                sql += f" AND id IN ({','.join('?' for _ in job_ids)})"
-                args.extend(job_ids)
-            rows = con.execute(sql, args).fetchall()
-            now = utc_now()
-            for row in rows:
-                con.execute("UPDATE jobs SET status='pending', locked_by=NULL, finished_at=?, updated_at=? WHERE id=?", (now, now, row["id"]))
-                self._finish_run(con, int(row["id"]), "requeued", now)
-                self._log(con, row["id"], row["work_key"], "unlock_stale", f"running job older than {older_than_seconds}s requeued", None)
-            con.commit()
-            return len(rows)
+        self._ensure_initialized()
+        return self.jobs.unlock_stale(older_than_seconds, job_ids)
 
     def get(self, job_id: int) -> Job | None:
-        with self.connect() as con:
-            return self._row_to_job(con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone())
+        self._ensure_initialized()
+        return self.jobs.get(job_id)
 
     def coalesced_contexts(self, job_id: int) -> list[GitHubContext]:
-        with self.connect() as con:
-            rows = con.execute(
-                "SELECT context_json FROM coalesced_notifications WHERE job_id=? ORDER BY id",
-                (job_id,),
-            ).fetchall()
-        return [GitHubContext.from_json(row["context_json"]) for row in rows]
+        self._ensure_initialized()
+        return self.jobs.coalesced_contexts(job_id)
 
     def coalesced_trigger_actors(self, job_id: int) -> list[str]:
-        with self.connect() as con:
-            rows = con.execute(
-                "SELECT trigger_actor FROM coalesced_notifications WHERE job_id=? ORDER BY id",
-                (job_id,),
-            ).fetchall()
-        return [row["trigger_actor"] for row in rows if row["trigger_actor"]]
+        self._ensure_initialized()
+        return self.jobs.coalesced_trigger_actors(job_id)
 
     def stats(self) -> dict[str, int]:
-        with self.connect() as con:
-            return {r["status"]: r["count"] for r in con.execute("SELECT status, count(*) count FROM jobs GROUP BY status")}
+        self._ensure_initialized()
+        return self.jobs.stats()
 
     def pending_age_seconds(self) -> int | None:
-        with self.connect() as con:
-            row = con.execute("SELECT CAST((julianday('now') - julianday(min(created_at))) * 86400 AS INTEGER) age FROM jobs WHERE status='pending'").fetchone()
-            return None if row is None or row["age"] is None else int(row["age"])
+        self._ensure_initialized()
+        return self.jobs.pending_age_seconds()
 
     def set_state(self, key: str, value: str) -> None:
-        with self.connect() as con:
-            con.execute("INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+        self.state.set(key, value)
 
     def get_state(self, key: str, default: str = "") -> str:
-        with self.connect() as con:
-            row = con.execute("SELECT value FROM state WHERE key=?", (key,)).fetchone()
-            return row["value"] if row else default
+        return self.state.get(key, default)
 
-    def _log(self, con: sqlite3.Connection, job_id: int | None, work_key: str | None, phase: str, summary: str, detail: str | None) -> None:
-        con.execute("INSERT INTO worklog(ts,job_id,work_key,phase,summary,detail) VALUES(?,?,?,?,?,?)", (utc_now(), job_id, work_key, phase, summary, detail))
+    def pause_executor(self, reason: str = "") -> None:
+        self.state.pause_executor(reason)
 
-    def _session_event(self, con: sqlite3.Connection, job_id: int, work_key: str | None, session_id: str, event_type: str, summary: str, detail: str | None) -> None:
-        con.execute(
-            "INSERT INTO job_session_events(ts,job_id,work_key,session_id,event_type,summary,detail) VALUES(?,?,?,?,?,?,?)",
-            (utc_now(), job_id, work_key, session_id, event_type, summary, detail),
-        )
+    def resume_executor(self) -> None:
+        self.state.resume_executor()
 
-    def _progress(self, con: sqlite3.Connection, job_id: int, work_key: str | None, kind: str, phase: str, summary: str, detail: str | None) -> None:
-        con.execute(
-            "INSERT INTO job_progress(ts,job_id,work_key,kind,phase,summary,detail) VALUES(?,?,?,?,?,?,?)",
-            (utc_now(), job_id, work_key, kind, phase, summary, detail),
-        )
+    def executor_pause_state(self) -> dict[str, object]:
+        return self.state.executor_pause_state().to_dict()
 
-    def _job_metadata(self, con: sqlite3.Connection, job_id: int) -> dict[str, object]:
-        row = con.execute("SELECT metadata_json FROM jobs WHERE id=?", (job_id,)).fetchone()
-        if row is None:
-            return {}
-        return json.loads(row["metadata_json"] or "{}")
+    def executor_paused(self) -> bool:
+        return self.state.executor_paused()
 
-    def _finish_run(self, con: sqlite3.Connection, job_id: int, result: str, finished_at: str) -> None:
-        con.execute(
-            """UPDATE job_runs
-            SET finished_at=?, result=?
-            WHERE id=(
-                SELECT id FROM job_runs
-                WHERE job_id=? AND finished_at IS NULL
-                ORDER BY attempt DESC LIMIT 1
-            ) AND finished_at IS NULL""",
-            (finished_at, result, job_id),
-        )
-
-    def _backfill_job_runs(self, con: sqlite3.Connection) -> None:
-        """Preserve the one historical interval recoverable from legacy jobs."""
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='job_runs'").fetchone() is None:
-            return
-        rows = con.execute(
-            """SELECT id, attempts, started_at, finished_at, locked_by, metadata_json
-            FROM jobs
-            WHERE started_at IS NOT NULL
-              AND finished_at IS NOT NULL
-              AND julianday(finished_at) >= julianday(started_at)
-              AND NOT EXISTS (SELECT 1 FROM job_runs WHERE job_runs.job_id=jobs.id)"""
-        ).fetchall()
-        for row in rows:
-            try:
-                metadata = json.loads(row["metadata_json"] or "{}")
-            except (json.JSONDecodeError, TypeError):
-                metadata = {}
-            attempt = max(1, int(row["attempts"] or 0))
-            session_id = str(
-                metadata.get("openclaw_session_id")
-                or session_id_for_job_attempt(int(row["id"]), attempt)
-            )
-            con.execute(
-                """INSERT OR IGNORE INTO job_runs(
-                    job_id,attempt,started_at,finished_at,result,worker_id,session_id,is_estimated
-                ) VALUES(?,?,?,?,?,?,?,1)""",
-                (
-                    row["id"],
-                    attempt,
-                    row["started_at"],
-                    row["finished_at"],
-                    "historical",
-                    row["locked_by"],
-                    session_id,
-                ),
-            )
-
-    def _ensure_columns(self, con: sqlite3.Connection) -> None:
-        tables = {
-            "jobs": {"trigger_actor": "TEXT", "trigger_actor_avatar_url": "TEXT"},
-            "coalesced_notifications": {"trigger_actor": "TEXT", "trigger_actor_avatar_url": "TEXT"},
-            "mcp_tokens": {"user_login": "TEXT", "created_by": "TEXT"},
-            "webhook_shadow_receipts": {
-                "duplicate_count": "INTEGER NOT NULL DEFAULT 0",
-                "hook_id": "TEXT",
-                "payload_json": "TEXT",
-                "enqueue_status": "TEXT",
-                "job_id": "INTEGER REFERENCES jobs(id) ON DELETE SET NULL",
-            },
-            "webhook_hooks": {
-                "name": "TEXT",
-                "content_type": "TEXT",
-                "insecure_ssl": "INTEGER",
-                "delivery_url": "TEXT",
-                "github_api_url": "TEXT",
-                "ping_url": "TEXT",
-                "deliveries_url": "TEXT",
-                "github_created_at": "TEXT",
-                "github_updated_at": "TEXT",
-                "last_delivery_id": "TEXT",
-                "last_event_name": "TEXT",
-                "last_action": "TEXT",
-                "last_repository": "TEXT",
-                "last_result": "TEXT",
-            },
-        }
-        for table, columns in tables.items():
-            if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is None:
-                continue
-            existing = {row["name"] for row in con.execute(f"PRAGMA table_info({table})")}
-            for column, definition in columns.items():
-                if column not in existing:
-                    con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-
-    def _ensure_indexes(self, con: sqlite3.Connection) -> None:
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='webhook_shadow_receipts'").fetchone() is not None:
-            con.execute(
-                "CREATE INDEX IF NOT EXISTS idx_webhook_shadow_delivery_page ON webhook_shadow_receipts(created_at DESC, delivery_id DESC)"
-            )
-            con.execute(
-                "CREATE INDEX IF NOT EXISTS idx_webhook_shadow_job_id ON webhook_shadow_receipts(job_id)"
-            )
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='webhook_hooks'").fetchone() is not None:
-            con.execute(
-                "CREATE INDEX IF NOT EXISTS idx_webhook_hooks_page ON webhook_hooks(updated_at DESC, hook_id DESC)"
-            )
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='mcp_tokens'").fetchone() is not None:
-            con.execute(
-                "CREATE INDEX IF NOT EXISTS idx_mcp_tokens_user ON mcp_tokens(user_login, revoked_at, created_at)"
-            )
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='quarantined_notifications'").fetchone() is not None:
-            con.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_quarantined_notifications_message_id ON quarantined_notifications(message_id) WHERE message_id IS NOT NULL AND message_id != ''"
-            )
-            con.execute(
-                "CREATE INDEX IF NOT EXISTS idx_quarantined_notifications_unresolved ON quarantined_notifications(resolved_at, created_at)"
-            )
-
-    def _backfill_webhook_hook_targets(self, con: sqlite3.Connection) -> None:
-        if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='webhook_hooks'").fetchone() is None:
-            return
-        columns = {row["name"] for row in con.execute("PRAGMA table_info(webhook_hooks)")}
-        if not {"hook_id", "target", "target_type", "github_api_url"} <= columns:
-            return
-        rows = con.execute(
-            "SELECT hook_id,target,target_type,github_api_url FROM webhook_hooks WHERE github_api_url IS NOT NULL"
-        ).fetchall()
-        for row in rows:
-            target = _webhook_hook_target_from_api_url(str(row["github_api_url"] or ""))
-            if target is None:
-                continue
-            target_name, target_type = target
-            if row["target"] == target_name and row["target_type"] == target_type:
-                continue
-            con.execute(
-                "UPDATE webhook_hooks SET target=?,target_type=? WHERE hook_id=?",
-                (target_name, target_type, row["hook_id"]),
-            )
-
-    def _row_to_job(self, row: sqlite3.Row | None) -> Job | None:
-        if row is None:
-            return None
-        return Job(id=row["id"], work_key=row["work_key"], repo=row["repo"], thread=row["thread"], status=row["status"], action=row["action"], work_intent=row["work_intent"], subject=row["subject"], message_id=row["message_id"], uid=row["uid"], trigger_actor=row["trigger_actor"], trigger_actor_avatar_url=row["trigger_actor_avatar_url"], context=GitHubContext.from_json(row["context_json"]), attempts=row["attempts"], coalesced_count=row["coalesced_count"], last_error=row["last_error"], locked_by=row["locked_by"], created_at=row["created_at"], updated_at=row["updated_at"], metadata=json.loads(row["metadata_json"] or "{}"))
+    @staticmethod
+    def _commit_status_feedback(
+        job_id: int,
+        status: str,
+        attempts: int,
+    ) -> tuple[str, str] | None:
+        if status == "pending":
+            if attempts:
+                return "pending", f"Agent retry scheduled (attempt {attempts + 1})"
+            return "pending", f"Agent queued (job #{job_id})"
+        if status == "running":
+            return "pending", f"Agent working (attempt {max(1, attempts)})"
+        if status == "done":
+            return "success", "Agent finished; follow-up available"
+        if status == "blocked":
+            return "error", "Agent blocked; attention required"
+        return None

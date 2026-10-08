@@ -2,6 +2,178 @@
 
 <!-- version list -->
 
+## v0.76.6 (2026-10-08)
+
+### Bug Fixes
+
+- Keep session stream alive during SQLite contention
+  ([`e045cc4`](https://github.com/gisce/github-agent-bridge/commit/e045cc4686a9edbf18aefafc1f72f7b295b41ec5))
+
+
+## v0.76.5 (2026-10-08)
+
+### Bug Fixes
+
+- Handle missing database during update planning
+  ([`9841f33`](https://github.com/gisce/github-agent-bridge/commit/9841f33d8861b5689d9871b6738a3b69fed7821a))
+
+- Require explicit SQLite migration preflight
+  ([`8d2769b`](https://github.com/gisce/github-agent-bridge/commit/8d2769bf71981c0bba0ef9158f7932d2f4689b10))
+
+- Retry transient SQLite reader contention
+  ([`15780c5`](https://github.com/gisce/github-agent-bridge/commit/15780c5075a40920b6ac03bf75dcf6b1951636b4))
+
+### Refactoring
+
+- Add explicit dashboard read model
+  ([`0eaae6c`](https://github.com/gisce/github-agent-bridge/commit/0eaae6cb15ce27104ec6183445324d2646e28d26))
+
+
+## v0.76.4 (2026-10-08)
+
+### Bug Fixes
+
+- Bound stream drain after cli exit
+  ([`2c090bb`](https://github.com/gisce/github-agent-bridge/commit/2c090bb889f70f2432e5e46c5bef72cde097188e))
+
+- Retry contended session activity writes
+  ([`7ed9ddb`](https://github.com/gisce/github-agent-bridge/commit/7ed9ddb4a419d3067def68a0d16e0dcf11fc91c5))
+
+
+## v0.76.3 (2026-10-08)
+
+### Bug Fixes
+
+- Avoid duplicate acknowledgement finalization
+  ([`51d02cd`](https://github.com/gisce/github-agent-bridge/commit/51d02cd06967b75275efe080e5af73eecc6aae96))
+
+
+## v0.76.2 (2026-10-08)
+
+### Bug Fixes
+
+- Release refactor commits as patches
+  ([`ff6bf83`](https://github.com/gisce/github-agent-bridge/commit/ff6bf83254267725d66a43a3903f4dc57c6fdff7))
+
+### Refactoring
+
+- Extract feedback repository
+  ([`867acbe`](https://github.com/gisce/github-agent-bridge/commit/867acbe943ee105f3de8c69581933afdcf7ca251))
+
+- Extract push and observability repositories
+  ([`1ce260a`](https://github.com/gisce/github-agent-bridge/commit/1ce260aa61ddee2aa9901b893d515ab5eeaa19ff))
+
+- Extract queue persistence repositories
+  ([`e9eacb5`](https://github.com/gisce/github-agent-bridge/commit/e9eacb5dad39930adb6bd70feeeee0efbfad546a))
+
+- Extract runtime repository
+  ([`46a6b11`](https://github.com/gisce/github-agent-bridge/commit/46a6b115390202ffb6baa3b9c336cf3bb441740d))
+
+- Extract webhook and MCP repositories
+  ([`5cc28c1`](https://github.com/gisce/github-agent-bridge/commit/5cc28c11be925377cd570e34af4014f149da09e2))
+
+
+## v0.76.1 (2026-10-07)
+
+### Bug Fixes
+
+- Allow quiet migration updates from dashboard
+  ([#276](https://github.com/gisce/github-agent-bridge/pull/276),
+  [`3e751de`](https://github.com/gisce/github-agent-bridge/commit/3e751de5de39881533b1ffe53d85eb6d7cb2be54))
+
+
+## v0.76.0 (2026-10-07)
+
+
+## v0.75.2 (2026-10-07)
+
+### Bug Fixes
+
+- Classify merged pull request notifications safely
+  ([`8afa7c7`](https://github.com/gisce/github-agent-bridge/commit/8afa7c73142b9c66275a8bf740ebf9ea08d76fd2))
+
+- Enforce actionable GitHub feedback
+  ([`0c5f970`](https://github.com/gisce/github-agent-bridge/commit/0c5f970503556d4dcecce384f54cde27b0ac1fb5))
+
+- Preserve actionable PR review semantics
+  ([`b01e0a4`](https://github.com/gisce/github-agent-bridge/commit/b01e0a4ce7b361c4a5b6b37100e736213928b39c))
+
+### Refactoring
+
+- Extract acknowledgement and state repositories
+  ([`244a224`](https://github.com/gisce/github-agent-bridge/commit/244a2244a216d6fc5b7f876ce2263552fd1a8a5f))
+
+
+## v0.75.1 (2026-10-07)
+
+### Bug Fixes
+
+- Bound acknowledgement retries before GitHub effects
+  ([`e5481dd`](https://github.com/gisce/github-agent-bridge/commit/e5481dd7e02a9379f14a4daf220b4076a89b1a93))
+
+- Retry transient SQLite executor contention
+  ([`170ccdf`](https://github.com/gisce/github-agent-bridge/commit/170ccdf0c0d30f40f68db57324d0f195fdc8c909))
+
+
+## v0.75.0 (2026-10-07)
+
+### Bug Fixes
+
+- Allow updates with paused pending jobs
+  ([`4fc3cdc`](https://github.com/gisce/github-agent-bridge/commit/4fc3cdc9be56e291428ddbda49b40c581447e221))
+
+- Serialize concurrent SQLite migrations
+  ([`e2cb119`](https://github.com/gisce/github-agent-bridge/commit/e2cb119f114b41d30634f5e94e2e5867cd29619d))
+
+### Features
+
+- Add SQLite persistence foundation
+  ([`b09023a`](https://github.com/gisce/github-agent-bridge/commit/b09023abf8fceb2607f00b0a4515fcc8733ca5fe))
+
+
+## v0.74.0 (2026-10-07)
+
+### Features
+
+- Add versioned SQLite migrations
+  ([`4256c41`](https://github.com/gisce/github-agent-bridge/commit/4256c413ade386630a448c5484fb9dff109cbce8))
+
+
+## v0.73.2 (2026-10-07)
+
+### Bug Fixes
+
+- Handle webhook assignment events
+  ([`3315f6f`](https://github.com/gisce/github-agent-bridge/commit/3315f6f8b080384b6dc4b738d41eedc5f643c087))
+
+
+## v0.73.1 (2026-10-07)
+
+### Bug Fixes
+
+- Back off repeated IMAP abort retries
+  ([`1e09b20`](https://github.com/gisce/github-agent-bridge/commit/1e09b2085a3f2db801c3d807e1a5e139fe8ab568))
+
+
+## v0.73.0 (2026-10-06)
+
+### Bug Fixes
+
+- Keep status pause inspection read-only
+  ([`cdd3b64`](https://github.com/gisce/github-agent-bridge/commit/cdd3b6471e0acda8959c49666369969bfced29ee))
+
+- Serialize executor pause with job claims
+  ([`4ba0af6`](https://github.com/gisce/github-agent-bridge/commit/4ba0af6ebdbc0d5fa57011fbade43165e7393edf))
+
+### Features
+
+- Add executor pause mode
+  ([`aba36b4`](https://github.com/gisce/github-agent-bridge/commit/aba36b41af088f7c36b11aa586149bc92ec6f677))
+
+- Control executor pause from system dashboard
+  ([`645f3ee`](https://github.com/gisce/github-agent-bridge/commit/645f3ee870fbaabe317a0d051c3673cc6bafe412))
+
+
 ## v0.72.0 (2026-10-06)
 
 ### Features
