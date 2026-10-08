@@ -3,14 +3,13 @@ from __future__ import annotations
 import json
 import os
 import re
-import sqlite3
 import subprocess
-from dataclasses import dataclass
 from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
 
-from .models import GitHubContext, Notification
+from .models import GitHubContext, Notification, TriggerActor
+from .persistence import ActorBackfillRepository, ActorBackfillUpdate, Database
 
 LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?(?:\[bot\])?$")
 ISSUE_EVENT_URL_RE = re.compile(
@@ -21,13 +20,6 @@ RESERVED_SENDERS = {"github", "notifications"}
 
 def default_gh_bin() -> str:
     return os.getenv("GITHUB_AGENT_BRIDGE_GH_BIN", "gh")
-
-
-@dataclass(frozen=True)
-class TriggerActor:
-    login: str
-    avatar_url: str | None = None
-    user_id: int | None = None
 
 
 def normalize_github_login(value: str | None) -> str | None:
@@ -150,87 +142,53 @@ def backfill_trigger_actors(db: str | Path, *, gh_bin: str | None = None, limit:
     path = Path(db).expanduser()
     if not path.exists():
         return {"db_exists": False, "checked": 0, "updated": 0, "missing": 0, "dry_run": dry_run}
-    con = sqlite3.connect(path)
-    con.row_factory = sqlite3.Row
-    try:
-        jobs_table = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone()
-        if jobs_table is None:
-            return {"db_exists": True, "checked": 0, "updated": 0, "missing": 0, "dry_run": dry_run, "updates": []}
-        has_actor_column = _has_column(con, "jobs", "trigger_actor")
-        has_avatar_column = _has_column(con, "jobs", "trigger_actor_avatar_url")
-        if not dry_run:
-            _ensure_trigger_actor_columns(con)
-            has_actor_column = has_avatar_column = True
-        conditions = []
-        if has_actor_column:
-            conditions.append("(trigger_actor IS NULL OR trigger_actor='')")
-        if has_avatar_column:
-            conditions.append("(trigger_actor_avatar_url IS NULL OR trigger_actor_avatar_url='')")
-        where = f"WHERE {' OR '.join(conditions)}" if conditions else ""
-        select_columns = "id, context_json"
-        if has_actor_column:
-            select_columns += ", trigger_actor"
-        if has_avatar_column:
-            select_columns += ", trigger_actor_avatar_url"
-        rows = con.execute(
-            f"""
-            SELECT {select_columns}
-            FROM jobs
-            {where}
-            ORDER BY id
-            LIMIT ?
-            """,
-            (max(1, limit or 1000000),),
-        ).fetchall()
-        checked = updated = missing = 0
-        updates: list[dict[str, Any]] = []
-        for row in rows:
-            checked += 1
-            try:
-                ctx = GitHubContext.from_json(row["context_json"])
-            except (TypeError, json.JSONDecodeError):
-                missing += 1
-                continue
-            existing_actor = normalize_github_login(row["trigger_actor"]) if has_actor_column else None
-            actor = (
-                TriggerActor(login=existing_actor, avatar_url=github_avatar_url(existing_actor))
-                if existing_actor and (not has_avatar_column or not row["trigger_actor_avatar_url"])
-                else github_actor_details_for_context(ctx, gh_bin=gh_bin)
-            )
-            if not actor:
-                missing += 1
-                continue
-            updates.append({"job_id": int(row["id"]), "trigger_actor": actor.login, "trigger_actor_avatar_url": actor.avatar_url})
-            updated += 1
-            if not dry_run:
-                con.execute(
-                    "UPDATE jobs SET trigger_actor=?, trigger_actor_avatar_url=? WHERE id=?",
-                    (actor.login, actor.avatar_url, row["id"]),
-                )
-        if not dry_run:
-            con.commit()
-        return {"db_exists": True, "checked": checked, "updated": updated, "missing": missing, "dry_run": dry_run, "updates": updates}
-    finally:
-        con.close()
-
-
-def _has_column(con: sqlite3.Connection, table: str, column: str) -> bool:
-    exists = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
-    if exists is None:
-        return False
-    return column in {row["name"] for row in con.execute(f"PRAGMA table_info({table})")}
-
-
-def _ensure_trigger_actor_columns(con: sqlite3.Connection) -> None:
-    tables = {
-        "jobs": {"trigger_actor": "TEXT", "trigger_actor_avatar_url": "TEXT"},
-        "coalesced_notifications": {"trigger_actor": "TEXT", "trigger_actor_avatar_url": "TEXT"},
-    }
-    for table, columns in tables.items():
-        exists = con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
-        if exists is None:
+    repository = ActorBackfillRepository(Database(path))
+    if not dry_run:
+        repository.validate_current_schema()
+    rows = repository.list_candidates(limit)
+    checked = updated = missing = 0
+    persisted_updates: list[ActorBackfillUpdate] = []
+    updates: list[dict[str, Any]] = []
+    for row in rows:
+        checked += 1
+        try:
+            ctx = GitHubContext.from_json(row.context_json)
+        except (TypeError, json.JSONDecodeError):
+            missing += 1
             continue
-        existing = {row["name"] for row in con.execute(f"PRAGMA table_info({table})")}
-        for column, definition in columns.items():
-            if column not in existing:
-                con.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        existing_actor = normalize_github_login(row.trigger_actor)
+        actor = (
+            TriggerActor(
+                login=existing_actor,
+                avatar_url=github_avatar_url(existing_actor),
+            )
+            if existing_actor and not row.trigger_actor_avatar_url
+            else github_actor_details_for_context(ctx, gh_bin=gh_bin)
+        )
+        if not actor:
+            missing += 1
+            continue
+        update = ActorBackfillUpdate(
+            job_id=row.job_id,
+            trigger_actor=actor.login,
+            trigger_actor_avatar_url=actor.avatar_url,
+        )
+        persisted_updates.append(update)
+        updates.append(
+            {
+                "job_id": update.job_id,
+                "trigger_actor": update.trigger_actor,
+                "trigger_actor_avatar_url": update.trigger_actor_avatar_url,
+            }
+        )
+        updated += 1
+    if not dry_run:
+        repository.apply_updates(persisted_updates)
+    return {
+        "db_exists": True,
+        "checked": checked,
+        "updated": updated,
+        "missing": missing,
+        "dry_run": dry_run,
+        "updates": updates,
+    }

@@ -11,6 +11,19 @@ from typing import Callable, Sequence
 
 
 MIGRATION_FILENAME = re.compile(r"^v(?P<version>[0-9]{4})_[a-z0-9_]+\.py$")
+SCHEMA_PACKAGE = "github_agent_bridge.sql"
+
+
+def load_schema() -> str:
+    """Read the packaged rolling schema snapshot."""
+    return (
+        resources.files(SCHEMA_PACKAGE)
+        .joinpath("schema.sql")
+        .read_text(encoding="utf-8")
+    )
+
+
+SCHEMA = load_schema()
 
 
 class MigrationError(RuntimeError):
@@ -200,3 +213,26 @@ def apply_migrations(
             if pending is None:
                 return tuple(completed)
             completed.append(pending.version)
+
+
+def initialize_database(con: sqlite3.Connection) -> None:
+    """Initialize a fresh database or explicitly migrate an existing one."""
+    history_exists = con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+    ).fetchone()
+    baseline_applied = bool(
+        history_exists
+        and con.execute(
+            "SELECT 1 FROM schema_migrations WHERE version=1"
+        ).fetchone()
+    )
+    if baseline_applied:
+        # Validate/apply immutable steps before the rolling schema snapshot can
+        # touch a database created by this or a newer package version.
+        apply_migrations(con)
+        con.executescript(SCHEMA)
+    else:
+        # Legacy or incomplete histories need the snapshot to create missing
+        # tables before the baseline migration can perform its backfills.
+        con.executescript(SCHEMA)
+        apply_migrations(con)

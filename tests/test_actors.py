@@ -4,6 +4,8 @@ import json
 import sqlite3
 import subprocess
 
+import pytest
+
 from github_agent_bridge.actors import (
     actor_details_from_github_payload,
     actor_endpoint,
@@ -16,6 +18,7 @@ from github_agent_bridge.actors import (
 from github_agent_bridge.models import GitHubContext, Notification
 from github_agent_bridge.policy import Policy
 from github_agent_bridge.queue import JobQueue
+from github_agent_bridge.sql.migrations import MigrationRequiredError
 
 
 def test_trigger_actor_from_notification_uses_github_sender_login():
@@ -166,6 +169,23 @@ def test_backfill_dry_run_does_not_migrate_legacy_schema(tmp_path, monkeypatch):
     assert result["updates"][0]["trigger_actor_avatar_url"] == "https://github.com/ecarreras.png?size=80"
     assert "trigger_actor" not in columns
     assert "trigger_actor_avatar_url" not in columns
+
+
+def test_backfill_write_requires_migrated_schema(tmp_path):
+    db = tmp_path / "legacy.sqlite3"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE jobs (id INTEGER PRIMARY KEY, context_json TEXT NOT NULL)")
+    con.execute("INSERT INTO jobs(id, context_json) VALUES(1, '{}')")
+    con.commit()
+    con.close()
+
+    with pytest.raises(MigrationRequiredError, match="run `gab migrate-db`"):
+        backfill_trigger_actors(db)
+
+    con = sqlite3.connect(db)
+    columns = {row[1] for row in con.execute("PRAGMA table_info(jobs)")}
+    con.close()
+    assert columns == {"id", "context_json"}
 
 
 def test_backfill_trigger_actors_fills_missing_avatar_without_api(tmp_path, monkeypatch):
