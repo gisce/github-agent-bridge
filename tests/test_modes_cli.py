@@ -386,6 +386,126 @@ def test_live_dispatch_streams_openclaw_output_to_activity_callback(tmp_path):
     assert processes[0]["start_time_ticks"] > 0
 
 
+def test_live_dispatch_propagates_activity_callback_failure(tmp_path):
+    openclaw = tmp_path / "openclaw"
+    openclaw.write_text(
+        "#!/bin/sh\n"
+        "printf 'thinking line\\n'\n"
+        "printf 'final line\\n'\n",
+        encoding="utf-8",
+    )
+    openclaw.chmod(0o755)
+
+    def fail_activity_callback(event_type, summary, detail):
+        raise RuntimeError("activity persistence failed")
+
+    dispatcher = OpenClawDispatcher(
+        openclaw_bin=str(openclaw), mode=RunMode.LIVE, cli_grace_seconds=1
+    )
+    with pytest.raises(RuntimeError, match="activity persistence failed"):
+        dispatcher.dispatch(
+            make_job(),
+            Policy(trusted_orgs={"gisce"}),
+            reaction_ok=True,
+            activity_callback=fail_activity_callback,
+        )
+
+
+def test_live_dispatch_drains_process_while_activity_callback_is_blocked(
+    tmp_path, monkeypatch
+):
+    done = tmp_path / "done"
+    openclaw = tmp_path / "openclaw"
+    openclaw.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os\n"
+        "import pathlib\n"
+        "import sys\n"
+        "sys.stdout.write('first chunk\\n')\n"
+        "sys.stdout.flush()\n"
+        "sys.stdout.write('x' * 1048576)\n"
+        "sys.stdout.flush()\n"
+        "pathlib.Path(os.environ['DONE_FILE']).write_text('done', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    openclaw.chmod(0o755)
+    monkeypatch.setenv("DONE_FILE", str(done))
+    callback_started = threading.Event()
+    release_callback = threading.Event()
+    results = []
+    errors = []
+
+    def block_first_activity(event_type, summary, detail):
+        if not callback_started.is_set():
+            callback_started.set()
+            assert release_callback.wait(timeout=2)
+
+    dispatcher = OpenClawDispatcher(
+        openclaw_bin=str(openclaw), mode=RunMode.LIVE, cli_grace_seconds=1
+    )
+
+    def dispatch():
+        try:
+            results.append(
+                dispatcher.dispatch(
+                    make_job(),
+                    Policy(trusted_orgs={"gisce"}),
+                    reaction_ok=True,
+                    activity_callback=block_first_activity,
+                )
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=dispatch)
+    thread.start()
+    try:
+        assert callback_started.wait(timeout=1)
+        deadline = time.monotonic() + 1
+        while not done.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert done.exists() is True
+    finally:
+        release_callback.set()
+        thread.join(timeout=2)
+
+    assert thread.is_alive() is False
+    assert errors == []
+    assert len(results) == 1
+    assert results[0].ok is True
+
+
+def test_live_dispatch_bounds_pipe_drain_when_descendant_inherits_streams(tmp_path):
+    openclaw = tmp_path / "openclaw"
+    openclaw.write_text(
+        "#!/usr/bin/env python3\n"
+        "import subprocess\n"
+        "import sys\n"
+        "subprocess.Popen([\n"
+        "    sys.executable,\n"
+        "    '-c',\n"
+        "    'import time; "
+        "[(time.sleep(0.1), print(\"child\", flush=True)) for _ in range(50)]',\n"
+        "])\n"
+        "print('parent complete', flush=True)\n",
+        encoding="utf-8",
+    )
+    openclaw.chmod(0o755)
+    dispatcher = OpenClawDispatcher(
+        openclaw_bin=str(openclaw), mode=RunMode.LIVE, cli_grace_seconds=0.1
+    )
+
+    started = time.monotonic()
+    result = dispatcher.dispatch(
+        make_job(), Policy(trusted_orgs={"gisce"}), reaction_ok=True
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.ok is True
+    assert "parent complete" in result.stdout
+    assert elapsed < 3
+
+
 def test_live_dispatch_streams_partial_openclaw_output_before_process_exits(tmp_path, monkeypatch):
     done = tmp_path / "done"
     openclaw = tmp_path / "openclaw"
