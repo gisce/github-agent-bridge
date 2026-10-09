@@ -4,10 +4,12 @@ import json
 import os
 import re
 import subprocess
+import threading
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
-from .feedback import _extract_json_object, _openclaw_text_from_json, compact, load_prompt_rule, session_id_for_event
+from .feedback import _extract_json_object, compact, load_prompt_rule, session_id_for_event
 from .models import GitHubContext, Notification
 from .parser import github_event_flags
 from .policy import DEFAULT_BOT_LOGINS, IntentClassifier, Policy
@@ -25,6 +27,9 @@ ALLOWED_WRITE_PERMISSIONS = {"none", "state_change_allowed"}
 ALLOWED_COMPLEXITIES = {"mechanical", "substantive"}
 INTENT_CLASSIFIER_PROMPT = load_prompt_rule("intent_classifier.md")
 COMMENT_TARGET_KINDS = {"issue_comment", "review_comment", "commit_comment", "review"}
+INTENT_CLASSIFIER_CONCURRENCY = 2
+INTENT_CLASSIFIER_ATTEMPTS = 2
+_INTENT_CLASSIFIER_SEMAPHORE = threading.BoundedSemaphore(INTENT_CLASSIFIER_CONCURRENCY)
 GITHUB_EMAIL_FOOTER_RE = re.compile(
     r"(?:\n\s*--\s*)?\n\s*Reply to this email directly or view it on GitHub:.*$",
     re.IGNORECASE | re.DOTALL,
@@ -73,6 +78,89 @@ class IntentClassification:
         if self.subordinate_reason:
             metadata["subordinate_reason"] = self.subordinate_reason
         return metadata
+
+
+def _text_from_model_run_json(raw: str) -> str:
+    data = json.loads(raw)
+    if isinstance(data, str):
+        return data
+    if not isinstance(data, dict):
+        return raw
+    candidates = [
+        data.get("text"),
+        data.get("output_text"),
+        data.get("output"),
+        data.get("content"),
+        data.get("message"),
+        data.get("response"),
+    ]
+    outputs = data.get("outputs")
+    if isinstance(outputs, list):
+        for output in outputs:
+            if isinstance(output, dict):
+                candidates.append(output.get("text"))
+                candidates.append(output.get("content"))
+    result = data.get("result")
+    if isinstance(result, dict):
+        candidates.extend(
+            [
+                result.get("text"),
+                result.get("output_text"),
+                result.get("output"),
+                result.get("content"),
+                result.get("message"),
+                result.get("response"),
+            ]
+        )
+        outputs = result.get("outputs")
+        if isinstance(outputs, list):
+            for output in outputs:
+                if isinstance(output, dict):
+                    candidates.append(output.get("text"))
+                    candidates.append(output.get("content"))
+        payloads = result.get("payloads")
+        if isinstance(payloads, list):
+            for payload in payloads:
+                if isinstance(payload, dict):
+                    candidates.append(payload.get("text"))
+                    candidates.append(payload.get("content"))
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return raw
+
+
+@lru_cache(maxsize=8)
+def assert_openclaw_model_run_supported(openclaw_bin: str) -> None:
+    try:
+        proc = subprocess.run(
+            [openclaw_bin, "infer", "model", "run", "--help"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        detail = compact(str(exc), 300)
+        raise RuntimeError(
+            f"OpenClaw CLI does not support required tool-less model run contract: {detail}"
+        )
+
+    output = proc.stdout + proc.stderr
+    required = (
+        "Usage: openclaw infer model run",
+        "--local",
+        "--prompt",
+        "--json",
+        "--model",
+        "--thinking",
+    )
+    if proc.returncode != 0 or not all(token in output for token in required):
+        detail = compact(output.strip() or f"openclaw exited {proc.returncode}", 300)
+        raise RuntimeError(
+            f"OpenClaw CLI does not support required tool-less model run contract: {detail}"
+        )
 
 
 def should_classify_with_llm(
@@ -215,47 +303,57 @@ def classify_notification_with_llm(
     agent: str | None = None,
     prompt_template: str | None = None,
 ) -> IntentClassification:
+    assert_openclaw_model_run_supported(cfg.openclaw_bin)
+    prompt = build_intent_prompt(n, ctx, parser_result, prompt_template, policy=policy, agent=agent)
     cmd = [
         cfg.openclaw_bin,
-        "agent",
+        "infer",
+        "model",
+        "run",
         "--local",
         "--json",
-        "--session-id",
-        intent_session_id(cfg.session_id, n, ctx, agent),
-        "--timeout",
-        str(cfg.timeout),
+        "--prompt",
+        prompt,
         "--thinking",
         cfg.thinking,
-        "--message",
-        build_intent_prompt(n, ctx, parser_result, prompt_template, policy=policy, agent=agent),
     ]
-    if agent:
-        cmd.extend(["--agent", agent])
     if cfg.model:
         cmd.extend(["--model", cfg.model])
     env = os.environ.copy()
     openclaw_dir = os.path.dirname(cfg.openclaw_bin)
     if openclaw_dir:
         env["PATH"] = openclaw_dir + os.pathsep + env.get("PATH", "")
-    try:
-        proc = subprocess.run(
-            cmd,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            timeout=cfg.timeout + 30,
-            env=env,
-        )
-    except subprocess.TimeoutExpired as exc:
-        # TimeoutExpired.__str__ contains the complete command and prompt, so
-        # metadata truncation hides the useful part of the failure.
-        detail = exc.stderr or exc.stdout or ""
-        if isinstance(detail, bytes):
-            detail = detail.decode(errors="replace")
-        suffix = f": {compact(detail, 300)}" if detail.strip() else ""
-        raise RuntimeError(f"intent classifier timed out after {cfg.timeout + 30}s{suffix}") from exc
-    if proc.returncode != 0:
-        raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"openclaw exited {proc.returncode}")
-    text = _openclaw_text_from_json(proc.stdout)
-    return normalize_result(_extract_json_object(text), cfg.min_confidence)
+    errors: list[str] = []
+    with _INTENT_CLASSIFIER_SEMAPHORE:
+        for attempt in range(1, INTENT_CLASSIFIER_ATTEMPTS + 1):
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    check=False,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=cfg.timeout + 30,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired as exc:
+                # TimeoutExpired.__str__ contains the complete command and prompt, so
+                # metadata truncation hides the useful part of the failure.
+                detail = exc.stderr or exc.stdout or ""
+                if isinstance(detail, bytes):
+                    detail = detail.decode(errors="replace")
+                suffix = f": {compact(detail, 300)}" if detail.strip() else ""
+                errors.append(f"attempt {attempt}: timed out after {cfg.timeout + 30}s{suffix}")
+                continue
+            if proc.returncode != 0:
+                errors.append(
+                    f"attempt {attempt}: "
+                    + compact(proc.stderr.strip() or proc.stdout.strip() or f"openclaw exited {proc.returncode}", 300)
+                )
+                continue
+            try:
+                text = _text_from_model_run_json(proc.stdout)
+                return normalize_result(_extract_json_object(text), cfg.min_confidence)
+            except Exception as exc:
+                errors.append(f"attempt {attempt}: {compact(str(exc), 300)}")
+    raise RuntimeError("intent classifier failed after retries: " + " | ".join(errors))

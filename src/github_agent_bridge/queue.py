@@ -22,7 +22,7 @@ from .persistence import (
 from .policy import Policy
 from . import feedback
 from .actors import trigger_actor_details_for_enqueue, trigger_actor_details_from_notification
-from .intent_classifier import ParserResult, classify_notification_with_llm, should_classify_with_llm
+from .intent_classifier import COMMENT_TARGET_KINDS, ParserResult, classify_notification_with_llm, should_classify_with_llm
 from .sql.migrations import SCHEMA, initialize_database, validate_migrations
 
 
@@ -145,6 +145,12 @@ class JobQueue:
         if bot_authored_changes_requested:
             intent = "work_allowed"
         parser_result = ParserResult(action, intent)
+        classifier_required = (
+            source == "webhook"
+            and ctx.target_kind in COMMENT_TARGET_KINDS
+            and policy.trusted_source(n, ctx)
+        )
+        classifier_applied = False
         if should_classify_with_llm(n, ctx, parser_result, policy):
             metadata["intent_classifier"] = {
                 "parser": {"action": action, "work_intent": intent},
@@ -172,6 +178,7 @@ class JobQueue:
                 if llm_result.applied:
                     action = llm_result.action
                     intent = llm_result.work_intent
+                    classifier_applied = True
             except Exception as exc:
                 metadata["intent_classifier"] = {
                     **metadata["intent_classifier"],
@@ -185,6 +192,14 @@ class JobQueue:
             metadata["intent_guardrail"] = (
                 "bot_authored_pr_changes_requested_work_allowed"
             )
+        elif (
+            classifier_required
+            and feedback_actionability != "pr_authored_by_bot"
+            and not classifier_applied
+            and intent == "work_allowed"
+        ):
+            intent = "review_only"
+            metadata["intent_guardrail"] = "webhook_classifier_required_read_only"
         if action == "submit_review":
             intent = "review_only"
             metadata["intent_guardrail"] = "submit_review_read_only"

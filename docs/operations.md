@@ -79,10 +79,16 @@ count. Otherwise four busy workers can fill a four-slot OpenClaw queue and
 starve other gateway work.
 
 The enqueue-time intent classifier is deliberately different: the bridge calls
-`openclaw agent --local` for an isolated one-shot classification. This keeps the
-reader independent from gateway queue saturation, event-loop stalls, and
-gateway SQLite lock contention. Classifier calls are sequential in the reader,
-so they do not add another pool of concurrent bridge jobs.
+`openclaw infer model run --local --prompt --json` for a one-shot raw model
+classification. This avoids both the long-lived Gateway session path and the
+`agent exec` coding-agent tool surface for the permission decision. The OpenClaw
+CLI on classifier hosts must expose `openclaw infer model run` with `--local`,
+`--prompt`, `--json`, `--model`, and `--thinking`; the bridge checks that
+contract before invoking the classifier. The raw model inference path does not
+load repository tools, bundled MCP servers, or session transcript. The bridge
+limits classifier subprocess concurrency, retries once, and treats webhook
+comment/review classifier failure as `review_only`, so a classifier outage or
+unsupported CLI cannot elevate webhook work to `work_allowed`.
 
 For the standard four-worker deployment, use eight OpenClaw slots:
 
