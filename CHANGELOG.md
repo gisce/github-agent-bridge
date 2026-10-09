@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.76.9 (2026-10-09)
+
+### Bug Fixes
+
+- Fail closed when autoupdate release diff is unavailable
+  ([`54609b0`](https://github.com/gisce/github-agent-bridge/commit/54609b00dcf65711f69a8882cd3da7db38db54ab))
+
+
 ## v0.76.8 (2026-10-09)
 
 ### Performance Improvements
