@@ -11,6 +11,7 @@ A compact map of the `github-agent-bridge` documentation set.
 | Understand system design | [`architecture.md`](architecture.md) | Explanation |
 | Understand SQLite connection and transaction boundaries | [`persistence.md`](persistence.md) | Reference |
 | Understand event identity and transport migration | [`ingestion.md`](ingestion.md) | Explanation |
+| Understand SLO metric definitions | [`slo.md`](slo.md) | Reference |
 | Configure policy | [`policy-reference.md`](policy-reference.md) | Reference |
 | Roll out safely | [`shadow-canary.md`](shadow-canary.md) | How-to |
 | Operate production | [`operations.md`](operations.md) | How-to |

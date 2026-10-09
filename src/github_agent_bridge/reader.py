@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import email
 import imaplib
+import re
 import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import TypeVar
 
-from .models import Notification
+from .models import Notification, utc_now
 from .parser import decode_header_value, extract_body_text, is_github_notification_message, parse_auth_results
 from .policy import Policy
 from .queue import JobQueue
@@ -16,6 +18,26 @@ from .queue import JobQueue
 
 T = TypeVar("T")
 SQLITE_CONTENTION_RETRY_DELAYS = (1.0, 2.0)
+INTERNALDATE_PATTERN = re.compile(rb'INTERNALDATE "(?P<value>[^"]+)"')
+
+
+def imap_internaldate_utc(fetch_metadata: object) -> str | None:
+    """Normalize an IMAP INTERNALDATE response fragment to UTC."""
+    if not isinstance(fetch_metadata, bytes):
+        return None
+    match = INTERNALDATE_PATTERN.search(fetch_metadata)
+    if match is None:
+        return None
+    try:
+        parsed = datetime.strptime(
+            match.group("value").decode("ascii"),
+            "%d-%b-%Y %H:%M:%S %z",
+        )
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return parsed.astimezone(UTC).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 def _is_sqlite_contention_error(exc: sqlite3.OperationalError) -> bool:
@@ -99,7 +121,7 @@ class ImapReader:
                 return 0
             uids = sorted(int(x) for x in data[0].split() if int(x) > last_uid)
             for uid in uids:
-                st, msgd = imap.uid("fetch", str(uid), "(RFC822)")
+                st, msgd = imap.uid("fetch", str(uid), "(RFC822 INTERNALDATE)")
                 if st != "OK" or not msgd or not msgd[0]:
                     break
                 msg = email.message_from_bytes(msgd[0][1])
@@ -107,7 +129,17 @@ class ImapReader:
                 subject = decode_header_value(msg.get("Subject", ""))
                 message_id = decode_header_value(msg.get("Message-ID", ""))
                 if is_github_notification_message(msg, from_addr):
-                    n = Notification(uid=uid, message_id=message_id, subject=subject, from_addr=from_addr, body=extract_body_text(msg), auth=parse_auth_results(msg))
+                    source_received_at = imap_internaldate_utc(msgd[0][0])
+                    n = Notification(
+                        uid=uid,
+                        message_id=message_id,
+                        subject=subject,
+                        from_addr=from_addr,
+                        body=extract_body_text(msg),
+                        received_at=source_received_at or utc_now(),
+                        source_received_at=source_received_at,
+                        auth=parse_auth_results(msg),
+                    )
                     try:
                         _retry_sqlite_contention(
                             lambda: self.queue.ingest(

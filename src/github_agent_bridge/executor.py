@@ -303,6 +303,8 @@ class ExecutorPool:
                         "done",
                         "stale work event for merged pull request; skipped dispatch",
                         job.context.short_url,
+                        terminal_outcome="no_op",
+                        outcome_reason="stale_merged_pull_request",
                     )
                     return True
             assigned_to_bot = self.github.is_assigned_to_current_user(job.context)
@@ -312,7 +314,14 @@ class ExecutorPool:
                 ack_ok = self.github.react_ack_no_comment(job.context)
                 summary = "non-actionable review; skipped dispatch"
                 detail = f"eyes={reaction_ok} ack={ack_ok}"
-                self._finish(job, "done", summary, detail)
+                self._finish(
+                    job,
+                    "done",
+                    summary,
+                    detail,
+                    terminal_outcome="no_op",
+                    outcome_reason="non_actionable_review",
+                )
                 return True
             feedback_target = any((
                 job.context.comment_id,
@@ -339,7 +348,14 @@ class ExecutorPool:
                     summary,
                     detail,
                 )
-                self._finish(job, "done", summary, detail)
+                self._finish(
+                    job,
+                    "done",
+                    summary,
+                    detail,
+                    terminal_outcome="no_op",
+                    outcome_reason="non_actionable_feedback",
+                )
                 return True
             if job.action == "reply_comment" and job.work_intent == "review_only" and (assigned_to_bot or authored_by_bot):
                 reason = "PR/issue assigned to authenticated bot" if assigned_to_bot else "PR authored by authenticated bot"
@@ -400,7 +416,20 @@ class ExecutorPool:
                     return True
                 summary = "👀 reaction ok + agent dispatch queued" if reaction_ok else "agent dispatch queued; reaction failed or unavailable"
                 detail = f"followup_url={followup_url}; {result.detail}" if followup_url else result.detail
-                self._finish(job, "done", summary, detail, notify_completion=True, followup_url=followup_url)
+                self._finish(
+                    job,
+                    "done",
+                    summary,
+                    detail,
+                    notify_completion=True,
+                    followup_url=followup_url,
+                    terminal_outcome="no_op" if missing_followup_ok else "completed",
+                    outcome_reason=(
+                        "duplicate_followup"
+                        if missing_followup_ok
+                        else "agent_completed"
+                    ),
+                )
             else:
                 reason = (
                     "executor shutdown interrupted dispatch"
@@ -447,8 +476,17 @@ class ExecutorPool:
         *,
         notify_completion: bool = False,
         followup_url: str | None = None,
+        terminal_outcome: str | None = None,
+        outcome_reason: str | None = None,
     ) -> None:
-        self.queue.finish(job.id, status, summary, detail)
+        self.queue.finish(
+            job.id,
+            status,
+            summary,
+            detail,
+            terminal_outcome=terminal_outcome,
+            outcome_reason=outcome_reason,
+        )
         self._wake_commit_status_publisher()
         if not notify_completion:
             return

@@ -125,7 +125,10 @@ class JobQueue:
             message_id=n.message_id,
         )
         intent = classify_work_intent(n.subject, n.body, policy.bot_logins)
-        metadata: dict[str, object] = {"received_at": n.received_at}
+        metadata: dict[str, object] = {
+            "received_at": n.received_at,
+            "source_received_at": n.source_received_at,
+        }
         feedback_actionability = str(n.metadata.get("feedback_actionability") or "")
         structured_feedback = feedback_actionability in {
             "mentioned",
@@ -340,9 +343,25 @@ class JobQueue:
     def mark_runtime_process_exited(self, job_id: int, worker_id: str) -> bool:
         return self.runtime.mark_process_exited(job_id, worker_id)
 
-    def finish(self, job_id: int, status: str, summary: str, detail: str | None = None) -> None:
+    def finish(
+        self,
+        job_id: int,
+        status: str,
+        summary: str,
+        detail: str | None = None,
+        *,
+        terminal_outcome: str | None = None,
+        outcome_reason: str | None = None,
+    ) -> None:
         self._ensure_initialized()
-        self.jobs.finish(job_id, status, summary, detail)
+        self.jobs.finish(
+            job_id,
+            status,
+            summary,
+            detail,
+            terminal_outcome=terminal_outcome,
+            outcome_reason=outcome_reason,
+        )
 
     def request_cancel_running(
         self,

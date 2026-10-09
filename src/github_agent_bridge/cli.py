@@ -87,13 +87,15 @@ def notification_from_comment_url(url: str, gh_bin: str = "gh", message_id_prefi
     subject_kind = "PR" if "pull_request" in issue else "Issue"
     subject = f"Re: [{repo}] {issue.get('title') or subject_kind} ({subject_kind} #{issue_number})"
     user = comment.get("user") if isinstance(comment.get("user"), dict) else {}
+    source_received_at = str(comment.get("created_at") or utc_now())
     return Notification(
         uid=None,
         message_id=f"<{message_id_prefix}/{repo}/issues/{issue_number}/c{comment_id}@github.com>",
         subject=subject,
         from_addr=f"{user.get('login') or 'GitHub'} <notifications@github.com>",
         body=body,
-        received_at=utc_now(),
+        received_at=source_received_at,
+        source_received_at=source_received_at,
         auth={"spf": True, "dkim": True, "dmarc": True},
     )
 

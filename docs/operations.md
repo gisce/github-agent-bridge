@@ -559,6 +559,11 @@ samples exist, and falls back to the live executor snapshot otherwise.
 
 ### Run history and runtime accounting
 
+The SLO data contract, including cohorts, clocks, denominators, and missing-data
+rules, is documented in [`slo.md`](slo.md). The queue persists the source clock
+and structured terminal outcome independently of agent prose so later summary
+and alerting queries do not need to infer semantics from text.
+
 Every successful queue claim creates a `job_runs` row with its own attempt,
 worker, OpenClaw session id, and start time. Every transition out of `running`
 closes that run with a finish time and a `done`, `blocked`, `requeued`, or

@@ -162,8 +162,10 @@ def webhook_notification(
     payload: dict[str, Any],
     *,
     bot_logins: set[str] | None = None,
+    received_at: str | None = None,
 ) -> Notification | None:
     """Translate actionable webhook payloads into the transport-neutral queue input."""
+    received_at = received_at or utc_now()
     action = str(payload.get("action") or "")
     if (event_name, action) not in {
         ("issue_comment", "created"),
@@ -261,6 +263,8 @@ def webhook_notification(
         subject=f"[{repo}] {title}{suffix}",
         from_addr=f"{login} <notifications@github.com>",
         body=f"{body}\n\n{url}",
+        received_at=received_at,
+        source_received_at=received_at,
         auth={"spf": True, "dkim": True, "dmarc": True},
         metadata={
             "github_event": event_name,

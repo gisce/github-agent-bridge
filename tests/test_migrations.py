@@ -136,3 +136,56 @@ def test_query_plan_index_migration_upgrades_existing_database(tmp_path):
             )
         }
     assert expected <= indexes
+
+
+def test_slo_instrumentation_migration_adds_nullable_signals_without_backfill(
+    tmp_path,
+):
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    with queue.connect() as con:
+        con.execute(
+            "INSERT INTO jobs("
+            "work_key,status,action,decision,work_intent,subject,message_id,"
+            "context_json,metadata_json,created_at,updated_at,finished_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "gisce/repo#1",
+                "done",
+                "reply_comment",
+                "auto_trusted",
+                "review_only",
+                "legacy",
+                "<legacy@github.com>",
+                '{"urls": []}',
+                "{}",
+                "2026-10-01T10:00:00Z",
+                "2026-10-01T10:01:00Z",
+                "2026-10-01T10:01:00Z",
+            ),
+        )
+        con.execute("DROP INDEX idx_jobs_finished_at")
+        con.execute("ALTER TABLE jobs DROP COLUMN outcome_reason")
+        con.execute("ALTER TABLE jobs DROP COLUMN terminal_outcome")
+        con.execute("ALTER TABLE jobs DROP COLUMN source_received_at")
+        con.execute("DELETE FROM schema_migrations WHERE version=4")
+
+    with pytest.raises(MigrationRequiredError, match="pending migrations 4"):
+        JobQueue(db)
+
+    JobQueue(db, migrate=True)
+
+    with sqlite3.connect(db) as con:
+        columns = {row[1] for row in con.execute("PRAGMA table_info(jobs)")}
+        historical = con.execute(
+            "SELECT source_received_at,terminal_outcome,outcome_reason "
+            "FROM jobs WHERE message_id='<legacy@github.com>'"
+        ).fetchone()
+        index_exists = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' "
+            "AND name='idx_jobs_finished_at'"
+        ).fetchone()
+
+    assert {"source_received_at", "terminal_outcome", "outcome_reason"} <= columns
+    assert historical == (None, None, None)
+    assert index_exists == (1,)

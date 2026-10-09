@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   subject TEXT NOT NULL,
   message_id TEXT NOT NULL UNIQUE,
   uid INTEGER,
+  source_received_at TEXT,
   trigger_actor TEXT,
   trigger_actor_avatar_url TEXT,
   context_json TEXT NOT NULL,
@@ -28,10 +29,13 @@ CREATE TABLE IF NOT EXISTS jobs (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   started_at TEXT,
-  finished_at TEXT
+  finished_at TEXT,
+  terminal_outcome TEXT CHECK(terminal_outcome IN ('completed','no_op','blocked','cancelled','denied','dismissed')),
+  outcome_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_work_status ON jobs(work_key, status);
+CREATE INDEX IF NOT EXISTS idx_jobs_finished_at ON jobs(finished_at) WHERE finished_at IS NOT NULL;
 CREATE TABLE IF NOT EXISTS job_acknowledgements (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
