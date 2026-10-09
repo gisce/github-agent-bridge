@@ -2,6 +2,26 @@
 
 <!-- version list -->
 
+## v0.76.10 (2026-10-09)
+
+### Bug Fixes
+
+- Make webhook intent fallback conservative
+  ([`f1b9139`](https://github.com/gisce/github-agent-bridge/commit/f1b913991ca65e53f5e93d9bbfa3179ec2dcf9f5))
+
+- Parse raw model run outputs
+  ([`f1a88cd`](https://github.com/gisce/github-agent-bridge/commit/f1a88cd6df10a6a96c8de1a820bde5113b97a986))
+
+- Run intent classifier without coding tools
+  ([`6f1f110`](https://github.com/gisce/github-agent-bridge/commit/6f1f1107e2dbd01cd8e70e4c56e6695462a75df0))
+
+- Use tool-less intent classifier inference
+  ([`915a6e9`](https://github.com/gisce/github-agent-bridge/commit/915a6e9a9ba0c07f2a06ad6eaed92a65028d38e8))
+
+- Verify OpenClaw agent exec contract
+  ([`5faf4f7`](https://github.com/gisce/github-agent-bridge/commit/5faf4f7da45c8260af8144cf557f986d03f62c04))
+
+
 ## v0.76.9 (2026-10-09)
 
 ### Bug Fixes
