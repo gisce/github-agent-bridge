@@ -94,6 +94,12 @@ def _text_from_model_run_json(raw: str) -> str:
         data.get("message"),
         data.get("response"),
     ]
+    outputs = data.get("outputs")
+    if isinstance(outputs, list):
+        for output in outputs:
+            if isinstance(output, dict):
+                candidates.append(output.get("text"))
+                candidates.append(output.get("content"))
     result = data.get("result")
     if isinstance(result, dict):
         candidates.extend(
@@ -106,6 +112,12 @@ def _text_from_model_run_json(raw: str) -> str:
                 result.get("response"),
             ]
         )
+        outputs = result.get("outputs")
+        if isinstance(outputs, list):
+            for output in outputs:
+                if isinstance(output, dict):
+                    candidates.append(output.get("text"))
+                    candidates.append(output.get("content"))
         payloads = result.get("payloads")
         if isinstance(payloads, list):
             for payload in payloads:

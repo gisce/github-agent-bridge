@@ -5,6 +5,7 @@ import subprocess
 
 from github_agent_bridge.intent_classifier import (
     ParserResult,
+    _text_from_model_run_json,
     assert_openclaw_model_run_supported,
     build_intent_prompt,
     classify_notification_with_llm,
@@ -215,6 +216,37 @@ def test_normalize_result_requires_write_permission_for_work_allowed():
     assert result.work_intent == "review_only"
 
 
+def test_model_run_json_reads_raw_inference_outputs_text():
+    text = _text_from_model_run_json(
+        json.dumps(
+            {
+                "ok": True,
+                "outputs": [
+                    {
+                        "text": json.dumps(
+                            {
+                                "addressed_to_agent": True,
+                                "action": "reply_comment",
+                                "work_intent": "work_allowed",
+                                "write_permission": "state_change_allowed",
+                                "confidence": 0.92,
+                                "reason": "User asked for implementation.",
+                            }
+                        ),
+                        "mediaUrl": None,
+                    }
+                ],
+            }
+        )
+    )
+
+    result = normalize_result(json.loads(text), 0.75)
+
+    assert result.applied is True
+    assert result.action == "reply_comment"
+    assert result.work_intent == "work_allowed"
+
+
 def test_classify_notification_with_llm_uses_toolless_model_run(monkeypatch):
     calls = []
     assert_openclaw_model_run_supported.cache_clear()
@@ -235,22 +267,21 @@ def test_classify_notification_with_llm_uses_toolless_model_run(monkeypatch):
             0,
             json.dumps(
                 {
-                    "result": {
-                        "payloads": [
-                            {
-                                "text": json.dumps(
-                                    {
-                                        "addressed_to_agent": True,
-                                        "action": "reply_comment",
-                                        "work_intent": "work_allowed",
-                                        "write_permission": "state_change_allowed",
-                                        "confidence": 0.92,
-                                        "reason": "User asked for implementation.",
-                                    }
-                                )
-                            }
-                        ]
-                    }
+                    "ok": True,
+                    "outputs": [
+                        {
+                            "text": json.dumps(
+                                {
+                                    "addressed_to_agent": True,
+                                    "action": "reply_comment",
+                                    "work_intent": "work_allowed",
+                                    "write_permission": "state_change_allowed",
+                                    "confidence": 0.92,
+                                    "reason": "User asked for implementation.",
+                                }
+                            )
+                        }
+                    ],
                 }
             ),
             "",
