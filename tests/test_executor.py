@@ -262,6 +262,8 @@ def test_pr_root_work_event_is_skipped_when_pr_is_already_merged(tmp_path):
     assert stored is not None
     assert stored.status == "done"
     assert stored.last_error is None
+    assert stored.terminal_outcome == "no_op"
+    assert stored.outcome_reason == "stale_merged_pull_request"
     events = job_session_events(queue.path, job.id)
     assert any(event["event_type"] == "stale_pr_event" for event in events)
 
@@ -307,6 +309,8 @@ def test_pr_root_work_event_dispatches_when_pr_is_still_open(tmp_path):
     stored = queue.get(job.id)
     assert stored is not None
     assert stored.status == "done"
+    assert stored.terminal_outcome == "completed"
+    assert stored.outcome_reason == "agent_completed"
 
 
 def test_assigned_pr_comment_keeps_review_only_without_explicit_write_request(tmp_path):
@@ -820,6 +824,8 @@ def test_reply_comment_duplicate_noop_without_followup_is_done(tmp_path):
     assert stored is not None
     assert stored.status == "done"
     assert stored.last_error is None
+    assert stored.terminal_outcome == "no_op"
+    assert stored.outcome_reason == "duplicate_followup"
 
 
 def test_workflow_run_failed_dispatch_does_not_require_thread_followup(tmp_path):
@@ -837,6 +843,8 @@ def test_workflow_run_failed_dispatch_does_not_require_thread_followup(tmp_path)
     stored = queue.get(job.id)
     assert stored is not None
     assert stored.status == "done"
+    assert stored.terminal_outcome == "completed"
+    assert stored.outcome_reason == "agent_completed"
 
 
 def test_sync_after_merge_noop_duplicate_followup_is_done(tmp_path):

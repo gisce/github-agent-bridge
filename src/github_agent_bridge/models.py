@@ -82,6 +82,7 @@ class Notification:
     from_addr: str
     body: str
     received_at: str = field(default_factory=utc_now)
+    source_received_at: str | None = None
     auth: dict[str, bool] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -107,4 +108,7 @@ class Job:
     locked_by: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
+    source_received_at: str | None = None
+    terminal_outcome: str | None = None
+    outcome_reason: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)

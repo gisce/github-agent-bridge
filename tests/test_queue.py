@@ -267,6 +267,65 @@ def test_enqueue_and_coalesce_same_work_key(tmp_path, monkeypatch):
     assert job1.trigger_actor_avatar_url == "https://github.com/Edu.png?size=80"
 
 
+def test_enqueue_persists_source_timestamp_and_policy_noop_outcome(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "github_agent_bridge.actors.github_actor_details_for_context",
+        lambda ctx, *, gh_bin="gh": None,
+    )
+    queue = JobQueue(tmp_path / "q.sqlite3")
+    notification = Notification(
+        uid=1,
+        message_id="<archive@github.com>",
+        subject="[gisce/erp] routine notification",
+        from_addr="GitHub <notifications@github.com>",
+        body="https://github.com/gisce/erp/issues/42",
+        received_at="2026-10-08T21:30:00Z",
+        source_received_at="2026-10-08T21:30:00Z",
+        auth={"spf": True, "dkim": True, "dmarc": True},
+    )
+
+    job, state = queue.enqueue(notification, policy())
+
+    assert state == "enqueued"
+    assert job is not None
+    assert job.status == "done"
+    assert job.source_received_at == "2026-10-08T21:30:00Z"
+    assert job.terminal_outcome == "no_op"
+    assert job.outcome_reason == "policy_auto_handled"
+    with queue.connect() as con:
+        row = con.execute(
+            "SELECT source_received_at,terminal_outcome,outcome_reason,finished_at "
+            "FROM jobs WHERE id=?",
+            (job.id,),
+        ).fetchone()
+    assert tuple(row) == (
+        "2026-10-08T21:30:00Z",
+        "no_op",
+        "policy_auto_handled",
+        job.created_at,
+    )
+
+
+def test_retry_clears_previous_terminal_outcome(tmp_path):
+    queue = JobQueue(tmp_path / "q.sqlite3")
+    job, _ = queue.enqueue(notif(1, "<retry-outcome@github.com>", BODY1), policy())
+    queue.claim_next("worker")
+    queue.finish(job.id, "blocked", "failed", "boom")
+
+    blocked = queue.get(job.id)
+    assert blocked is not None
+    assert blocked.terminal_outcome == "blocked"
+    assert blocked.outcome_reason == "agent_blocked"
+
+    assert queue.retry(job.id) is True
+    pending = queue.get(job.id)
+    assert pending is not None
+    assert pending.terminal_outcome is None
+    assert pending.outcome_reason is None
+
+
 def test_canonical_event_key_uses_immutable_comment_id_across_sources():
     ctx = GitHubContext(
         urls=["https://github.com/gisce/erp/issues/42#issuecomment-123"],
@@ -731,6 +790,14 @@ def test_block_and_cancel_close_active_job_runs(tmp_path):
         )
 
     assert results == {blocked.id: "blocked", cancelled.id: "cancelled"}
+    blocked_job = q.get(blocked.id)
+    cancelled_job = q.get(cancelled.id)
+    assert blocked_job is not None
+    assert blocked_job.terminal_outcome == "blocked"
+    assert blocked_job.outcome_reason == "executor_blocked"
+    assert cancelled_job is not None
+    assert cancelled_job.terminal_outcome == "cancelled"
+    assert cancelled_job.outcome_reason == "manual_cancellation"
 
 
 def test_init_backfills_only_the_known_legacy_interval_as_estimated(tmp_path):
@@ -788,6 +855,8 @@ def test_cancel_running_records_actor_reason_and_finish_preserves_cancellation(t
     assert stored is not None
     assert stored.status == "done"
     assert stored.last_error is None
+    assert stored.terminal_outcome == "cancelled"
+    assert stored.outcome_reason == "manual_cancellation"
     assert stored.metadata["cancellation"]["reason"] == "stale request"
 
 
@@ -1276,6 +1345,8 @@ def test_dismiss_blocked_job_marks_done(tmp_path):
     assert stored is not None
     assert stored.status == "done"
     assert stored.last_error is None
+    assert stored.terminal_outcome == "dismissed"
+    assert stored.outcome_reason == "manual_dismissal"
     with q.connect() as con:
         assert con.execute("SELECT finished_at FROM jobs WHERE id=?", (job.id,)).fetchone()["finished_at"] == finished_at
 

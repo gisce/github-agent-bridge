@@ -221,7 +221,12 @@ class IngestionRepository:
                     )
 
                 cursor = con.execute(
-                    "INSERT INTO jobs(work_key,repo,thread,status,action,decision,work_intent,subject,message_id,uid,trigger_actor,trigger_actor_avatar_url,context_json,metadata_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO jobs("
+                    "work_key,repo,thread,status,action,decision,work_intent,subject,"
+                    "message_id,uid,source_received_at,trigger_actor,"
+                    "trigger_actor_avatar_url,context_json,metadata_json,created_at,"
+                    "updated_at,finished_at,terminal_outcome,outcome_reason"
+                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         ctx.work_key,
                         ctx.repo,
@@ -233,12 +238,28 @@ class IngestionRepository:
                         n.subject,
                         n.message_id,
                         n.uid,
+                        n.source_received_at,
                         actor.login if actor else None,
                         actor.avatar_url if actor else None,
                         ctx.to_json(),
                         json.dumps(request.metadata),
                         now,
                         now,
+                        now if request.status in {"done", "denied"} else None,
+                        (
+                            "no_op"
+                            if request.status == "done"
+                            else "denied"
+                            if request.status == "denied"
+                            else None
+                        ),
+                        (
+                            "policy_auto_handled"
+                            if request.status == "done"
+                            else "policy_denied"
+                            if request.status == "denied"
+                            else None
+                        ),
                     ),
                 )
                 job_id = int(cursor.lastrowid)

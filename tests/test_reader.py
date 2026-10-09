@@ -47,8 +47,9 @@ class EmptyMailbox:
 
 
 class MailboxWithMessages:
-    def __init__(self, messages):
+    def __init__(self, messages, internaldates=None):
         self.messages = messages
+        self.internaldates = internaldates or {}
         self.logged_out = False
         self.stores = []
 
@@ -63,7 +64,13 @@ class MailboxWithMessages:
             return "OK", [b" ".join(str(uid).encode("ascii") for uid in self.messages)]
         if command == "fetch":
             uid = int(args[0])
-            return "OK", [(None, self.messages[uid])]
+            internaldate = self.internaldates.get(uid)
+            metadata = (
+                f'{uid} (UID {uid} INTERNALDATE "{internaldate}" RFC822'.encode()
+                if internaldate
+                else None
+            )
+            return "OK", [(metadata, self.messages[uid])]
         if command == "store":
             self.stores.append(args)
             return "OK", []
@@ -157,6 +164,41 @@ def test_fetch_once_quarantines_poison_github_notification_and_continues(monkeyp
     assert "missing GitHub context" in quarantine["error"]
     assert "BROKEN" in quarantine["body_excerpt"]
     assert job["uid"] == 2
+
+
+def test_fetch_once_persists_imap_internaldate_as_source_received_at(
+    monkeypatch, tmp_path
+):
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    mailbox = MailboxWithMessages(
+        {
+            1: github_message(
+                "<internaldate@github.com>",
+                "@pilipilisbot https://github.com/gisce/erp/issues/42#issuecomment-99",
+            ),
+        },
+        internaldates={1: "08-Oct-2026 23:30:00 +0200"},
+    )
+    monkeypatch.setattr(imaplib, "IMAP4_SSL", lambda *args: mailbox)
+    monkeypatch.setattr(
+        "github_agent_bridge.actors.github_actor_details_for_context",
+        lambda ctx, *, gh_bin="gh": None,
+    )
+
+    reader = ImapReader(
+        ImapConfig("imap.example.com", 993, "bot@example.com", "secret"),
+        queue,
+        Policy(trusted_orgs={"gisce"}, bot_logins={"pilipilisbot"}),
+    )
+
+    assert reader.fetch_once() == 1
+    with sqlite3.connect(db) as con:
+        source_received_at = con.execute(
+            "SELECT source_received_at FROM jobs"
+        ).fetchone()[0]
+
+    assert source_received_at == "2026-10-08T21:30:00Z"
 
 
 def test_fetch_once_retries_transient_enqueue_storage_failure(monkeypatch, tmp_path):

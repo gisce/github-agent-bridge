@@ -48,6 +48,7 @@ from .dashboard_data import (
 )
 from .monitor import monitor
 from .mcp import MCPServer, authenticate_token, create_token, list_tokens, revoke_token, update_token_owner
+from .models import utc_now
 from .observability import configure_sentry, list_alerts, recent_process_samples
 from .persistence import Database, WebhookRepository
 from .queue import JobQueue
@@ -773,6 +774,7 @@ async def _receive_github_webhook(
     config: DashboardConfig,
     ensure_webhook_schema,
 ) -> dict[str, Any]:
+    source_received_at = utc_now()
     if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
         raise HTTPException(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, detail="application_json_required")
     delivery_id = request.headers.get("x-github-delivery", "").strip()
@@ -824,6 +826,7 @@ async def _receive_github_webhook(
                 delivery_id,
                 payload,
                 bot_logins=policy.bot_logins,
+                received_at=source_received_at,
             )
             if notification is None:
                 enqueue_status = "ignored"

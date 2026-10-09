@@ -951,6 +951,36 @@ def test_webhook_primary_enqueues_trusted_repo_without_canary_allowlist(tmp_path
         assert con.execute("SELECT first_source FROM github_events").fetchone()[0] == "webhook"
 
 
+def test_webhook_persists_http_ingress_time_as_source_received_at(
+    tmp_path, monkeypatch
+):
+    policy = canary_policy(tmp_path)
+    payload = actionable_issue_comment_payload()
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=policy,
+    )
+    monkeypatch.setattr(
+        backend, "utc_now", lambda: "2026-10-09T12:34:56Z"
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(payload),
+    )
+
+    assert response.json()["enqueue_status"] == "enqueued"
+    with sqlite3.connect(config.db) as con:
+        source_received_at = con.execute(
+            "SELECT source_received_at FROM jobs"
+        ).fetchone()[0]
+    assert source_received_at == "2026-10-09T12:34:56Z"
+
+
 def test_webhook_commit_comment_keeps_cross_source_identity(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "github_agent_bridge.queue.trigger_actor_details_for_enqueue",

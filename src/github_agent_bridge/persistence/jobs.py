@@ -56,6 +56,9 @@ def job_from_row(row: sqlite3.Row | None) -> Job | None:
         locked_by=row["locked_by"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        source_received_at=row["source_received_at"],
+        terminal_outcome=row["terminal_outcome"],
+        outcome_reason=row["outcome_reason"],
         metadata=json.loads(row["metadata_json"] or "{}"),
     )
 
@@ -121,7 +124,9 @@ class JobRepository:
                 )
             attempt = int(row["attempts"]) + 1
             con.execute(
-                "UPDATE jobs SET status='running', locked_by=?, attempts=attempts+1, started_at=?, finished_at=NULL, updated_at=?, metadata_json=? WHERE id=?",
+                "UPDATE jobs SET status='running', locked_by=?, attempts=attempts+1, "
+                "started_at=?, finished_at=NULL, terminal_outcome=NULL, "
+                "outcome_reason=NULL, updated_at=?, metadata_json=? WHERE id=?",
                 (
                     worker_id,
                     now,
@@ -181,6 +186,9 @@ class JobRepository:
         status: str,
         summary: str,
         detail: str | None = None,
+        *,
+        terminal_outcome: str | None = None,
+        outcome_reason: str | None = None,
     ) -> None:
         now = utc_now()
         with self.database.transaction(
@@ -199,14 +207,46 @@ class JobRepository:
                 status = "done"
                 summary = str(cancellation.get("summary") or summary)
                 detail = str(cancellation.get("detail") or detail or "")
+                terminal_outcome = "cancelled"
+                outcome_reason = "manual_cancellation"
                 con.execute(
-                    "UPDATE jobs SET status=?, last_error=?, locked_by=NULL, finished_at=COALESCE(finished_at, ?), updated_at=? WHERE id=?",
-                    (status, detail if status == "blocked" else None, now, now, job_id),
+                    "UPDATE jobs SET status=?, last_error=?, locked_by=NULL, "
+                    "finished_at=COALESCE(finished_at, ?), terminal_outcome=?, "
+                    "outcome_reason=?, updated_at=? WHERE id=?",
+                    (
+                        status,
+                        detail if status == "blocked" else None,
+                        now,
+                        terminal_outcome,
+                        outcome_reason,
+                        now,
+                        job_id,
+                    ),
                 )
             else:
+                if terminal_outcome is None:
+                    terminal_outcome = (
+                        "blocked" if status == "blocked" else "completed"
+                    )
+                if outcome_reason is None:
+                    outcome_reason = (
+                        "agent_blocked"
+                        if terminal_outcome == "blocked"
+                        else "agent_completed"
+                    )
                 con.execute(
-                    "UPDATE jobs SET status=?, last_error=?, locked_by=NULL, finished_at=?, updated_at=? WHERE id=?",
-                    (status, detail if status == "blocked" else None, now, now, job_id),
+                    "UPDATE jobs SET status=?, last_error=?, locked_by=NULL, "
+                    "finished_at=?, terminal_outcome=?, outcome_reason=?, "
+                    "updated_at=? WHERE id=?",
+                    (
+                        status,
+                        detail if status == "blocked" else None,
+                        now,
+                        terminal_outcome,
+                        outcome_reason,
+                        now,
+                        job_id,
+                    ),
                 )
             self.runtime.record_job_run_finished(
                 con, job_id, "cancelled" if cancelled else status, now
@@ -368,7 +408,10 @@ class JobRepository:
                 return None
             cursor = con.execute(
                 """UPDATE jobs
-                SET status='done', locked_by=NULL, last_error=NULL, finished_at=COALESCE(finished_at, ?), updated_at=?, metadata_json=?
+                SET status='done', locked_by=NULL, last_error=NULL,
+                    finished_at=COALESCE(finished_at, ?),
+                    terminal_outcome='cancelled', outcome_reason='manual_cancellation',
+                    updated_at=?, metadata_json=?
                 WHERE id=?""",
                 (now, now, json.dumps(metadata, sort_keys=True), job_id),
             )
@@ -433,7 +476,9 @@ class JobRepository:
             if fresh_session:
                 metadata["fresh_session_on_retry"] = True
             cursor = con.execute(
-                "UPDATE jobs SET status='pending', locked_by=NULL, last_error=NULL, finished_at=?, updated_at=?, metadata_json=? WHERE id=? AND status='running'",
+                "UPDATE jobs SET status='pending', locked_by=NULL, last_error=NULL, "
+                "finished_at=?, terminal_outcome=NULL, outcome_reason=NULL, "
+                "updated_at=?, metadata_json=? WHERE id=? AND status='running'",
                 (now, now, json.dumps(metadata, sort_keys=True), job_id),
             )
             if cursor.rowcount:
@@ -494,7 +539,8 @@ class JobRepository:
                 cursor = con.execute(
                     """UPDATE jobs
                     SET status='blocked', locked_by=NULL, last_error=?,
-                        finished_at=?, updated_at=?
+                        finished_at=?, terminal_outcome='blocked',
+                        outcome_reason='executor_blocked', updated_at=?
                     WHERE id=? AND status='running'""",
                     (detail, now, now, row["id"]),
                 )
@@ -585,7 +631,9 @@ class JobRepository:
             operation="jobs.retry",
         ) as con:
             cursor = con.execute(
-                "UPDATE jobs SET status='pending', locked_by=NULL, last_error=NULL, updated_at=? WHERE id=? AND status='blocked' AND decision='auto_trusted'",
+                "UPDATE jobs SET status='pending', locked_by=NULL, last_error=NULL, "
+                "terminal_outcome=NULL, outcome_reason=NULL, updated_at=? "
+                "WHERE id=? AND status='blocked' AND decision='auto_trusted'",
                 (now, job_id),
             )
             if cursor.rowcount:
@@ -616,7 +664,10 @@ class JobRepository:
             operation="jobs.dismiss",
         ) as con:
             cursor = con.execute(
-                "UPDATE jobs SET status='done', locked_by=NULL, last_error=NULL, finished_at=COALESCE(finished_at, ?), updated_at=? WHERE id=? AND status IN ('blocked','denied','waiting_approval')",
+                "UPDATE jobs SET status='done', locked_by=NULL, last_error=NULL, "
+                "finished_at=COALESCE(finished_at, ?), terminal_outcome='dismissed', "
+                "outcome_reason='manual_dismissal', updated_at=? "
+                "WHERE id=? AND status IN ('blocked','denied','waiting_approval')",
                 (now, now, job_id),
             )
             if cursor.rowcount:
@@ -651,7 +702,8 @@ class JobRepository:
             now = utc_now()
             for row in rows:
                 con.execute(
-                    "UPDATE jobs SET status='pending', locked_by=NULL, finished_at=?, updated_at=? WHERE id=?",
+                    "UPDATE jobs SET status='pending', locked_by=NULL, finished_at=?, "
+                    "terminal_outcome=NULL, outcome_reason=NULL, updated_at=? WHERE id=?",
                     (now, now, row["id"]),
                 )
                 self.runtime.record_job_run_finished(
