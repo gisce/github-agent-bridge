@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.77.0 (2026-10-09)
+
+### Features
+
+- Persist SLO instrumentation signals
+  ([`1cb944c`](https://github.com/gisce/github-agent-bridge/commit/1cb944caddcc60f7b4b74d0a29d6136ad0350c47))
+
+
 ## v0.76.10 (2026-10-09)
 
 ### Bug Fixes
