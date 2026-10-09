@@ -9,10 +9,10 @@ Before installing the bridge, have these ready:
 - Python 3.11 or newer.
 - OpenClaw CLI installed with `openclaw infer model run --local --prompt --json` support for the intent classifier.
 - GitHub CLI (`gh`) installed and authenticated as the GitHub user/bot that should react to comments.
-- An email inbox that receives GitHub notification emails.
-- IMAP access to that inbox, usually an app password.
+- For webhook ingestion: a public HTTPS endpoint, a per-owner webhook secret, and a reverse proxy to the socket-activated ingress.
+- For IMAP ingestion or fallback: an inbox that receives GitHub notifications and IMAP access, usually through an app password.
 - A delivery route for OpenClaw agent work, for example a Telegram chat id, Discord channel, or another OpenClaw-supported channel.
-- Optional but recommended: user-level systemd for the executor, reader timer, and monitor timer.
+- Optional but recommended: user-level systemd for the executor, webhook socket, reader timer, and monitor timer.
 
 ## Install the CLI
 
@@ -99,6 +99,13 @@ GITHUB_AGENT_BRIDGE_NODE_BIN=
 GITHUB_AGENT_BRIDGE_DEFAULT_CHANNEL=telegram
 GITHUB_AGENT_BRIDGE_DEFAULT_TO=
 
+# Webhook input starts observationally. Use an absolute policy path.
+GITHUB_AGENT_BRIDGE_WEBHOOK_MODE=shadow
+GITHUB_AGENT_BRIDGE_WEBHOOK_POLICY=/home/you/.config/github-agent-bridge/policy.json
+GITHUB_AGENT_BRIDGE_WEBHOOK_PRIMARY_ACK=
+GITHUB_AGENT_BRIDGE_WEBHOOK_SECRETS_BY_OWNER='{"your-org":["replace-with-webhook-secret"]}'
+
+# IMAP input/fallback.
 GITHUB_AGENT_BRIDGE_EMAIL=you@example.com
 GITHUB_AGENT_BRIDGE_PASSWORD=imap-app-password
 GITHUB_AGENT_BRIDGE_IMAP_HOST=imap.gmail.com
@@ -110,6 +117,13 @@ chmod 600 ~/.config/github-agent-bridge/env
 ```
 
 Leave `GITHUB_AGENT_BRIDGE_MARK_SEEN` empty until the bridge owns GitHub notification handling for that inbox.
+
+Keep `GITHUB_AGENT_BRIDGE_WEBHOOK_MODE=shadow` until signed deliveries and
+coverage are visible. `canary` additionally requires the target repository in
+policy `webhookCanaryRepos`; `primary` additionally requires
+`GITHUB_AGENT_BRIDGE_WEBHOOK_PRIMARY_ACK=true` and still honors
+`enabledRepos`. Replace `/home/you` with the deployment user's real absolute
+home path. See [`ingestion.md`](ingestion.md).
 
 If `openclaw` is not on the systemd PATH, set `GITHUB_AGENT_BRIDGE_OPENCLAW_BIN` to the absolute path from `command -v openclaw`.
 
@@ -237,13 +251,15 @@ cp systemd/github-agent-bridge-webhook.socket ~/.config/systemd/user/
 
 systemctl --user daemon-reload
 systemctl --user enable --now github-agent-bridge.service
+# Enable the webhook socket when using signed GitHub delivery.
+systemctl --user enable --now github-agent-bridge-webhook.socket
+# Keep the reader timer enabled while IMAP is an input or fallback.
 systemctl --user enable --now github-agent-bridge-reader.timer
 systemctl --user enable --now github-agent-bridge-monitor.timer
 systemctl --user enable --now github-agent-bridge-feedback.timer
 systemctl --user enable --now github-agent-bridge-autoupdate.timer
-# Optional:
+# Optional dashboard:
 # systemctl --user enable --now github-agent-bridge-dashboard.service
-# systemctl --user enable --now github-agent-bridge-webhook.socket
 ```
 
 The reader timer calls the packaged `github-agent-bridge-reader-run` console
@@ -333,12 +349,13 @@ A healthy install has no old pending jobs, no blocked dispatches, and no stale r
 
 ## Go live safely
 
-1. Keep `GITHUB_AGENT_BRIDGE_MODE=shadow` until shadow jobs look correct.
-2. Keep `enabledRepos` to one canary repository.
-3. Switch the executor to `GITHUB_AGENT_BRIDGE_MODE=live`.
-4. Keep `GITHUB_AGENT_BRIDGE_MARK_SEEN` empty until the reader behavior is clean.
-5. Set `GITHUB_AGENT_BRIDGE_MARK_SEEN=--mark-seen` only when this bridge is the GitHub notification owner.
-6. Widen `enabledRepos`, `trustedRepos`, or `trustedOrgs` gradually.
+1. Keep the executor in `GITHUB_AGENT_BRIDGE_MODE=shadow` until jobs look correct.
+2. Run webhook ingress in `GITHUB_AGENT_BRIDGE_WEBHOOK_MODE=shadow`; keep IMAP non-mutating and compare coverage.
+3. Keep `enabledRepos` narrow and add only explicit repositories to `webhookCanaryRepos`.
+4. Switch the executor to `live`, then switch webhook ingestion to `canary`.
+5. Investigate every unexplained actionable IMAP-only event or cross-source mismatch before widening the canary.
+6. Switch to `primary` only with `GITHUB_AGENT_BRIDGE_WEBHOOK_PRIMARY_ACK=true`; keep the IMAP reader enabled for the stable fallback window.
+7. Disable the IMAP reader only after the second clean window and a tested rollback plan. Setting `--mark-seen` is independent of webhook mode.
 
 ## Reusability status
 
@@ -348,6 +365,8 @@ Reusable today:
 
 - packaged Python CLI (`gab`),
 - SQLite queue and monitor,
+- signed, socket-activated GitHub webhook ingress,
+- IMAP reader for direct or fallback ingestion,
 - JSON policy model,
 - prompt resources and repository roles,
 - systemd unit templates,
@@ -357,6 +376,7 @@ Deployment-specific setup still required:
 
 - OpenClaw agent ids and delivery routes,
 - GitHub bot/user authentication through `gh`,
-- IMAP mailbox credentials,
+- public TLS routing and per-owner webhook secrets,
+- IMAP mailbox credentials while IMAP ingestion/fallback is enabled,
 - trusted org/repo policy,
 - systemd paths and environment values.

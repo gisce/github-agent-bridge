@@ -6,14 +6,17 @@
 
 ```mermaid
 flowchart TD
-    A[Mailbox] --> B[Generic inbox worker]
-    A --> C[GitHub Agent Bridge]
+    G[GitHub] --> W[Signed webhook]
+    G --> A[Notification email]
+    A --> B[Generic inbox worker]
+    A --> C[GitHub Agent Bridge IMAP input]
+    W --> C
 
     B --> B1[ordinary email triage]
     B --> B2[calendar invites]
     B --> B3[reminders/status emails]
 
-    C --> C1[classify GitHub notification]
+    C --> C1[normalize GitHub event]
     C --> C2[enqueue durable GitHub job]
     C --> C3[coalesce per owner/repo#number]
     C --> C4[react 👀]

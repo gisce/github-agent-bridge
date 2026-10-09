@@ -4,6 +4,8 @@ Known failures and expected containment behavior.
 
 | Failure | Expected behavior | Operator response |
 | --- | --- | --- |
+| Invalid webhook signature | Delivery is rejected before persistence or enqueue. | Verify the owner-specific secret and proxy preserves raw request bytes. |
+| Webhook delivery gap | IMAP may win the canonical event during the fallback phase. | Inspect hook deliveries and the webhook exception queue; do not disable IMAP until the gap is explained. |
 | IMAP burst backlog | Reader enqueues oldest-first and never waits for agents. | Monitor pending age and worker capacity. |
 | Agent dispatch timeout | Job becomes `blocked`; unrelated jobs continue. | Inspect `last_error`, then retry or fix policy/agent issue. |
 | Duplicate notification | Notification coalesces into active `work_key`. | No action unless coalescing count is suspiciously high. |
@@ -15,6 +17,17 @@ Known failures and expected containment behavior.
 Reader must enqueue all new UIDs oldest-first and never wait for agent completion.
 
 The queue/executor split exists specifically so a burst of GitHub mail does not stall mailbox cursor progress.
+
+## Webhook rejection or delivery gap
+
+Webhook ingress verifies `X-Hub-Signature-256` over the unmodified request body
+and rejects missing or invalid signatures. In `shadow`, accepted deliveries are
+observational; in `canary` and `primary`, policy still decides whether a
+supported event may enqueue.
+
+While IMAP fallback is enabled, a missing or late webhook may still result in
+one job through email. Treat an actionable IMAP-only event as a coverage
+exception to investigate, not as proof that the fallback can be disabled.
 
 ## Agent dispatch timeout
 

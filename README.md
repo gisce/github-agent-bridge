@@ -1,8 +1,8 @@
 # GitHub Agent Bridge
 
 <p align="center">
-  <strong>Durable GitHub notifications → OpenClaw agent work.</strong><br>
-  Fast inbox reading, persistent queues, safe rollout, and policy-driven agent dispatch.
+  <strong>Durable GitHub events → OpenClaw agent work.</strong><br>
+  Signed webhook and IMAP ingestion, persistent queues, safe rollout, and policy-driven agent dispatch.
 </p>
 
 <p align="center">
@@ -16,28 +16,32 @@
 
 ## At a glance
 
-`github-agent-bridge` replaces fragile one-off inbox automation with a small, auditable pipeline for GitHub notifications.
+`github-agent-bridge` replaces fragile one-off notification automation with a small, auditable pipeline for GitHub events. Signed webhooks provide the low-latency path; GitHub notification email can run alongside them as an IMAP fallback while a deployment proves transport parity.
 
 ```mermaid
 flowchart LR
-    A[GitHub notification email] --> B[IMAP reader]
-    B --> C[(SQLite queue)]
-    C --> D[Executor pool]
-    D --> E[GitHub 👀 reaction]
-    D --> F[OpenClaw agent]
+    A[GitHub] --> B[Signed webhook ingress]
+    A --> C[Notification email]
+    C --> D[IMAP reader]
+    B --> E[(SQLite queue)]
+    D --> E
+    F[Replay / manual URL] --> E
+    E --> G[Executor pool]
+    G --> H[GitHub 👀 reaction]
+    G --> I[OpenClaw agent]
 
-    C -. coalesce .-> C
-    D -. one worker per owner/repo#number .-> D
+    E -. canonical event identity .-> E
+    G -. one worker per owner/repo#number .-> G
 ```
 
 | Capability | What it means |
 | --- | --- |
-| **Fast reader** | IMAP polling never waits for slow agent work. |
-| **Durable queue** | Jobs are persisted before mailbox high-water marks advance. |
+| **Dual ingestion** | Signed GitHub webhooks ingest immediately; IMAP remains available as a migration/fallback path. |
+| **Durable queue** | Events and receipts are persisted before a source cursor or enqueue acknowledgement advances. |
 | **Safe concurrency** | Different PRs/issues run in parallel; the same thread is serialized. |
-| **Coalescing** | Duplicate notifications for active threads fold into existing work. |
+| **Cross-source identity** | Duplicate webhook and email receipts link to one canonical GitHub event and job when identity is provable. |
 | **Policy gates** | Trust, canary scope, actions, routes, and repo roles live in JSON policy. |
-| **Safe rollout** | Replay, shadow, dry-run, canary, then live. |
+| **Safe rollout** | Replay, shadow, dry-run, canary, primary, then fallback retirement. |
 | **Agent knowledge MCP** | Agents can query acquired repository knowledge through an authenticated read-only HTTP MCP server. |
 | **Automatic releases** | Conventional commits drive tags, changelog, GitHub Releases, wheel/sdist. |
 
@@ -49,7 +53,7 @@ Install from GitHub:
 python -m pip install git+https://github.com/gisce/github-agent-bridge.git
 ```
 
-For a full operator install, including policy, IMAP, rollout, and systemd units, see [`docs/installation.md`](docs/installation.md).
+For a full operator install, including policy, webhook/IMAP inputs, rollout, and systemd units, see [`docs/installation.md`](docs/installation.md).
 
 For local development:
 
@@ -112,6 +116,7 @@ The bridge is conservative by default. `policy.json` decides what is trusted, wh
   "botLogins": ["pilipilisbot"],
   "trustedOrgs": ["your-org"],
   "enabledRepos": ["your-org/your-repo"],
+  "webhookCanaryRepos": ["your-org/your-repo"],
   "orgRoutes": {
     "your-org": {
       "agent": "your-openclaw-agent",
@@ -156,13 +161,14 @@ Full reference: [`docs/policy-reference.md`](docs/policy-reference.md).
 
 ```mermaid
 flowchart LR
-    A[Offline replay] --> B[Shadow IMAP]
+    A[Offline replay] --> B[Shadow webhook + IMAP]
     B --> C[Dry-run executor]
-    C --> D[Canary live repo]
-    D --> E[Wider live scope]
+    C --> D[Canary dual ingest]
+    D --> E[Primary webhook + IMAP fallback]
+    E --> F[Retire IMAP]
 ```
 
-Start with `replay`, `read-imap-once` without `--mark-seen`, and `run --mode shadow`. Move to live only after canary behavior is clean.
+Webhook ingestion has independent `shadow`, `canary`, and `primary` modes. Start with signed webhook receipts in `shadow`, keep IMAP non-mutating, and use the executor in `shadow`/`dry-run`. Promote only after the cross-source coverage gate is clean; keep IMAP enabled through the first `primary` observation window.
 
 See [`docs/shadow-canary.md`](docs/shadow-canary.md).
 
@@ -172,6 +178,7 @@ See [`docs/shadow-canary.md`](docs/shadow-canary.md).
 | --- | --- |
 | Install a deployment | [`docs/installation.md`](docs/installation.md) |
 | Understand the system shape | [`docs/architecture.md`](docs/architecture.md) |
+| Understand webhook and IMAP ingestion | [`docs/ingestion.md`](docs/ingestion.md) |
 | Develop or test changes | [`docs/development.md`](docs/development.md) |
 | Operate the bridge | [`docs/operations.md`](docs/operations.md) |
 | Expose bridge knowledge to agents | [`docs/mcp.md`](docs/mcp.md) |
@@ -189,7 +196,9 @@ This project is **GitHub-only**. Generic email triage, calendar/status emails, r
 
 ## Current status
 
-The bridge has reusable components, tests, packaged prompt resources, systemd units, and an automated release pipeline. Production deployment is reusable by other OpenClaw operators, but it still requires operator-specific policy, routes, GitHub/IMAP credentials, and rollout using the policy and systemd units in this repository.
+The bridge has reusable components, tests, packaged prompt resources, dedicated webhook ingress, IMAP reader, systemd units, and an automated release pipeline. Production deployment is reusable by other OpenClaw operators, but it still requires operator-specific policy, routes, GitHub authentication, webhook secrets and public TLS, plus IMAP credentials while the fallback remains enabled.
+
+Webhook ingestion is implemented and can enqueue in guarded `canary` or explicitly acknowledged `primary` mode. IMAP is still part of the supported migration topology until the parity and observation gates tracked in [#299](https://github.com/gisce/github-agent-bridge/issues/299) are complete.
 
 For PR/issue comments not addressed to the bot and where the bot is not assigned, the bridge reacts 👀 + 👍 and skips dispatch to avoid low-value extra comments.
 

@@ -1,25 +1,29 @@
 # Architecture
 
-The bridge separates **fast mailbox ingestion** from **slow agent work**. That split is the core design choice.
+The bridge separates **fast event ingestion** from **slow agent work**. Signed GitHub webhooks and GitHub notification email both feed the same durable queue; that transport-neutral split is the core design choice.
 
 ```mermaid
 flowchart LR
-    A[IMAP / .eml / manual URL] --> B[Notification]
-    B --> C[Policy decision]
-    C --> D[(SQLite queue)]
-    D --> E[Executor pool]
-    E --> F[GitHub reaction]
-    E --> G[OpenClaw agent]
+    A[GitHub webhook] --> D[Notification]
+    B[IMAP / .eml] --> D
+    C[Manual URL] --> D
+    D --> E[Policy decision]
+    E --> F[(SQLite queue)]
+    F --> G[Executor pool]
+    G --> H[GitHub reaction]
+    G --> I[OpenClaw agent]
 
-    D -. work_key owner/repo#number .-> D
+    F -. canonical event identity .-> F
+    F -. work_key owner/repo#number .-> F
 ```
 
 ## Design goals
 
 | Goal | Design response |
 | --- | --- |
-| Do not block the inbox | Reader only fetches, classifies, and enqueues. |
-| Do not lose work | Jobs are durable before cursors advance. |
+| Do not block an input | Ingress verifies, normalizes, classifies, and enqueues; it never waits for agent work. |
+| Do not lose work | Events are durable before a source cursor or enqueue acknowledgement advances. |
+| Do not duplicate dual delivery | Transport receipts converge on a canonical GitHub event when identity is provable. |
 | Do not duplicate thread work | Active jobs with the same `work_key` coalesce. |
 | Do not serialize unrelated repos | Different `work_key`s can run in parallel. |
 | Do not widen trust accidentally | Policy gates source, scope, actions, routes, and roles. |
@@ -27,15 +31,32 @@ flowchart LR
 
 ## Components
 
-### Reader
+### Webhook ingress
+
+`github-agent-bridge-webhook` accepts signed GitHub deliveries at
+`POST /api/webhooks/github`. It verifies HMAC over the raw payload, persists the
+receipt, normalizes supported structured events and, in `canary` or `primary`
+mode, sends them through the common queue transaction. `shadow` records
+deliveries without creating jobs.
+
+The socket-activated ingress is intentionally separate from the dashboard so a
+UI restart does not interrupt GitHub delivery. `webhookCanaryRepos` constrains
+dual ingestion in `canary`; the global `enabledRepos` guard applies to every
+transport.
+
+### IMAP reader
 
 `ImapReader` fetches GitHub notification emails, parses metadata, and enqueues durable `Notification` jobs.
 
 **Invariant:** advance `last_uid` only after the notification has been durably queued or safely ignored.
 
+IMAP remains a supported fallback while webhook coverage is being proven. Both
+transports use the same ingestion persistence and queue; see
+[`ingestion.md`](ingestion.md) for identity and rollout semantics.
+
 ### Policy
 
-`Policy` decides whether a trusted GitHub notification becomes:
+`Policy` decides whether a trusted GitHub event becomes:
 
 - `auto`
 - `auto_trusted`
@@ -56,6 +77,9 @@ repositories must preserve those transaction boundaries.
 | --- | --- |
 | `jobs` | Durable work items and execution state. |
 | `coalesced_notifications` | Extra emails folded into an active `work_key`. |
+| `ingest_receipts` | Idempotent source receipts for email and webhook delivery. |
+| `github_events` | Canonical cross-source GitHub event identity and winning job. |
+| `webhook_shadow_receipts` | Signed webhook delivery audit, payload hash and enqueue result. |
 | `state` | Mailbox high-water marks and future cursors. |
 | `worklog` | Audit trail. |
 

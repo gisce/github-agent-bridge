@@ -48,13 +48,15 @@ gab --db "$DB" --policy ./policy.example.json monitor --no-systemd
 Pipeline:
 
 ```text
-IMAP/eml/manual URL -> Notification -> Policy decision -> SQLite jobs -> executor -> GitHub 👀 + OpenClaw agent
+GitHub webhook ─┐
+IMAP/eml ───────┼─> transport-neutral Notification -> Policy decision -> SQLite jobs -> executor -> GitHub 👀 + OpenClaw agent
+manual URL ─────┘
 ```
 
 Important invariants:
 
-1. Reader must persist or explicitly handle a notification before advancing high-water state.
-2. `message_id` is globally unique; duplicates must not create duplicate jobs.
+1. Each input must durably persist or explicitly handle an event before advancing its cursor or acknowledging enqueue.
+2. Transport receipt ids (`Message-ID` or `X-GitHub-Delivery`) are idempotent, and matching cross-source receipts must not create duplicate jobs.
 3. Active jobs with the same `work_key` (`owner/repo#number`) must coalesce instead of running concurrently.
 4. Different `work_key`s may run in parallel.
 5. `shadow` and `dry-run` modes must not call GitHub or OpenClaw.
@@ -71,6 +73,8 @@ Important invariants:
 - `prompt_rules/*.md`: packaged Markdown rules appended to agent prompts. Keep these readable; they are loaded with `importlib.resources` so they work from wheels/sdists.
 - `prompt_rules/roles/*.md`: packaged repository-role postures selected by `policy.json` `repoRoles`/`orgRoles`.
 - `reader.py`: IMAP polling and mailbox mutation.
+- `webhook.py`: webhook signature verification, structured event normalization and canonical event identity.
+- `backend.py`: dedicated webhook ingress and operator monitoring endpoints.
 - `monitor.py`: operational health checks.
 - `cli.py`: operational entrypoints and developer tooling.
 - `autoupdate.py`: safe release update planning. When changing runtime structure, reload boundaries, schema layout, dashboard packaging, queue semantics, or process/service topology, update the autoupdate classification and tests so the planner still knows whether a release can reload the dashboard, must defer executor work, or needs a migration window.

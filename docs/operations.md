@@ -12,13 +12,25 @@ This guide is for running and monitoring the bridge.
 | Policy | `~/.config/github-agent-bridge/policy.json` |
 | Environment | `systemd/env.example` copied to a private env file |
 | Units | `systemd/*.service`, `systemd/*.timer` |
-| Reader wrapper | packaged `github-agent-bridge-reader-run` console script |
+| Webhook ingress | `github-agent-bridge-webhook.socket` → `POST /api/webhooks/github` |
+| IMAP reader/fallback | packaged `github-agent-bridge-reader-run` console script |
 | Autoupdate wrapper | packaged `github-agent-bridge-autoupdate-run` console script |
 
 ## Production commands
 
-The reader systemd timer uses `github-agent-bridge-reader-run`, a small packaged
-wrapper around `gab read-imap-once` that reads `GITHUB_AGENT_BRIDGE_*`
+The preferred low-latency input is the signed, socket-activated webhook ingress:
+
+```bash
+systemctl --user status github-agent-bridge-webhook.socket
+systemctl --user status github-agent-bridge-webhook.service
+curl --fail http://127.0.0.1:8766/api/health
+```
+
+Webhook mode (`shadow`, `canary`, or `primary`) is independent from executor
+mode. See [`ingestion.md`](ingestion.md) before changing it.
+
+The IMAP reader/fallback timer uses `github-agent-bridge-reader-run`, a small
+packaged wrapper around `gab read-imap-once` that reads `GITHUB_AGENT_BRIDGE_*`
 environment variables, quotes Gmail mailbox names with spaces for IMAP, and
 conditionally adds `--mark-seen`.
 
@@ -627,6 +639,7 @@ location @dashboard_restarting {
 | Review-only job | normally below 15 minutes |
 | Implementation job | normally below 60 minutes |
 | Blocked dispatch | must not block unrelated PRs/issues |
+| Webhook ingress | health endpoint available; no unexplained delivery gap |
 | Mailbox cursor | must not advance before durable queue/ignore |
 
 ## Common operator tasks
