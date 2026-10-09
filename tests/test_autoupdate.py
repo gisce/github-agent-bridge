@@ -56,6 +56,67 @@ def release_runner(tag: str, files: list[str]):
     return run
 
 
+def test_update_plan_fetches_missing_tags_before_classifying_migrations(tmp_path):
+    calls: list[list[str]] = []
+    fetched = False
+
+    def runner(args, cwd):
+        nonlocal fetched
+        calls.append(list(args))
+        if args[:3] == ["gh", "release", "view"]:
+            return completed(json.dumps({"tagName": "v1.2.4"}))
+        if args[:2] == ["git", "fetch"]:
+            fetched = True
+            return completed()
+        if args[:2] == ["git", "diff"]:
+            if not fetched:
+                return completed("fatal: ambiguous argument v1.2.4", 128)
+            return completed("src/github_agent_bridge/sql/migrations/v0003_indexes.py")
+        return completed("unexpected command", 1)
+
+    plan = plan_update(
+        tmp_path / "missing.sqlite3",
+        repo="gisce/github-agent-bridge",
+        repo_dir=tmp_path,
+        installed_version="1.2.3",
+        runner=runner,
+    )
+
+    assert plan["classification"]["migration_files"] == [
+        "src/github_agent_bridge/sql/migrations/v0003_indexes.py"
+    ]
+    assert plan["decision"] == "stage_full_reload"
+    assert [call[-1] for call in calls if call[:2] == ["git", "fetch"]] == [
+        "refs/tags/v1.2.3:refs/tags/v1.2.3",
+        "refs/tags/v1.2.4:refs/tags/v1.2.4",
+    ]
+
+
+def test_update_plan_refuses_install_when_release_diff_unavailable(tmp_path):
+    def runner(args, cwd):
+        if args[:3] == ["gh", "release", "view"]:
+            return completed(json.dumps({"tagName": "v1.2.4"}))
+        return completed("fatal: missing ref", 128)
+
+    with pytest.raises(RuntimeError, match="refusing installation"):
+        plan_update(
+            tmp_path / "missing.sqlite3",
+            repo_dir=tmp_path,
+            installed_version="1.2.3",
+            runner=runner,
+        )
+
+
+def test_update_plan_refuses_empty_diff_between_distinct_releases(tmp_path):
+    with pytest.raises(RuntimeError, match="empty diff; refusing installation"):
+        plan_update(
+            tmp_path / "missing.sqlite3",
+            repo_dir=tmp_path,
+            installed_version="1.2.3",
+            runner=release_runner("v1.2.4", []),
+        )
+
+
 def test_model_smoke_postcheck_runs_all_required_routes(tmp_path):
     policy_path = tmp_path / "policy.json"
     policy_path.write_text(

@@ -816,11 +816,29 @@ def plan_update(
     release = ReleaseInfo(tag_name=target_tag, source="explicit_target") if target_tag else latest_release(repo, gh_bin=gh_bin, runner=runner)
 
     warnings: list[str] = []
-    try:
-        files = [] if release.tag_name == current_tag else changed_files_between(repo_path, current_tag, release.tag_name, runner=runner)
-    except RuntimeError as exc:
+    if release.tag_name == current_tag:
         files = []
-        warnings.append(f"changed_files_unavailable: {exc}")
+    else:
+        try:
+            files = changed_files_between(repo_path, current_tag, release.tag_name, runner=runner)
+        except RuntimeError as first_error:
+            # The release may have appeared before this checkout fetched its tag.
+            # Fetch the exact refs from the release repository, then retry. Never
+            # interpret a missing diff as an empty, migration-free update.
+            repo_ref = repo if repo.startswith(("http://", "https://", "git@")) else f"https://github.com/{repo}.git"
+            try:
+                for tag in (current_tag, release.tag_name):
+                    _git_output(["fetch", "--no-tags", repo_ref, f"refs/tags/{tag}:refs/tags/{tag}"], repo_path, runner)
+                files = changed_files_between(repo_path, current_tag, release.tag_name, runner=runner)
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"cannot classify update {current_tag}..{release.tag_name}; "
+                    f"refusing installation (initial diff: {first_error}; fetch/retry: {exc})"
+                ) from exc
+        if not files:
+            raise RuntimeError(
+                f"cannot classify update {current_tag}..{release.tag_name}: empty diff; refusing installation"
+            )
     classification = classify_changed_files(files)
     up_to_date = release.tag_name == current_tag
     migration_required = bool(classification["migration_files"])
