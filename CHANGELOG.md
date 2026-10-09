@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.76.8 (2026-10-09)
+
+### Performance Improvements
+
+- Finish SQLite persistence hardening
+  ([`67f1537`](https://github.com/gisce/github-agent-bridge/commit/67f1537c6bd83edacaa5600e14393b49e036d730))
+
+
 ## v0.76.7 (2026-10-08)
 
 ### Refactoring
