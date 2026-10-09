@@ -108,7 +108,10 @@ class FeedbackRepository:
         self.database = database
 
     def capture(self, event: FeedbackEvent) -> bool:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="feedback.capture",
+        ) as con:
             cursor = con.execute(
                 """INSERT OR IGNORE INTO feedback_events(
                     id, occurred_at, captured_at, source, scope, actor, comment,
@@ -133,7 +136,7 @@ class FeedbackRepository:
             return bool(cursor.rowcount)
 
     def get_event(self, event_id: str) -> FeedbackEvent | None:
-        with self.database.read_only() as con:
+        with self.database.read("feedback.get_event") as con:
             row = con.execute(
                 "SELECT * FROM feedback_events WHERE id=?", (event_id,)
             ).fetchone()
@@ -158,7 +161,7 @@ class FeedbackRepository:
             + " ORDER BY occurred_at ASC, id ASC LIMIT ?"
         )
         args.append(limit)
-        with self.database.read_only() as con:
+        with self.database.read("feedback.pending_events") as con:
             rows = con.execute(sql, args).fetchall()
         return [self._event_from_row(row) for row in rows]
 
@@ -172,14 +175,17 @@ class FeedbackRepository:
             args.extend([scope, f"{scope}:%"])
         sql += " ORDER BY occurred_at DESC, id DESC LIMIT ?"
         args.append(limit)
-        with self.database.read_only() as con:
+        with self.database.read("feedback.list_events") as con:
             rows = con.execute(sql, args).fetchall()
         return [self._event_from_row(row) for row in rows]
 
     def update_event_context(
         self, event_id: str, context: dict[str, Any]
     ) -> bool:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="feedback.update_event_context",
+        ) as con:
             cursor = con.execute(
                 "UPDATE feedback_events SET context_json=? WHERE id=?",
                 (
@@ -192,7 +198,7 @@ class FeedbackRepository:
     def source_for_message_id(self, message_id: str | None) -> dict[str, Any]:
         if not message_id:
             return {}
-        with self.database.read_only() as con:
+        with self.database.read("feedback.source_for_message_id") as con:
             row = con.execute(
                 "SELECT id, trigger_actor, trigger_actor_avatar_url, context_json "
                 "FROM jobs WHERE message_id=? ORDER BY id DESC LIMIT 1",
@@ -222,7 +228,10 @@ class FeedbackRepository:
         source_events: list[str],
         now: str,
     ) -> FeedbackRule:
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="feedback.upsert_rule",
+        ) as con:
             row = con.execute(
                 "SELECT * FROM feedback_rules WHERE id=?", (rule_id,)
             ).fetchone()
@@ -275,14 +284,17 @@ class FeedbackRepository:
             return self._rule_from_row(stored)
 
     def get_rule(self, rule_id: str) -> FeedbackRule | None:
-        with self.database.read_only() as con:
+        with self.database.read("feedback.get_rule") as con:
             row = con.execute(
                 "SELECT * FROM feedback_rules WHERE id=?", (rule_id,)
             ).fetchone()
         return self._rule_from_row(row) if row else None
 
     def delete_rule(self, rule_id: str) -> bool:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="feedback.delete_rule",
+        ) as con:
             cursor = con.execute(
                 "DELETE FROM feedback_rules WHERE id=?", (rule_id,)
             )
@@ -291,7 +303,10 @@ class FeedbackRepository:
     def move_rule(
         self, rule_id: str, new_id: str, new_scope: str
     ) -> FeedbackRule | None:
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="feedback.move_rule",
+        ) as con:
             row = con.execute(
                 "SELECT * FROM feedback_rules WHERE id=?", (rule_id,)
             ).fetchone()
@@ -366,12 +381,15 @@ class FeedbackRepository:
             " ORDER BY last_seen DESC, created_at DESC, scope ASC, "
             "type ASC, rule ASC"
         )
-        with self.database.read_only() as con:
+        with self.database.read("feedback.list_rules") as con:
             rows = con.execute(sql, args).fetchall()
         return [self._rule_from_row(row) for row in rows]
 
     def store_proposal(self, proposal: FeedbackProposal) -> None:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="feedback.store_proposal",
+        ) as con:
             con.execute(
                 """INSERT OR REPLACE INTO feedback_rule_proposals(
                     id, event_id, created_at, updated_at, status, scope, type,
@@ -394,7 +412,7 @@ class FeedbackRepository:
             )
 
     def get_proposal(self, proposal_id: str) -> FeedbackProposal | None:
-        with self.database.read_only() as con:
+        with self.database.read("feedback.get_proposal") as con:
             row = con.execute(
                 "SELECT * FROM feedback_rule_proposals WHERE id=?",
                 (proposal_id,),
@@ -404,7 +422,10 @@ class FeedbackRepository:
     def set_proposal_status(
         self, proposal_id: str, status: str, now: str
     ) -> FeedbackProposal | None:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="feedback.set_proposal_status",
+        ) as con:
             cursor = con.execute(
                 "UPDATE feedback_rule_proposals SET status=?, updated_at=?, "
                 "error=CASE WHEN ?='approved' THEN NULL ELSE error END WHERE id=?",
@@ -428,12 +449,12 @@ class FeedbackRepository:
             args.append(status)
         sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
         args.append(limit)
-        with self.database.read_only() as con:
+        with self.database.read("feedback.list_proposals") as con:
             rows = con.execute(sql, args).fetchall()
         return [self._proposal_from_row(row) for row in rows]
 
     def list_repositories(self) -> list[str]:
-        with self.database.read_only() as con:
+        with self.database.read("feedback.list_repositories") as con:
             rows = con.execute(
                 """SELECT scope FROM feedback_events
                 UNION SELECT scope FROM feedback_rules

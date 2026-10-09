@@ -68,7 +68,10 @@ class RuntimeRepository:
         active_job_id: int | None = None,
         recent_error_count: int = 0,
     ) -> None:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="runtime.record_worker_heartbeat",
+        ) as con:
             con.execute(
                 """INSERT INTO worker_heartbeats(
                        worker_id, executor_id, pid, last_seen, active_job_id, loop_state, recent_error_count
@@ -93,7 +96,10 @@ class RuntimeRepository:
 
     def delete_worker_heartbeats_except(self, executor_id: str) -> int:
         """Remove heartbeat rows left by previous executor processes."""
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="runtime.delete_worker_heartbeats_except",
+        ) as con:
             cursor = con.execute(
                 "DELETE FROM worker_heartbeats WHERE executor_id != ?",
                 (executor_id,),
@@ -103,7 +109,10 @@ class RuntimeRepository:
     def register_process(self, job_id: int, process: RuntimeProcess) -> bool:
         """Persist the exact process that owns a running job."""
         now = utc_now()
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="runtime.register_process",
+        ) as con:
             row = con.execute(
                 "SELECT work_key, metadata_json FROM jobs WHERE id=? AND status='running' AND locked_by=?",
                 (job_id, process.worker_id),
@@ -137,7 +146,10 @@ class RuntimeRepository:
     def mark_process_exited(self, job_id: int, worker_id: str) -> bool:
         """Mark a registered process as exited while result handling finishes."""
         now = utc_now()
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="runtime.mark_process_exited",
+        ) as con:
             row = con.execute(
                 "SELECT metadata_json FROM jobs WHERE id=? AND status='running' AND locked_by=?",
                 (job_id, worker_id),
@@ -168,7 +180,10 @@ class RuntimeRepository:
     ) -> bool:
         """Append a session event and its progress projection atomically."""
         now = utc_now()
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="runtime.add_job_session_event",
+        ) as con:
             row = con.execute(
                 "SELECT work_key, metadata_json FROM jobs WHERE id=?", (job_id,)
             ).fetchone()
@@ -208,7 +223,10 @@ class RuntimeRepository:
         summary: str,
         detail: str | None,
     ) -> bool:
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="runtime.add_job_worklog",
+        ) as con:
             row = con.execute(
                 "SELECT work_key FROM jobs WHERE id=?", (job_id,)
             ).fetchone()

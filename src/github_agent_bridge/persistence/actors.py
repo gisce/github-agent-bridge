@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..sql.migrations import validate_migrations
-from .database import Database
+from .database import Database, TransactionMode
 
 
 @dataclass(frozen=True)
@@ -28,11 +28,11 @@ class ActorBackfillRepository:
         self.database = database
 
     def validate_current_schema(self) -> None:
-        with self.database.read_only() as con:
+        with self.database.read("actors.validate_current_schema") as con:
             validate_migrations(con)
 
     def list_candidates(self, limit: int | None = None) -> list[ActorBackfillCandidate]:
-        with self.database.read_only() as con:
+        with self.database.read("actors.list_candidates") as con:
             jobs_table = con.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'"
             ).fetchone()
@@ -85,7 +85,10 @@ class ActorBackfillRepository:
     def apply_updates(self, updates: list[ActorBackfillUpdate]) -> None:
         if not updates:
             return
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="actors.apply_updates",
+        ) as con:
             con.executemany(
                 "UPDATE jobs SET trigger_actor=?, trigger_actor_avatar_url=? WHERE id=?",
                 [

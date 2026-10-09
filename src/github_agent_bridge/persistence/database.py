@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import logging
+import re
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterator
+
+
+LOGGER = logging.getLogger(__name__)
+OPERATION_NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 
 
 class TransactionMode(str, Enum):
@@ -34,6 +41,7 @@ class Database:
         *,
         timeout_seconds: float = 30,
         busy_timeout_ms: int | None = None,
+        slow_operation_seconds: float = 1.0,
     ) -> None:
         if timeout_seconds < 0:
             raise ValueError("timeout_seconds must be non-negative")
@@ -42,9 +50,12 @@ class Database:
         )
         if configured_busy_timeout < 0:
             raise ValueError("busy_timeout_ms must be non-negative")
+        if slow_operation_seconds < 0:
+            raise ValueError("slow_operation_seconds must be non-negative")
         self.path = Path(path).expanduser()
         self.timeout_seconds = timeout_seconds
         self.busy_timeout_ms = configured_busy_timeout
+        self.slow_operation_seconds = slow_operation_seconds
 
     def read_write(self) -> sqlite3.Connection:
         """Open a read-write connection with the bridge's SQLite policy."""
@@ -80,25 +91,89 @@ class Database:
         return con
 
     @contextmanager
+    def read(self, operation: str = "database.read") -> Iterator[sqlite3.Connection]:
+        """Run one named read-only operation with safe operational telemetry."""
+        with self._observe(operation, access="read"):
+            with self.read_only() as con:
+                yield con
+
+    @contextmanager
     def transaction(
         self,
         mode: TransactionMode = TransactionMode.DEFERRED,
+        *,
+        operation: str = "database.transaction",
     ) -> Iterator[sqlite3.Connection]:
         """Run one unit of work in an explicit deferred or immediate transaction."""
         if not isinstance(mode, TransactionMode):
             raise ValueError(f"unsupported transaction mode: {mode}")
-        con = self.read_write()
+        with self._observe(operation, access=mode.value):
+            con = self.read_write()
+            try:
+                statement = "BEGIN" if mode is TransactionMode.DEFERRED else "BEGIN IMMEDIATE"
+                con.execute(statement)
+                yield con
+            except BaseException:
+                con.rollback()
+                raise
+            else:
+                con.commit()
+            finally:
+                con.close()
+
+    @contextmanager
+    def _observe(self, operation: str, *, access: str) -> Iterator[None]:
+        operation = operation.strip()
+        if not OPERATION_NAME.fullmatch(operation):
+            raise ValueError("operation must be a stable lowercase dotted name")
+        started = time.monotonic()
+        busy = False
         try:
-            statement = "BEGIN" if mode is TransactionMode.DEFERRED else "BEGIN IMMEDIATE"
-            con.execute(statement)
-            yield con
-        except BaseException:
-            con.rollback()
+            yield
+        except sqlite3.OperationalError as exc:
+            busy = self._is_contention(exc)
+            if busy:
+                self._log_operation(
+                    "sqlite_operation_busy",
+                    operation=operation,
+                    access=access,
+                    duration_seconds=time.monotonic() - started,
+                )
             raise
-        else:
-            con.commit()
         finally:
-            con.close()
+            duration = time.monotonic() - started
+            if not busy and duration >= self.slow_operation_seconds:
+                self._log_operation(
+                    "sqlite_operation_slow",
+                    operation=operation,
+                    access=access,
+                    duration_seconds=duration,
+                )
+
+    @staticmethod
+    def _is_contention(exc: sqlite3.OperationalError) -> bool:
+        error_code = getattr(exc, "sqlite_errorcode", None)
+        if error_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            return True
+        message = str(exc).lower()
+        return "database is locked" in message or "database is busy" in message
+
+    @staticmethod
+    def _log_operation(
+        event: str,
+        *,
+        operation: str,
+        access: str,
+        duration_seconds: float,
+    ) -> None:
+        LOGGER.warning(
+            event,
+            extra={
+                "sqlite_operation": operation,
+                "sqlite_access": access,
+                "sqlite_duration_ms": round(duration_seconds * 1000, 3),
+            },
+        )
 
     def _configure(self, con: sqlite3.Connection, *, read_only: bool) -> None:
         con.row_factory = sqlite3.Row

@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 
 from ..models import utc_now
-from .database import Database
+from .database import Database, TransactionMode
 
 
 EXECUTOR_PAUSE_STATE_KEY = "executor_paused"
@@ -38,7 +38,10 @@ class StateRepository:
         self.database = database
 
     def set(self, key: str, value: str) -> None:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="state.set",
+        ) as con:
             con.execute(
                 "INSERT INTO state(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (key, value),
@@ -53,7 +56,7 @@ class StateRepository:
     ) -> str:
         if connection is not None:
             return self._get(connection, key, default)
-        with self.database.read_only() as con:
+        with self.database.read("state.get") as con:
             return self._get(con, key, default)
 
     def pause_executor(self, reason: str = "") -> None:

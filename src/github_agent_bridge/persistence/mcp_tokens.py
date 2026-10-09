@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .database import Database
+from .database import Database, TransactionMode
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,10 @@ class McpTokenRepository:
         self.database = database
 
     def create(self, record: McpToken, token_hash: str) -> None:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="mcp_tokens.create",
+        ) as con:
             con.execute(
                 """INSERT INTO mcp_tokens(
                     id, name, token_hash, user_login, created_by, created_at, expires_at
@@ -60,7 +63,10 @@ class McpTokenRepository:
             )
 
     def update_owner(self, token_id: str, user_login: str | None) -> McpToken | None:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="mcp_tokens.update_owner",
+        ) as con:
             cursor = con.execute(
                 "UPDATE mcp_tokens SET user_login=? WHERE id=? AND revoked_at IS NULL",
                 (user_login, token_id),
@@ -86,7 +92,7 @@ class McpTokenRepository:
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY created_at DESC, id DESC"
-        with self.database.read_only() as con:
+        with self.database.read("mcp_tokens.list") as con:
             return [self._from_row(row) for row in con.execute(sql, args)]
 
     def revoke(
@@ -101,7 +107,10 @@ class McpTokenRepository:
         if user_login:
             owner_clause = " AND lower(user_login)=?"
             args.append(user_login)
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="mcp_tokens.revoke",
+        ) as con:
             cursor = con.execute(
                 f"UPDATE mcp_tokens SET revoked_at=? WHERE id=? AND revoked_at IS NULL{owner_clause}",
                 args,
@@ -109,7 +118,7 @@ class McpTokenRepository:
             return cursor.rowcount > 0
 
     def active_credentials(self, now: str) -> list[McpTokenCredential]:
-        with self.database.read_only() as con:
+        with self.database.read("mcp_tokens.active_credentials") as con:
             rows = con.execute(
                 self._select_sql(include_hash=True)
                 + " WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)",
@@ -121,7 +130,10 @@ class McpTokenRepository:
         ]
 
     def mark_used(self, token_id: str, used_at: str) -> None:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="mcp_tokens.mark_used",
+        ) as con:
             con.execute(
                 "UPDATE mcp_tokens SET last_used_at=? WHERE id=?",
                 (used_at, token_id),

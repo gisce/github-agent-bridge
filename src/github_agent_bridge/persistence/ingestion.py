@@ -84,7 +84,10 @@ class IngestionRepository:
         actor = request.trigger_actor
         now = utc_now()
         try:
-            with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+            with self.database.transaction(
+                TransactionMode.IMMEDIATE,
+                operation="ingestion.ingest",
+            ) as con:
                 try:
                     cursor = con.execute(
                         "INSERT INTO ingest_receipts(source,source_key,payload_hash,event_key,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
@@ -276,7 +279,10 @@ class IngestionRepository:
     ) -> int:
         now = utc_now()
         try:
-            with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+            with self.database.transaction(
+                TransactionMode.IMMEDIATE,
+                operation="ingestion.quarantine",
+            ) as con:
                 cursor = con.execute(
                     """INSERT INTO quarantined_notifications(
                         uid,message_id,subject,from_addr,reason,error,body_excerpt,metadata_json,created_at
@@ -307,7 +313,7 @@ class IngestionRepository:
                 return quarantine_id
         except sqlite3.IntegrityError:
             if notification.message_id:
-                with self.database.read_only() as con:
+                with self.database.read("ingestion.find_quarantine") as con:
                     row = con.execute(
                         "SELECT id FROM quarantined_notifications WHERE message_id=?",
                         (notification.message_id,),

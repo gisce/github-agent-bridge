@@ -94,7 +94,10 @@ class CommitStatusRepository:
 
     def claim(self, job_id: int | None = None) -> CommitStatusClaim | None:
         now = utc_now()
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="commit_statuses.claim",
+        ) as con:
             job_filter = "AND job_id=?" if job_id is not None else ""
             args: tuple[object, ...] = (
                 (COMMIT_STATUS_RETRY_LIMIT, job_id)
@@ -134,7 +137,10 @@ class CommitStatusRepository:
         clean_sha = sha.strip()
         if not clean_sha:
             raise ValueError("commit status SHA cannot be empty")
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="commit_statuses.pin_sha",
+        ) as con:
             con.execute(
                 "UPDATE job_commit_statuses SET sha=COALESCE(sha,?),updated_at=? WHERE id=?",
                 (clean_sha, utc_now(), status_id),
@@ -154,7 +160,10 @@ class CommitStatusRepository:
         error: str | None = None,
     ) -> None:
         now = utc_now()
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="commit_statuses.finish",
+        ) as con:
             row = con.execute(
                 "SELECT revision FROM job_commit_statuses WHERE id=?", (status_id,)
             ).fetchone()
@@ -190,7 +199,10 @@ class CommitStatusRepository:
                 )
 
     def recover_interrupted(self) -> int:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="commit_statuses.recover_interrupted",
+        ) as con:
             cursor = con.execute(
                 """UPDATE job_commit_statuses
                 SET delivery_status='pending',updated_at=?

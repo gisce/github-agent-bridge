@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from .database import Database
+from .database import Database, TransactionMode
 
 
 @dataclass(frozen=True)
@@ -74,7 +74,10 @@ class ObservabilityRepository:
         alerts: list[str],
         retention_seconds: int,
     ) -> None:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="observability.record_monitor_observation",
+        ) as con:
             children = metrics.get("executor_children") or []
             if not isinstance(children, list):
                 children = []
@@ -140,7 +143,7 @@ class ObservabilityRepository:
             self._record_alerts(con, now, metrics, alerts)
 
     def recent_process_samples(self, limit: int) -> list[ProcessSample]:
-        with self.database.read_only() as con:
+        with self.database.read("observability.recent_process_samples") as con:
             rows = con.execute(
                 """SELECT id, ts, executor_pid, root_pid, running_job_ids_json,
                        cpu_ticks, io_bytes, active_since_last_sample, idle_seconds
@@ -153,7 +156,7 @@ class ObservabilityRepository:
         self, *, include_resolved: bool, limit: int
     ) -> list[ObservabilityAlert]:
         where = "" if include_resolved else "WHERE resolved_at IS NULL"
-        with self.database.read_only() as con:
+        with self.database.read("observability.list_alerts") as con:
             rows = con.execute(
                 f"""SELECT fingerprint, source, severity, message, context_json,
                        first_seen, last_seen, resolved_at, observations

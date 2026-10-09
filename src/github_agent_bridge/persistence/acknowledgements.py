@@ -59,7 +59,10 @@ class AcknowledgementRepository:
     def claim(self, job_id: int | None = None) -> AcknowledgementClaim | None:
         """Reserve one acknowledgement before any external side effect."""
         now = utc_now()
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="acknowledgements.claim",
+        ) as con:
             job_filter = "AND a.job_id=?" if job_id is not None else ""
             status_filter = (
                 "a.status IN ('pending','failed')"
@@ -90,7 +93,10 @@ class AcknowledgementRepository:
 
     def recover_interrupted(self) -> int:
         """Release acknowledgements interrupted by an executor restart."""
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="acknowledgements.recover_interrupted",
+        ) as con:
             cursor = con.execute(
                 "UPDATE job_acknowledgements SET status='pending',updated_at=? WHERE status='processing'",
                 (utc_now(),),
@@ -98,7 +104,10 @@ class AcknowledgementRepository:
             return cursor.rowcount
 
     def finish(self, acknowledgement_id: int, ok: bool, error: str | None = None) -> None:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="acknowledgements.finish",
+        ) as con:
             con.execute(
                 "UPDATE job_acknowledgements SET status=?,last_error=?,updated_at=? WHERE id=?",
                 (
@@ -110,7 +119,7 @@ class AcknowledgementRepository:
             )
 
     def all_succeeded(self, job_id: int) -> bool:
-        with self.database.read_only() as con:
+        with self.database.read("acknowledgements.all_succeeded") as con:
             row = con.execute(
                 "SELECT COUNT(*) AS total,SUM(status='succeeded') AS succeeded FROM job_acknowledgements WHERE job_id=?",
                 (job_id,),

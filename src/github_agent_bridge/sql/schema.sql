@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS ingest_receipts (
 );
 CREATE INDEX IF NOT EXISTS idx_ingest_receipts_event_key ON ingest_receipts(event_key);
 CREATE INDEX IF NOT EXISTS idx_ingest_receipts_job_id ON ingest_receipts(job_id);
+CREATE INDEX IF NOT EXISTS idx_ingest_receipts_coverage ON ingest_receipts(source, julianday(created_at), event_key);
 CREATE TABLE IF NOT EXISTS github_events (
   event_key TEXT PRIMARY KEY,
   job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
@@ -135,6 +136,7 @@ CREATE TABLE IF NOT EXISTS webhook_shadow_receipts (
 CREATE INDEX IF NOT EXISTS idx_webhook_shadow_event_key ON webhook_shadow_receipts(event_key);
 CREATE INDEX IF NOT EXISTS idx_webhook_shadow_created ON webhook_shadow_receipts(created_at);
 CREATE INDEX IF NOT EXISTS idx_webhook_shadow_delivery_page ON webhook_shadow_receipts(created_at DESC, delivery_id DESC);
+CREATE INDEX IF NOT EXISTS idx_webhook_shadow_coverage ON webhook_shadow_receipts(julianday(created_at), event_key);
 CREATE TABLE IF NOT EXISTS webhook_hooks (
   hook_id TEXT PRIMARY KEY,
   target TEXT NOT NULL,
@@ -182,6 +184,7 @@ CREATE TABLE IF NOT EXISTS coalesced_notifications (
   context_json TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_coalesced_notifications_job_id ON coalesced_notifications(job_id, id);
 CREATE TABLE IF NOT EXISTS quarantined_notifications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   uid INTEGER,
@@ -207,6 +210,7 @@ CREATE TABLE IF NOT EXISTS worklog (
   summary TEXT NOT NULL,
   detail TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_worklog_job_id ON worklog(job_id, id);
 CREATE TABLE IF NOT EXISTS job_session_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -229,6 +233,7 @@ CREATE TABLE IF NOT EXISTS job_progress (
   detail TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_job_progress_job_kind ON job_progress(job_id, kind, id);
+CREATE INDEX IF NOT EXISTS idx_job_progress_job_id ON job_progress(job_id, id);
 CREATE TABLE IF NOT EXISTS process_samples (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -290,6 +295,7 @@ CREATE TABLE IF NOT EXISTS feedback_rules (
   observations INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_feedback_rules_scope_confidence ON feedback_rules(scope, confidence);
+CREATE INDEX IF NOT EXISTS idx_feedback_rules_scope_nocase_confidence ON feedback_rules(scope COLLATE NOCASE, confidence);
 CREATE TABLE IF NOT EXISTS feedback_rule_proposals (
   id TEXT PRIMARY KEY,
   event_id TEXT NOT NULL REFERENCES feedback_events(id) ON DELETE CASCADE,
@@ -330,3 +336,4 @@ CREATE TABLE IF NOT EXISTS web_push_subscriptions (
   disabled_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_web_push_subscriptions_user ON web_push_subscriptions(user_login, disabled_at, updated_at);
+CREATE INDEX IF NOT EXISTS idx_web_push_subscriptions_active_recipient ON web_push_subscriptions(lower(user_login), disabled_at, updated_at DESC);

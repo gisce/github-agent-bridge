@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 
 import pytest
@@ -74,3 +75,63 @@ def test_transaction_rolls_back_the_complete_unit_of_work(tmp_path):
 
     with database.read_only() as con:
         assert con.execute("SELECT count(*) FROM example").fetchone()[0] == 0
+
+
+def test_named_read_records_slow_operation_without_sql_or_parameters(tmp_path, caplog):
+    database = Database(
+        tmp_path / "bridge.sqlite3",
+        slow_operation_seconds=0,
+    )
+    with database.read_write() as con:
+        con.execute("CREATE TABLE example (secret TEXT NOT NULL)")
+        con.execute("INSERT INTO example(secret) VALUES(?)", ("sensitive-value",))
+
+    with caplog.at_level(logging.WARNING):
+        with database.read("tests.named_read") as con:
+            assert con.execute("SELECT secret FROM example").fetchone()[0] == (
+                "sensitive-value"
+            )
+
+    record = next(
+        record for record in caplog.records if record.message == "sqlite_operation_slow"
+    )
+    assert record.sqlite_operation == "tests.named_read"
+    assert record.sqlite_access == "read"
+    assert record.sqlite_duration_ms >= 0
+    assert "SELECT secret" not in caplog.text
+    assert "sensitive-value" not in caplog.text
+
+
+def test_named_transaction_records_sqlite_contention(tmp_path, caplog):
+    database = Database(tmp_path / "bridge.sqlite3", timeout_seconds=0.01)
+    with database.read_write() as con:
+        con.execute("CREATE TABLE example (value TEXT NOT NULL)")
+    blocker = database.read_write()
+    blocker.execute("BEGIN IMMEDIATE")
+
+    try:
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                with database.transaction(
+                    TransactionMode.IMMEDIATE,
+                    operation="tests.contended_write",
+                ):
+                    pass
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    record = next(
+        record for record in caplog.records if record.message == "sqlite_operation_busy"
+    )
+    assert record.sqlite_operation == "tests.contended_write"
+    assert record.sqlite_access == "immediate"
+    assert record.sqlite_duration_ms >= 0
+
+
+def test_operation_names_reject_sql_and_free_form_values(tmp_path):
+    database = Database(tmp_path / "bridge.sqlite3")
+
+    with pytest.raises(ValueError, match="stable lowercase dotted name"):
+        with database.read("SELECT secret FROM tokens"):
+            pass

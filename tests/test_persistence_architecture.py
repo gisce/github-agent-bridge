@@ -78,3 +78,47 @@ def test_sqlite_connections_and_sql_stay_inside_persistence_boundaries():
             )
 
     assert violations == []
+
+
+def test_repository_operations_declare_transaction_mode_and_safe_name():
+    violations: list[str] = []
+    persistence_root = PACKAGE_ROOT / "persistence"
+    for path in sorted(persistence_root.glob("*.py")):
+        if path.name in {"database.py", "__init__.py"}:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(
+                node.func, ast.Attribute
+            ):
+                continue
+            if node.func.attr == "read_only":
+                violations.append(
+                    f"{path.name}:{node.lineno}: use named Database.read()"
+                )
+                continue
+            if node.func.attr not in {"read", "transaction"}:
+                continue
+            operation = next(
+                (keyword.value for keyword in node.keywords if keyword.arg == "operation"),
+                node.args[0] if node.func.attr == "read" and node.args else None,
+            )
+            if not isinstance(operation, ast.Constant) or not isinstance(
+                operation.value, str
+            ):
+                violations.append(
+                    f"{path.name}:{node.lineno}: missing literal operation name"
+                )
+            if node.func.attr == "transaction":
+                mode = node.args[0] if node.args else None
+                if not (
+                    isinstance(mode, ast.Attribute)
+                    and isinstance(mode.value, ast.Name)
+                    and mode.value.id == "TransactionMode"
+                    and mode.attr in {"DEFERRED", "IMMEDIATE"}
+                ):
+                    violations.append(
+                        f"{path.name}:{node.lineno}: missing explicit TransactionMode"
+                    )
+
+    assert violations == []
