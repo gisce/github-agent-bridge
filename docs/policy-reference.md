@@ -769,14 +769,15 @@ Agents must also apply the comment value rule before posting: comment only when 
 
 `intentClassifier` controls an optional enqueue-time LLM classifier for trusted GitHub comments and reviews. It is disabled by default; when enabled, the bridge calls OpenClaw with the packaged `prompt_rules/intent_classifier.md` prompt or `promptOverrides.rules.intent_classifier`, expects JSON output, and uses the result only when confidence is high enough. Webhook comment/review parser results are still guarded even when the classifier is disabled: only a high-confidence applied classifier result, or the explicit structured `pr_authored_by_bot` feedback path, may keep/elevate webhook comment work to `work_allowed`. Low-confidence, invalid, timed-out, failed, or disabled webhook comment/review classifier paths fall back to `review_only`; email ingestion keeps the deterministic parser result for backward compatibility.
 
-Classifier calls use `openclaw agent exec --code-mode direct`, avoiding the
-long-lived Gateway session path for enqueue-time routing and preventing
-untrusted GitHub text from running as a coding-agent turn with repository tools.
-The bridge verifies the `openclaw agent exec --help` contract before
-classification, retries once, limits classifier subprocess concurrency, and
-treats failure as `review_only` for webhook comments/reviews. Deployments that
-enable the classifier must run OpenClaw CLI 2026.9.9 or newer with `agent exec`,
-`--code-mode`, `--message-file`, `--json`, `--timeout`, and `--thinking`.
+Classifier calls use `openclaw infer model run --local --prompt --json`, not
+`openclaw agent exec`. This uses OpenClaw's raw model inference path, which does
+not start a coding-agent turn, load repository tools, load bundled MCP servers,
+or include prior session transcript. The bridge verifies the `openclaw infer
+model run --help` contract before classification, retries once, limits
+classifier subprocess concurrency, and treats failure as `review_only` for
+webhook comments/reviews. Deployments that enable the classifier must run an
+OpenClaw CLI that exposes `infer model run`, `--local`, `--prompt`, `--json`,
+`--model`, and `--thinking`.
 Normal executor, feedback-learning, and interactive gateway calls still need
 suitable OpenClaw concurrency headroom; see
 [`operations.md`](operations.md#openclaw-concurrency-headroom).
@@ -808,7 +809,7 @@ Example:
 | `minConfidence` | number | `0.75` | Minimum classifier confidence required before replacing the deterministic parser action/work-intent result. |
 | `onlyWhenParserDefaulted` | boolean | `true` | Run the classifier for conservative comment/review classifications and for bot-mentioned comments even when the parser saw implementation-looking language. Set to `false` to let the classifier arbitrate all eligible trusted GitHub comments and reviews. |
 | `openclawBin` | string | `openclaw` | OpenClaw executable used for classifier subprocess calls. |
-| `sessionId` | string | `github-agent-bridge-intent` | Backward-compatible setting retained for older deployments. Current classifier execution uses `openclaw agent exec` and does not rely on a long-lived OpenClaw session id. |
+| `sessionId` | string | `github-agent-bridge-intent` | Backward-compatible setting retained for older deployments. Current classifier execution uses raw `openclaw infer model run` and does not rely on a long-lived OpenClaw session id. |
 | `timeout` | integer | `60` | Maximum seconds to wait for one classifier call before falling back conservatively for webhook comments/reviews. |
 
 The classifier runs before policy decision mapping, but it does not grant trust or bypass authorization. Source trust, `enabledRepos`, `actions`, `trustedRepos`, `trustedOrgs`, routes, roles, and the final `Policy.decision` checks still apply after classification.

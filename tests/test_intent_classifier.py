@@ -5,7 +5,7 @@ import subprocess
 
 from github_agent_bridge.intent_classifier import (
     ParserResult,
-    assert_openclaw_agent_exec_supported,
+    assert_openclaw_model_run_supported,
     build_intent_prompt,
     classify_notification_with_llm,
     intent_session_id,
@@ -215,9 +215,9 @@ def test_normalize_result_requires_write_permission_for_work_allowed():
     assert result.work_intent == "review_only"
 
 
-def test_classify_notification_with_llm_uses_agent_exec_with_stdin_prompt(monkeypatch):
+def test_classify_notification_with_llm_uses_toolless_model_run(monkeypatch):
     calls = []
-    assert_openclaw_agent_exec_supported.cache_clear()
+    assert_openclaw_model_run_supported.cache_clear()
 
     def fake_run(cmd, **kwargs):
         calls.append((cmd, kwargs))
@@ -225,9 +225,8 @@ def test_classify_notification_with_llm_uses_agent_exec_with_stdin_prompt(monkey
             return subprocess.CompletedProcess(
                 cmd,
                 0,
-                "Usage: openclaw agent exec\n"
-                "--code-mode <mode> direct | auto | code\n"
-                "--message-file <path>\n--json\n--timeout <seconds>\n"
+                "Usage: openclaw infer model run\n"
+                "--local\n--prompt <text>\n--json\n--model <provider/model>\n"
                 "--thinking <level>\n",
                 "",
             )
@@ -273,16 +272,18 @@ def test_classify_notification_with_llm_uses_agent_exec_with_stdin_prompt(monkey
         )
 
     classifier_calls = [(cmd, kwargs) for cmd, kwargs in calls if cmd[-1] != "--help"]
-    assert [cmd[:4] for cmd, _ in classifier_calls] == [["/tmp/openclaw", "agent", "exec", "--json"]] * 2
-    assert all("--code-mode" in cmd for cmd, _ in classifier_calls)
-    assert all(cmd[cmd.index("--code-mode") + 1] == "direct" for cmd, _ in classifier_calls)
-    assert all("--message-file" in cmd and "-" in cmd for cmd, _ in classifier_calls)
-    assert all("Event JSON:" in kwargs["input"] for _, kwargs in classifier_calls)
-    assert classifier_calls[0][1]["input"] != classifier_calls[1][1]["input"]
+    assert [cmd[:5] for cmd, _ in classifier_calls] == [["/tmp/openclaw", "infer", "model", "run", "--local"]] * 2
+    assert all("--prompt" in cmd for cmd, _ in classifier_calls)
+    assert all("Event JSON:" in cmd[cmd.index("--prompt") + 1] for cmd, _ in classifier_calls)
+    assert all("--code-mode" not in cmd and "agent" not in cmd for cmd, _ in classifier_calls)
+    assert all("input" not in kwargs for _, kwargs in classifier_calls)
+    assert classifier_calls[0][0][classifier_calls[0][0].index("--prompt") + 1] != classifier_calls[1][0][
+        classifier_calls[1][0].index("--prompt") + 1
+    ]
 
 
-def test_openclaw_agent_exec_contract_rejects_unsupported_cli(monkeypatch):
-    assert_openclaw_agent_exec_supported.cache_clear()
+def test_openclaw_model_run_contract_rejects_unsupported_cli(monkeypatch):
+    assert_openclaw_model_run_supported.cache_clear()
 
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(
@@ -295,56 +296,58 @@ def test_openclaw_agent_exec_contract_rejects_unsupported_cli(monkeypatch):
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     try:
-        assert_openclaw_agent_exec_supported("/tmp/openclaw")
+        assert_openclaw_model_run_supported("/tmp/openclaw")
     except RuntimeError as exc:
-        assert "required 'agent exec' contract" in str(exc)
+        assert "required tool-less model run contract" in str(exc)
         assert "Usage: openclaw agent [options] [command]" in str(exc)
     else:
         raise AssertionError("expected unsupported OpenClaw CLI to fail the contract check")
 
 
-def test_openclaw_agent_exec_cli_accepts_classifier_contract():
+def test_openclaw_model_run_cli_accepts_classifier_contract():
     openclaw_bin = shutil.which("openclaw")
     if not openclaw_bin:
         pytest.skip("openclaw CLI is not installed")
 
-    proc = subprocess.run(
-        [
-            openclaw_bin,
-            "agent",
-            "exec",
-            "--help",
-        ],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=10,
-    )
+    try:
+        proc = subprocess.run(
+            [
+                openclaw_bin,
+                "infer",
+                "model",
+                "run",
+                "--help",
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.skip("installed openclaw CLI timed out while rendering infer model run help")
 
     output = proc.stdout + proc.stderr
     assert proc.returncode == 0
-    assert "Usage: openclaw agent exec" in output
-    assert "--code-mode <mode>" in output
-    assert "direct" in output
-    assert "--message-file <path>" in output
+    assert "Usage: openclaw infer model run" in output
+    assert "--local" in output
+    assert "--prompt <text>" in output
     assert "--json" in output
-    assert "--timeout <seconds>" in output
+    assert "--model <provider/model>" in output
     assert "--thinking <level>" in output
 
 
 def test_classify_notification_with_llm_reports_timeout_without_prompt(monkeypatch):
     notif = notification("<1@github.com>", "@pilipilisbot review this")
-    assert_openclaw_agent_exec_supported.cache_clear()
+    assert_openclaw_model_run_supported.cache_clear()
 
     def fake_run(cmd, **kwargs):
         if cmd[-1] == "--help":
             return subprocess.CompletedProcess(
                 cmd,
                 0,
-                "Usage: openclaw agent exec\n"
-                "--code-mode <mode> direct | auto | code\n"
-                "--message-file <path>\n--json\n--timeout <seconds>\n"
+                "Usage: openclaw infer model run\n"
+                "--local\n--prompt <text>\n--json\n--model <provider/model>\n"
                 "--thinking <level>\n",
                 "",
             )
@@ -372,7 +375,7 @@ def test_classify_notification_with_llm_reports_timeout_without_prompt(monkeypat
 def test_classify_notification_with_llm_retries_once(monkeypatch):
     notif = notification("<1@github.com>", "@pilipilisbot review this")
     calls = 0
-    assert_openclaw_agent_exec_supported.cache_clear()
+    assert_openclaw_model_run_supported.cache_clear()
 
     def fake_run(cmd, **kwargs):
         nonlocal calls
@@ -380,9 +383,8 @@ def test_classify_notification_with_llm_retries_once(monkeypatch):
             return subprocess.CompletedProcess(
                 cmd,
                 0,
-                "Usage: openclaw agent exec\n"
-                "--code-mode <mode> direct | auto | code\n"
-                "--message-file <path>\n--json\n--timeout <seconds>\n"
+                "Usage: openclaw infer model run\n"
+                "--local\n--prompt <text>\n--json\n--model <provider/model>\n"
                 "--thinking <level>\n",
                 "",
             )

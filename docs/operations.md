@@ -79,16 +79,16 @@ count. Otherwise four busy workers can fill a four-slot OpenClaw queue and
 starve other gateway work.
 
 The enqueue-time intent classifier is deliberately different: the bridge calls
-`openclaw agent exec` for a one-shot classification. This avoids depending on
-the long-lived Gateway session path for the permission decision. The OpenClaw
-CLI on classifier hosts must be 2026.9.9 or newer and expose `openclaw agent
-exec --code-mode direct --message-file --json --timeout --thinking`; the bridge
-checks that contract before invoking the classifier. Classifier subprocesses run
-with `--code-mode direct` so untrusted GitHub text is interpreted as a
-classification prompt, not as a coding-agent run with repository tools. The
-bridge limits classifier subprocess concurrency, retries once, and treats
-webhook comment/review classifier failure as `review_only`, so a classifier
-outage or unsupported CLI cannot elevate webhook work to `work_allowed`.
+`openclaw infer model run --local --prompt --json` for a one-shot raw model
+classification. This avoids both the long-lived Gateway session path and the
+`agent exec` coding-agent tool surface for the permission decision. The OpenClaw
+CLI on classifier hosts must expose `openclaw infer model run` with `--local`,
+`--prompt`, `--json`, `--model`, and `--thinking`; the bridge checks that
+contract before invoking the classifier. The raw model inference path does not
+load repository tools, bundled MCP servers, or session transcript. The bridge
+limits classifier subprocess concurrency, retries once, and treats webhook
+comment/review classifier failure as `review_only`, so a classifier outage or
+unsupported CLI cannot elevate webhook work to `work_allowed`.
 
 For the standard four-worker deployment, use eight OpenClaw slots:
 

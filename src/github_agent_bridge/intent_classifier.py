@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
-from .feedback import _extract_json_object, _openclaw_text_from_json, compact, load_prompt_rule, session_id_for_event
+from .feedback import _extract_json_object, compact, load_prompt_rule, session_id_for_event
 from .models import GitHubContext, Notification
 from .parser import github_event_flags
 from .policy import DEFAULT_BOT_LOGINS, IntentClassifier, Policy
@@ -80,37 +80,74 @@ class IntentClassification:
         return metadata
 
 
+def _text_from_model_run_json(raw: str) -> str:
+    data = json.loads(raw)
+    if isinstance(data, str):
+        return data
+    if not isinstance(data, dict):
+        return raw
+    candidates = [
+        data.get("text"),
+        data.get("output_text"),
+        data.get("output"),
+        data.get("content"),
+        data.get("message"),
+        data.get("response"),
+    ]
+    result = data.get("result")
+    if isinstance(result, dict):
+        candidates.extend(
+            [
+                result.get("text"),
+                result.get("output_text"),
+                result.get("output"),
+                result.get("content"),
+                result.get("message"),
+                result.get("response"),
+            ]
+        )
+        payloads = result.get("payloads")
+        if isinstance(payloads, list):
+            for payload in payloads:
+                if isinstance(payload, dict):
+                    candidates.append(payload.get("text"))
+                    candidates.append(payload.get("content"))
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return raw
+
+
 @lru_cache(maxsize=8)
-def assert_openclaw_agent_exec_supported(openclaw_bin: str) -> None:
+def assert_openclaw_model_run_supported(openclaw_bin: str) -> None:
     try:
         proc = subprocess.run(
-            [openclaw_bin, "agent", "exec", "--help"],
+            [openclaw_bin, "infer", "model", "run", "--help"],
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             timeout=10,
-    )
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         detail = compact(str(exc), 300)
         raise RuntimeError(
-            f"OpenClaw CLI does not support required 'agent exec' contract: {detail}"
+            f"OpenClaw CLI does not support required tool-less model run contract: {detail}"
         )
 
     output = proc.stdout + proc.stderr
     required = (
-        "Usage: openclaw agent exec",
-        "--code-mode",
-        "direct",
-        "--message-file",
+        "Usage: openclaw infer model run",
+        "--local",
+        "--prompt",
         "--json",
-        "--timeout",
+        "--model",
         "--thinking",
     )
     if proc.returncode != 0 or not all(token in output for token in required):
         detail = compact(output.strip() or f"openclaw exited {proc.returncode}", 300)
         raise RuntimeError(
-            f"OpenClaw CLI does not support required 'agent exec' contract: {detail}"
+            f"OpenClaw CLI does not support required tool-less model run contract: {detail}"
         )
 
 
@@ -254,21 +291,19 @@ def classify_notification_with_llm(
     agent: str | None = None,
     prompt_template: str | None = None,
 ) -> IntentClassification:
-    assert_openclaw_agent_exec_supported(cfg.openclaw_bin)
+    assert_openclaw_model_run_supported(cfg.openclaw_bin)
     prompt = build_intent_prompt(n, ctx, parser_result, prompt_template, policy=policy, agent=agent)
     cmd = [
         cfg.openclaw_bin,
-        "agent",
-        "exec",
+        "infer",
+        "model",
+        "run",
+        "--local",
         "--json",
-        "--code-mode",
-        "direct",
-        "--timeout",
-        str(cfg.timeout),
+        "--prompt",
+        prompt,
         "--thinking",
         cfg.thinking,
-        "--message-file",
-        "-",
     ]
     if cfg.model:
         cmd.extend(["--model", cfg.model])
@@ -282,7 +317,6 @@ def classify_notification_with_llm(
             try:
                 proc = subprocess.run(
                     cmd,
-                    input=prompt,
                     check=False,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
@@ -306,7 +340,7 @@ def classify_notification_with_llm(
                 )
                 continue
             try:
-                text = _openclaw_text_from_json(proc.stdout)
+                text = _text_from_model_run_json(proc.stdout)
                 return normalize_result(_extract_json_object(text), cfg.min_confidence)
             except Exception as exc:
                 errors.append(f"attempt {attempt}: {compact(str(exc), 300)}")
