@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 from collections import Counter
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
@@ -31,8 +32,12 @@ JOB_LIST_ORDER_SQL = """
 EXECUTOR_PAUSE_STATE_KEY = "executor_paused"
 
 
-def readonly_connect(db: str | Path) -> sqlite3.Connection:
-    return Database(db).read_only()
+def readonly_connect(
+    db: str | Path,
+    *,
+    operation: str = "dashboard.read",
+) -> AbstractContextManager[sqlite3.Connection]:
+    return Database(db).read(operation)
 
 
 def parse_utc(value: str | None) -> datetime | None:
@@ -254,7 +259,7 @@ def inspect_db_read_only(db: str | Path) -> dict[str, Any]:
     out: dict[str, Any] = {"db_path": str(path), "db_exists": path.exists(), "executor_pause": {"paused": False}}
     if not path.exists():
         return out
-    with readonly_connect(path) as con:
+    with readonly_connect(path, operation="dashboard.status") as con:
         try:
             validate_migrations(con)
         except (MigrationError, sqlite3.OperationalError) as exc:
@@ -378,7 +383,7 @@ def list_jobs(
     path = Path(db).expanduser()
     if not path.exists():
         return []
-    with readonly_connect(path) as con:
+    with readonly_connect(path, operation="dashboard.list_jobs") as con:
         where, args = where_clause(
             JobListFilters(
                 status=status_filter,
@@ -400,7 +405,7 @@ def list_job_actors(db: str | Path, *, limit: int = 100) -> list[dict[str, Any]]
     path = Path(db).expanduser()
     if not path.exists():
         return []
-    with readonly_connect(path) as con:
+    with readonly_connect(path, operation="dashboard.list_job_actors") as con:
         rows = con.execute(
             """
             SELECT
@@ -431,7 +436,10 @@ def list_all_job_actor_logins(db: str | Path) -> list[str]:
     path = Path(db).expanduser()
     if not path.exists():
         return []
-    with readonly_connect(path) as con:
+    with readonly_connect(
+        path,
+        operation="dashboard.list_all_job_actor_logins",
+    ) as con:
         rows = con.execute(
             """
             SELECT lower(trigger_actor) AS login
@@ -448,7 +456,7 @@ def get_job_detail(db: str | Path, job_id: int) -> dict[str, Any] | None:
     path = Path(db).expanduser()
     if not path.exists():
         return None
-    with readonly_connect(path) as con:
+    with readonly_connect(path, operation="dashboard.get_job_detail") as con:
         row = con.execute(f"{jobs_select_sql(con)} WHERE jobs.id=?", (job_id,)).fetchone()
         if row is None:
             return None
@@ -500,7 +508,7 @@ def job_logs(db: str | Path, job_id: int, limit: int = 100) -> list[dict[str, An
     path = Path(db).expanduser()
     if not path.exists():
         return []
-    with readonly_connect(path) as con:
+    with readonly_connect(path, operation="dashboard.job_logs") as con:
         rows = con.execute(
             "SELECT id, ts, phase, summary, detail FROM worklog WHERE job_id=? ORDER BY id DESC LIMIT ?",
             (job_id, coerce_limit(limit, maximum=500)),
@@ -512,7 +520,7 @@ def latest_job_progress(db: str | Path, job_id: int, kind: str | None = None) ->
     path = Path(db).expanduser()
     if not path.exists():
         return None
-    with readonly_connect(path) as con:
+    with readonly_connect(path, operation="dashboard.latest_job_progress") as con:
         return _latest_job_progress(con, job_id, kind)
 
 
@@ -539,7 +547,7 @@ def job_session_events(db: str | Path, job_id: int, *, after_id: int | None = No
     path = Path(db).expanduser()
     if not path.exists():
         return []
-    with readonly_connect(path) as con:
+    with readonly_connect(path, operation="dashboard.job_session_events") as con:
         where = "job_id=?"
         args: list[Any] = [job_id]
         if after_id is not None:
@@ -775,7 +783,7 @@ def metrics_summary(db: str | Path, *, timezone_name: str = "UTC") -> dict[str, 
     if not path.exists():
         return {"db_exists": False, "status_counts": {}, "runtime_seconds": {}}
     timezone = dashboard_timezone(timezone_name)
-    with readonly_connect(path) as con:
+    with readonly_connect(path, operation="dashboard.metrics_summary") as con:
         rows = con.execute("SELECT status, repo, action, work_intent, created_at, started_at, finished_at FROM jobs").fetchall()
         run_rows = con.execute(
             """SELECT job_runs.started_at, job_runs.finished_at, jobs.work_intent

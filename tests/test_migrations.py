@@ -5,7 +5,11 @@ import threading
 import pytest
 
 from github_agent_bridge.queue import JobQueue
-from github_agent_bridge.sql.migrations import Migration, apply_migrations
+from github_agent_bridge.sql.migrations import (
+    Migration,
+    MigrationRequiredError,
+    apply_migrations,
+)
 
 
 def test_failed_migration_rolls_back_schema_and_history():
@@ -101,3 +105,34 @@ def test_queue_refuses_newer_database_before_applying_schema_snapshot(tmp_path):
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='alerts'"
         ).fetchone()
     assert alerts_exists is None
+
+
+def test_query_plan_index_migration_upgrades_existing_database(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    expected = {
+        "idx_ingest_receipts_coverage",
+        "idx_webhook_shadow_coverage",
+        "idx_coalesced_notifications_job_id",
+        "idx_worklog_job_id",
+        "idx_job_progress_job_id",
+        "idx_feedback_rules_scope_nocase_confidence",
+        "idx_web_push_subscriptions_active_recipient",
+    }
+    with queue.connect() as con:
+        for index in expected:
+            con.execute(f"DROP INDEX {index}")
+        con.execute("DELETE FROM schema_migrations WHERE version=3")
+
+    with pytest.raises(MigrationRequiredError, match="pending migrations 3"):
+        JobQueue(db)
+
+    JobQueue(db, migrate=True)
+    with sqlite3.connect(db) as con:
+        indexes = {
+            str(row[0])
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+    assert expected <= indexes

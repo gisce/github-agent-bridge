@@ -74,7 +74,10 @@ class WebhookRepository:
     ) -> WebhookReceipt:
         duplicate = False
         try:
-            with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+            with self.database.transaction(
+                TransactionMode.IMMEDIATE,
+                operation="webhooks.persist_delivery",
+            ) as con:
                 con.execute(
                     "DELETE FROM webhook_shadow_receipts WHERE julianday(created_at) < julianday('now', ?)",
                     (f"-{retention_days} days",),
@@ -111,7 +114,10 @@ class WebhookRepository:
         except sqlite3.IntegrityError:
             duplicate = True
             status = "duplicate"
-            with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+            with self.database.transaction(
+                TransactionMode.IMMEDIATE,
+                operation="webhooks.persist_duplicate_delivery",
+            ) as con:
                 con.execute(
                     "UPDATE webhook_shadow_receipts SET duplicate_count=duplicate_count+1,"
                     "enqueue_status=COALESCE(enqueue_status,?),job_id=COALESCE(job_id,?) WHERE delivery_id=?",
@@ -141,14 +147,14 @@ class WebhookRepository:
         )
 
     def first_receipt_created_at(self) -> str | None:
-        with self.database.read_only() as con:
+        with self.database.read("webhooks.first_receipt_created_at") as con:
             row = con.execute(
                 "SELECT MIN(created_at) first_created_at FROM webhook_shadow_receipts"
             ).fetchone()
         return str(row["first_created_at"]) if row and row["first_created_at"] else None
 
     def summary(self, window_start: str, window_end: str) -> dict[str, Any]:
-        with self.database.read_only() as con:
+        with self.database.read("webhooks.summary") as con:
             receipt = con.execute(
                 "SELECT COALESCE(SUM(CASE WHEN status='observed' THEN 1 ELSE 0 END),0) observed,"
                 "COALESCE(SUM(CASE WHEN status='unsupported' THEN 1 ELSE 0 END),0) unsupported,"
@@ -160,7 +166,7 @@ class WebhookRepository:
                 f" WHERE source='email' AND julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_coverage_predicate('event_key')}"
                 " GROUP BY event_key"
                 "), webhook_events AS ("
-                " SELECT event_key,MIN(created_at) created_at FROM webhook_shadow_receipts"
+                " SELECT event_key,MIN(created_at) created_at FROM webhook_shadow_receipts INDEXED BY idx_webhook_shadow_coverage"
                 f" WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_coverage_predicate('event_key')}"
                 " GROUP BY event_key"
                 ") SELECT"
@@ -198,13 +204,13 @@ class WebhookRepository:
     def exceptions(
         self, window_start: str, window_end: str, limit: int
     ) -> list[dict[str, Any]]:
-        with self.database.read_only() as con:
+        with self.database.read("webhooks.exceptions") as con:
             rows = con.execute(
                 "WITH email_events AS ("
                 " SELECT event_key,source_key,created_at FROM ingest_receipts"
                 f" WHERE source='email' AND julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_coverage_predicate('event_key')}"
                 "), webhook_events AS ("
-                " SELECT event_key,delivery_id,created_at,repository FROM webhook_shadow_receipts"
+                " SELECT event_key,delivery_id,created_at,repository FROM webhook_shadow_receipts INDEXED BY idx_webhook_shadow_coverage"
                 f" WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_coverage_predicate('event_key')}"
                 "), candidates AS ("
                 " SELECT 'imap_only' kind,i.event_key,i.source_key reference,i.created_at,NULL repository "
@@ -216,7 +222,7 @@ class WebhookRepository:
                 "  SELECT 1 FROM email_events i WHERE i.event_key=w.event_key"
                 " ) UNION ALL "
                 " SELECT 'unmatchable',NULL,w.delivery_id,w.created_at,w.repository "
-                " FROM webhook_shadow_receipts w WHERE w.event_key IS NULL"
+                " FROM webhook_shadow_receipts w INDEXED BY idx_webhook_shadow_coverage WHERE w.event_key IS NULL"
                 " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
                 ") SELECT kind,event_key,reference,created_at,repository FROM candidates "
                 "ORDER BY created_at DESC LIMIT ?",
@@ -243,7 +249,7 @@ class WebhookRepository:
             bucket_expression = expressions[bucket]
         except KeyError as exc:
             raise ValueError("unsupported webhook timeseries bucket") from exc
-        with self.database.read_only() as con:
+        with self.database.read("webhooks.timeseries") as con:
             rows = con.execute(
                 f"SELECT {bucket_expression} bucket, "
                 "SUM(CASE WHEN status='observed' THEN 1 ELSE 0 END) observed, "
@@ -264,7 +270,7 @@ class WebhookRepository:
             where = "WHERE updated_at<? OR (updated_at=? AND hook_id<?)"
             parameters.extend((cursor[0], cursor[0], cursor[1]))
         parameters.append(limit + 1)
-        with self.database.read_only() as con:
+        with self.database.read("webhooks.list_hooks") as con:
             rows = con.execute(
                 f"SELECT {self.HOOK_COLUMNS} FROM webhook_hooks {where} "
                 "ORDER BY updated_at DESC,hook_id DESC LIMIT ?",
@@ -273,7 +279,7 @@ class WebhookRepository:
         return [dict(row) for row in rows]
 
     def hook_detail(self, hook_id: str) -> dict[str, Any] | None:
-        with self.database.read_only() as con:
+        with self.database.read("webhooks.hook_detail") as con:
             hook = con.execute(
                 f"SELECT {self.HOOK_COLUMNS} FROM webhook_hooks WHERE hook_id=?",
                 (hook_id,),
@@ -305,7 +311,7 @@ class WebhookRepository:
         }
 
     def ping_target(self, hook_id: str) -> dict[str, Any] | None:
-        with self.database.read_only() as con:
+        with self.database.read("webhooks.ping_target") as con:
             row = con.execute(
                 "SELECT hook_id,target,target_type,ping_url FROM webhook_hooks WHERE hook_id=?",
                 (hook_id,),
@@ -315,7 +321,10 @@ class WebhookRepository:
     def create_hook_action(
         self, hook_id: str, action: str, actor: str, created_at: str
     ) -> int:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="webhooks.create_hook_action",
+        ) as con:
             cursor = con.execute(
                 "INSERT INTO webhook_hook_actions(hook_id,action,actor,status,created_at) VALUES(?,?,?,?,?)",
                 (hook_id, action, actor, "requested", created_at),
@@ -325,7 +334,10 @@ class WebhookRepository:
     def finish_hook_action(
         self, action_id: int, status: str, detail: str, completed_at: str
     ) -> None:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="webhooks.finish_hook_action",
+        ) as con:
             con.execute(
                 "UPDATE webhook_hook_actions SET status=?,detail=?,completed_at=? WHERE id=?",
                 (status, detail[:1000], completed_at, action_id),
@@ -360,7 +372,7 @@ class WebhookRepository:
                 parameters.append(value)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         parameters.append(limit + 1)
-        with self.database.read_only() as con:
+        with self.database.read("webhooks.list_deliveries") as con:
             rows = con.execute(
                 f"SELECT {self.DELIVERY_COLUMNS} FROM webhook_shadow_receipts r "
                 f"LEFT JOIN webhook_hooks h ON h.hook_id=r.hook_id {where} "
@@ -370,7 +382,7 @@ class WebhookRepository:
         return [dict(row) for row in rows]
 
     def delivery_detail(self, delivery_id: str) -> dict[str, Any] | None:
-        with self.database.read_only() as con:
+        with self.database.read("webhooks.delivery_detail") as con:
             row = con.execute(
                 "SELECT r.delivery_id,r.hook_id,r.event_name,r.action,r.event_key,r.repository,r.status,"
                 "r.enqueue_status,r.duplicate_count,r.created_at,r.payload_hash,r.payload_json,"

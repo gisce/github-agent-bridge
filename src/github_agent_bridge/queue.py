@@ -88,7 +88,7 @@ class JobQueue:
 
     def init(self) -> None:
         if self.path.exists():
-            with self.database.read_only() as con:
+            with self.database.read("queue.validate_migrations") as con:
                 validate_migrations(con)
             return
         with self.database.read_write() as con:

@@ -16,14 +16,26 @@ they need:
 | --- | --- | --- |
 | `read_write()` | Schema and data writes | 30-second timeout, 30-second busy timeout, `sqlite3.Row`, foreign keys, WAL, autocommit outside explicit transactions |
 | `read_only()` | Queries only | SQLite URI `mode=ro`, 30-second timeout, 30-second busy timeout, `sqlite3.Row`, foreign keys, `query_only=ON` |
-| `transaction(DEFERRED)` | Unit of work whose first statement determines the lock | Read-write policy plus explicit `BEGIN`, commit on success and rollback on failure |
-| `transaction(IMMEDIATE)` | Read-modify-write unit that must reserve the writer before reading decisions | Read-write policy plus `BEGIN IMMEDIATE`, commit on success and rollback on failure |
+| `read(operation)` | Named repository/read-model query boundary | Read-only policy plus slow/contention telemetry for the complete logical operation |
+| `transaction(DEFERRED, operation=...)` | Unit of work whose first statement determines the lock | Read-write policy plus explicit `BEGIN`, commit on success and rollback on failure |
+| `transaction(IMMEDIATE, operation=...)` | Read-modify-write unit that must reserve the writer before reading decisions | Read-write policy plus `BEGIN IMMEDIATE`, commit on success and rollback on failure |
 
-Read models should use `read_only()`. A write workflow should use the weakest
-transaction mode that protects its invariant. If one unit of work spans future
-domain repositories, the service owns one transaction and passes that
-connection to every participating repository; repositories must not open a
-nested independent transaction.
+`read_write()` and `read_only()` are low-level connection factories. Repository
+and read-model operations should use `read(operation)` and every write workflow
+must pass both an explicit transaction mode and a stable lowercase dotted
+operation name. Use the weakest transaction mode that protects the invariant.
+If one unit of work spans future domain repositories, the service owns one
+transaction and passes that connection to every participating repository;
+repositories must not open a nested independent transaction.
+
+## Operational telemetry
+
+Named reads and transactions emit a warning when the complete operation takes
+at least one second. `SQLITE_BUSY` and `SQLITE_LOCKED` failures emit a contention
+warning regardless of duration. Records contain only the logical operation
+name, access/transaction mode and elapsed milliseconds; raw SQL, bound values
+and SQLite error text are deliberately excluded so tokens, webhook payloads and
+other sensitive parameters cannot leak through database telemetry.
 
 Backup and restore are deliberately excluded from repositories. The specialized
 `backup_sqlite_database()` and `restore_sqlite_database()` operations use
@@ -40,8 +52,8 @@ Keep schema, write-model and read-model changes separate and explicit:
    services and maintenance commands must never add columns or indexes as a
    compatibility side effect.
 2. Add write and domain lookup methods under `persistence/`. Return typed DTOs
-   rather than leaking `sqlite3.Row`; use `Database.read_only()` for reads and
-   an explicit `Database.transaction()` mode for writes. A service may own a
+   rather than leaking `sqlite3.Row`; use a named `Database.read()` for reads and
+   a named, explicit `Database.transaction()` mode for writes. A service may own a
    cross-repository transaction and pass its connection into repository
    methods when one invariant spans several tables.
 3. Add denormalized UI/operational queries to `DashboardQueries`, not to HTTP

@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from .database import Database
+from .database import Database, TransactionMode
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,10 @@ class WebPushRepository:
         subscription: dict[str, Any],
         now: str,
     ) -> WebPushSubscription:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="web_push.save",
+        ) as con:
             con.execute(
                 """INSERT INTO web_push_subscriptions(
                     user_login, endpoint, subscription_json, created_at, updated_at,
@@ -72,7 +75,10 @@ class WebPushRepository:
             return self._from_row(row)
 
     def disable(self, user_login: str, endpoint: str, now: str) -> bool:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="web_push.disable",
+        ) as con:
             cursor = con.execute(
                 "UPDATE web_push_subscriptions SET disabled_at=?, updated_at=? "
                 "WHERE user_login=? AND endpoint=? AND disabled_at IS NULL",
@@ -81,7 +87,7 @@ class WebPushRepository:
             return bool(cursor.rowcount)
 
     def active_for_user(self, user_login: str) -> list[WebPushSubscription]:
-        with self.database.read_only() as con:
+        with self.database.read("web_push.active_for_user") as con:
             rows = con.execute(
                 """SELECT * FROM web_push_subscriptions
                 WHERE user_login=? AND disabled_at IS NULL
@@ -96,7 +102,7 @@ class WebPushRepository:
         if not recipients:
             return []
         placeholders = ",".join("?" for _ in recipients)
-        with self.database.read_only() as con:
+        with self.database.read("web_push.active_for_recipients") as con:
             rows = con.execute(
                 f"""SELECT * FROM web_push_subscriptions
                 WHERE disabled_at IS NULL AND lower(user_login) IN ({placeholders})
@@ -108,7 +114,10 @@ class WebPushRepository:
     def mark_delivery(
         self, subscription_id: int, now: str, error: str | None = None
     ) -> None:
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="web_push.mark_delivery",
+        ) as con:
             if error:
                 con.execute(
                     "UPDATE web_push_subscriptions SET updated_at=?, last_error=? WHERE id=?",

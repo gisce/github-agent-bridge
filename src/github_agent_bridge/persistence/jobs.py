@@ -15,7 +15,7 @@ ACTIVE_JOB_STATUSES = ("pending", "running", "waiting_approval")
 
 def active_job_counts(database: Database) -> dict[str, int]:
     """Read migration-blocking job counts without constructing a queue."""
-    with database.read_only() as con:
+    with database.read("jobs.active_job_counts") as con:
         jobs_exists = con.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'"
         ).fetchone()
@@ -81,7 +81,10 @@ class JobRepository:
         work_intents: frozenset[str] | set[str] | None = None,
     ) -> Job | None:
         now = utc_now()
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="jobs.claim_next",
+        ) as con:
             # Serialize the pause check with claims so a completed pause blocks later claims.
             if self.state.executor_paused(connection=con):
                 return None
@@ -180,7 +183,10 @@ class JobRepository:
         detail: str | None = None,
     ) -> None:
         now = utc_now()
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="jobs.finish",
+        ) as con:
             row = con.execute(
                 "SELECT work_key FROM jobs WHERE id=?", (job_id,)
             ).fetchone()
@@ -256,7 +262,10 @@ class JobRepository:
         clean_reason = (reason or "").strip()
         summary = f"job cancellation requested by @{clean_actor}"
         detail = f"reason={clean_reason}" if clean_reason else "reason not provided"
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="jobs.request_cancel_running",
+        ) as con:
             row = con.execute(
                 "SELECT work_key, metadata_json FROM jobs WHERE id=? AND status='running'",
                 (job_id,),
@@ -330,7 +339,10 @@ class JobRepository:
         if followup_url:
             detail_parts.append(f"followup_url={followup_url}")
         detail = "; ".join(detail_parts) if detail_parts else "manual cancellation"
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="jobs.mark_cancelled",
+        ) as con:
             row = con.execute(
                 "SELECT status, work_key, metadata_json FROM jobs WHERE id=?",
                 (job_id,),
@@ -407,7 +419,10 @@ class JobRepository:
         fresh_session: bool = False,
     ) -> bool:
         now = utc_now()
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="jobs.requeue_running",
+        ) as con:
             row = con.execute(
                 "SELECT work_key, metadata_json FROM jobs WHERE id=? AND status='running'",
                 (job_id,),
@@ -448,7 +463,10 @@ class JobRepository:
         older_than_seconds: int | None = None,
     ) -> list[int]:
         now = utc_now()
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="jobs.block_running",
+        ) as con:
             clauses = ["status='running'"]
             args: list[object] = []
             if job_ids is not None:
@@ -524,7 +542,10 @@ class JobRepository:
         self, job_id: int, work_intent: str, summary: str
     ) -> Job | None:
         now = utc_now()
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="jobs.update_work_intent",
+        ) as con:
             row = con.execute(
                 "SELECT work_key FROM jobs WHERE id=?", (job_id,)
             ).fetchone()
@@ -549,7 +570,7 @@ class JobRepository:
             args = (status,)
         sql += " ORDER BY id DESC LIMIT ?"
         args = (*args, limit)
-        with self.database.read_only() as con:
+        with self.database.read("jobs.list") as con:
             return [
                 job
                 for job in (job_from_row(row) for row in con.execute(sql, args))
@@ -559,7 +580,10 @@ class JobRepository:
     def retry(self, job_id: int, *, actor: str | None = None) -> bool:
         now = utc_now()
         summary = f"job requeued by @{actor}" if actor else "job requeued"
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="jobs.retry",
+        ) as con:
             cursor = con.execute(
                 "UPDATE jobs SET status='pending', locked_by=NULL, last_error=NULL, updated_at=? WHERE id=? AND status='blocked' AND decision='auto_trusted'",
                 (now, job_id),
@@ -587,7 +611,10 @@ class JobRepository:
 
     def dismiss(self, job_id: int, reason: str) -> bool:
         now = utc_now()
-        with self.database.transaction() as con:
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="jobs.dismiss",
+        ) as con:
             cursor = con.execute(
                 "UPDATE jobs SET status='done', locked_by=NULL, last_error=NULL, finished_at=COALESCE(finished_at, ?), updated_at=? WHERE id=? AND status IN ('blocked','denied','waiting_approval')",
                 (now, now, job_id),
@@ -609,7 +636,10 @@ class JobRepository:
     def unlock_stale(
         self, older_than_seconds: int, job_ids: list[int] | None = None
     ) -> int:
-        with self.database.transaction(TransactionMode.IMMEDIATE) as con:
+        with self.database.transaction(
+            TransactionMode.IMMEDIATE,
+            operation="jobs.unlock_stale",
+        ) as con:
             args: list[object] = [older_than_seconds]
             sql = "SELECT id, work_key FROM jobs WHERE status='running' AND started_at IS NOT NULL AND (julianday('now') - julianday(started_at)) * 86400 > ?"
             if job_ids is not None:
@@ -648,13 +678,13 @@ class JobRepository:
             return len(rows)
 
     def get(self, job_id: int) -> Job | None:
-        with self.database.read_only() as con:
+        with self.database.read("jobs.get") as con:
             return job_from_row(
                 con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             )
 
     def find_by_message_id(self, message_id: str) -> Job | None:
-        with self.database.read_only() as con:
+        with self.database.read("jobs.find_by_message_id") as con:
             return job_from_row(
                 con.execute(
                     "SELECT * FROM jobs WHERE message_id=?", (message_id,)
@@ -662,7 +692,7 @@ class JobRepository:
             )
 
     def coalesced_contexts(self, job_id: int) -> list[GitHubContext]:
-        with self.database.read_only() as con:
+        with self.database.read("jobs.coalesced_contexts") as con:
             rows = con.execute(
                 "SELECT context_json FROM coalesced_notifications WHERE job_id=? ORDER BY id",
                 (job_id,),
@@ -670,7 +700,7 @@ class JobRepository:
         return [GitHubContext.from_json(row["context_json"]) for row in rows]
 
     def coalesced_trigger_actors(self, job_id: int) -> list[str]:
-        with self.database.read_only() as con:
+        with self.database.read("jobs.coalesced_trigger_actors") as con:
             rows = con.execute(
                 "SELECT trigger_actor FROM coalesced_notifications WHERE job_id=? ORDER BY id",
                 (job_id,),
@@ -678,7 +708,7 @@ class JobRepository:
         return [row["trigger_actor"] for row in rows if row["trigger_actor"]]
 
     def stats(self) -> dict[str, int]:
-        with self.database.read_only() as con:
+        with self.database.read("jobs.stats") as con:
             return {
                 row["status"]: row["count"]
                 for row in con.execute(
@@ -687,7 +717,7 @@ class JobRepository:
             }
 
     def pending_age_seconds(self) -> int | None:
-        with self.database.read_only() as con:
+        with self.database.read("jobs.pending_age_seconds") as con:
             row = con.execute(
                 "SELECT CAST((julianday('now') - julianday(min(created_at))) * 86400 AS INTEGER) age FROM jobs WHERE status='pending'"
             ).fetchone()
