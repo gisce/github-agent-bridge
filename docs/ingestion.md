@@ -1,9 +1,14 @@
 # Event ingestion and transport migration
 
+The bridge accepts GitHub events from three entry paths: signed GitHub
+webhooks, GitHub notification email through IMAP/`.eml`, and explicit manual
+enqueue/replay commands. Webhook and IMAP inputs are normalized into the same
+queue contract; neither transport bypasses policy.
+
 The bridge separates three identities:
 
 - A **receipt** identifies one delivery from one transport. Email uses
-  `Message-ID`; a future webhook transport will use `X-GitHub-Delivery`.
+  `Message-ID`; webhook delivery uses `X-GitHub-Delivery`.
 - A **GitHub event** identifies the underlying action independently of its
   transport. It is derived only from immutable GitHub object IDs exposed by
   the notification, such as a comment, review, or workflow-run ID.
@@ -36,12 +41,13 @@ accepts a possible duplicate rather than risk dropping a legitimate action.
 2. **Shadow webhook (implemented):** verify signatures and persist shadow
    receipts, but do not create jobs or claim canonical events. Compare coverage
    and canonical keys with IMAP.
-3. **Canary dual ingest:** allow webhook enqueue only for `webhookCanaryRepos`.
+3. **Canary dual ingest (implemented):** allow webhook enqueue only for `webhookCanaryRepos`.
    The unique event key guarantees that the first source wins.
-4. **Webhook primary:** keep IMAP as a delayed fallback until a complete
-   operational cycle has no unexplained IMAP-only actionable events.
+4. **Webhook primary (implemented, operator-gated):** keep IMAP as a fallback
+   until a complete operational cycle has no unexplained IMAP-only actionable
+   events, then retire the reader separately.
 
-Phase 1 is exposed as `POST /api/webhooks/github` by the dashboard service.
+Webhook ingress is exposed as `POST /api/webhooks/github`.
 For production, nginx should route that exact path to the dedicated
 socket-activated `github-agent-bridge-webhook.service` on port 8766. The
 dashboard keeps the route for backward compatibility, but using it couples
@@ -212,3 +218,6 @@ shared transaction guarantees correctness independently of arrival order.
 
 Webhook enqueueing must not be enabled until recovery of persisted-but-
 unprocessed receipts and divergence metrics have been validated in production.
+The remaining parity, coverage and cutover gates are tracked in
+[#299](https://github.com/gisce/github-agent-bridge/issues/299); the existence
+of `primary` mode is not evidence that a deployment is ready to disable IMAP.
