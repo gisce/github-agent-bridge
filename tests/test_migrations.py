@@ -189,3 +189,30 @@ def test_slo_instrumentation_migration_adds_nullable_signals_without_backfill(
     assert {"source_received_at", "terminal_outcome", "outcome_reason"} <= columns
     assert historical == (None, None, None)
     assert index_exists == (1,)
+
+
+def test_slo_query_index_migration_bounds_ingestion_cohorts(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    expected = {
+        "idx_jobs_created_at",
+        "idx_coalesced_notifications_created_at",
+    }
+    with queue.connect() as con:
+        for index in expected:
+            con.execute(f"DROP INDEX {index}")
+        con.execute("DELETE FROM schema_migrations WHERE version=5")
+
+    with pytest.raises(MigrationRequiredError, match="pending migrations 5"):
+        JobQueue(db)
+
+    JobQueue(db, migrate=True)
+    with sqlite3.connect(db) as con:
+        indexes = {
+            str(row[0])
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+
+    assert expected <= indexes

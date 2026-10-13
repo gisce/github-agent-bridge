@@ -514,6 +514,7 @@ GET /api/jobs/{id}/session
 GET /api/jobs/{id}/session/events
 GET /api/jobs/{id}/session/stream
 GET /api/metrics/summary
+GET /api/metrics/summary?window=24h&timezone=Europe/Madrid
 GET /api/processes
 GET /api/systemd
 GET /api/systemd/journal/stream?unit=github-agent-bridge.service
