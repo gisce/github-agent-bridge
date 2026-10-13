@@ -845,37 +845,43 @@ def metrics_summary(
     timezone = dashboard_timezone(timezone_name)
     window_start, window_end = slo_window_bounds(window, now=now)
     if not path.exists():
-        return {
-            "db_exists": False,
-            "status_counts": {},
-            "runtime_seconds": {},
-            "slo": slo_summary(
-                [],
+        return empty_metrics_summary(
+            db_exists=False,
+            window=window,
+            window_start=window_start,
+            window_end=window_end,
+            timezone=timezone,
+        )
+    with readonly_connect(path, operation="dashboard.metrics_summary") as con:
+        try:
+            validate_migrations(con)
+            rows = con.execute("SELECT status, repo, action, work_intent, created_at, started_at, finished_at FROM jobs").fetchall()
+            run_rows = con.execute(
+                """SELECT job_runs.started_at, job_runs.finished_at, jobs.work_intent
+                FROM job_runs
+                JOIN jobs ON jobs.id=job_runs.job_id
+                WHERE job_runs.finished_at IS NOT NULL"""
+            ).fetchall()
+            slo_rows = con.execute(
+                SLO_METRICS_SQL,
+                (
+                    format_utc(window_start),
+                    format_utc(window_end),
+                    format_utc(window_start),
+                    format_utc(window_end),
+                    format_utc(window_start),
+                    format_utc(window_end),
+                ),
+            ).fetchall()
+        except (MigrationError, sqlite3.OperationalError) as exc:
+            return empty_metrics_summary(
+                db_exists=True,
                 window=window,
                 window_start=window_start,
                 window_end=window_end,
                 timezone=timezone,
-            ),
-        }
-    with readonly_connect(path, operation="dashboard.metrics_summary") as con:
-        rows = con.execute("SELECT status, repo, action, work_intent, created_at, started_at, finished_at FROM jobs").fetchall()
-        run_rows = con.execute(
-            """SELECT job_runs.started_at, job_runs.finished_at, jobs.work_intent
-            FROM job_runs
-            JOIN jobs ON jobs.id=job_runs.job_id
-            WHERE job_runs.finished_at IS NOT NULL"""
-        ).fetchall()
-        slo_rows = con.execute(
-            SLO_METRICS_SQL,
-            (
-                format_utc(window_start),
-                format_utc(window_end),
-                format_utc(window_start),
-                format_utc(window_end),
-                format_utc(window_start),
-                format_utc(window_end),
-            ),
-        ).fetchall()
+                schema_error=str(exc),
+            )
     status_counts = Counter(row["status"] for row in rows)
     by_repo = Counter(row["repo"] or "unknown" for row in rows)
     by_action = Counter(row["action"] for row in rows)
@@ -906,6 +912,38 @@ def metrics_summary(
             timezone=timezone,
         ),
     }
+
+
+def empty_metrics_summary(
+    *,
+    db_exists: bool,
+    window: str,
+    window_start: datetime,
+    window_end: datetime,
+    timezone: ZoneInfo,
+    schema_error: str | None = None,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "db_exists": db_exists,
+        "status_counts": {},
+        "by_repo": {},
+        "by_action": {},
+        "by_intent": {},
+        "by_created_day": {},
+        "runtime_usage": {"day": [], "month": []},
+        "runtime_seconds": percentiles([]),
+        "queue_wait_seconds": percentiles([]),
+        "slo": slo_summary(
+            [],
+            window=window,
+            window_start=window_start,
+            window_end=window_end,
+            timezone=timezone,
+        ),
+    }
+    if schema_error is not None:
+        summary.update({"schema_ok": False, "schema_error": schema_error})
+    return summary
 
 
 def slo_window_bounds(

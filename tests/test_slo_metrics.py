@@ -317,6 +317,50 @@ def test_slo_summary_handles_missing_database_and_invalid_window(tmp_path):
         metrics_summary(db, window="90d", now=NOW)
 
 
+@pytest.mark.parametrize(
+    ("schema_damage", "expected_error"),
+    [
+        ("pending", "pending migrations 5"),
+        ("malformed", "source_received_at"),
+    ],
+)
+def test_metrics_api_degrades_safely_for_incompatible_schema(
+    tmp_path,
+    schema_damage,
+    expected_error,
+):
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    with queue.connect() as con:
+        if schema_damage == "pending":
+            con.execute("DELETE FROM schema_migrations WHERE version=5")
+        else:
+            con.execute("ALTER TABLE jobs DROP COLUMN source_received_at")
+
+    client = TestClient(create_app(DashboardConfig(db=db, require_auth=False)))
+
+    response = client.get("/api/metrics/summary")
+
+    assert response.status_code == 200
+    metrics = response.json()["metrics"]
+    assert metrics["db_exists"] is True
+    assert metrics["schema_ok"] is False
+    assert expected_error in metrics["schema_error"]
+    assert metrics["status_counts"] == {}
+    assert metrics["runtime_usage"] == {"day": [], "month": []}
+    assert metrics["runtime_seconds"] == {
+        "median": None,
+        "p90": None,
+        "p99": None,
+    }
+    assert metrics["queue_wait_seconds"] == {
+        "median": None,
+        "p90": None,
+        "p99": None,
+    }
+    assert metrics["slo"]["cohort"]["sample_count"] == 0
+
+
 def test_metrics_api_accepts_only_supported_slo_windows(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     JobQueue(db)

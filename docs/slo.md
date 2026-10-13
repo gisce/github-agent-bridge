@@ -76,6 +76,11 @@ A rate with no denominator is `null`, not `0`. The coalescing aggregate and
 trend use jobs created during the window plus coalesced notifications created
 during the window; they do not reuse the finished-job service cohort.
 
+The endpoint validates migration history before running aggregate queries. If
+the database has pending migrations or an incompatible schema, it returns HTTP
+200 with `metrics.schema_ok=false`, `metrics.schema_error`, and empty metric
+defaults; the read path never applies migrations.
+
 ## Structured terminal outcomes
 
 `jobs.terminal_outcome` is the metric input. Consumers must not search job

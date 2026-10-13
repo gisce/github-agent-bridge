@@ -115,7 +115,10 @@ def test_dashboard_detail_and_metrics_pin_query_counts_and_plans(
     ]
 
     assert len(detail_queries) == 5
-    assert len(metric_queries) == 3
+    assert len(metric_queries) == 5
+    assert "sqlite_master" in metric_queries[0]
+    assert "schema_migrations" in metric_queries[1]
+    metric_data_queries = metric_queries[2:]
     with sqlite3.connect(db) as con:
         detail_plans = [
             [row[3] for row in con.execute(f"EXPLAIN QUERY PLAN {statement}")]
@@ -123,7 +126,7 @@ def test_dashboard_detail_and_metrics_pin_query_counts_and_plans(
         ]
         metric_plans = [
             [row[3] for row in con.execute(f"EXPLAIN QUERY PLAN {statement}")]
-            for statement in metric_queries
+            for statement in metric_data_queries
         ]
 
     detail_plan = "\n".join(
