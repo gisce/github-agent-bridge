@@ -370,6 +370,16 @@ def cmd_monitor(args: argparse.Namespace) -> int:
         review_running_warn_seconds=args.review_running_warn_seconds,
         work_running_warn_seconds=args.work_running_warn_seconds,
         progress_warn_seconds=args.progress_warn_seconds,
+        slo_window=args.slo_window,
+        slo_min_samples=args.slo_min_samples,
+        slo_breach_observations=args.slo_breach_observations,
+        slo_recovery_observations=args.slo_recovery_observations,
+        slo_recovery_ratio=args.slo_recovery_ratio,
+        slo_queued_to_claimed_p90_seconds=args.slo_queue_to_claim_p90_seconds,
+        slo_claimed_to_first_output_p90_seconds=args.slo_claim_to_first_output_p90_seconds,
+        slo_claimed_to_done_p90_seconds=args.slo_claim_to_done_p90_seconds,
+        slo_blocked_rate_percent=args.slo_blocked_rate_percent,
+        slo_retry_rate_percent=args.slo_retry_rate_percent,
     )
     report = monitor(
         args.db,
@@ -609,6 +619,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--review-running-warn-seconds", type=int, default=1200)
     s.add_argument("--work-running-warn-seconds", type=int, default=4200)
     s.add_argument("--progress-warn-seconds", type=int, default=600)
+    s.add_argument("--slo-window", choices=("24h", "7d", "30d"), default="7d")
+    s.add_argument("--slo-min-samples", type=int, default=20)
+    s.add_argument("--slo-breach-observations", type=int, default=3)
+    s.add_argument("--slo-recovery-observations", type=int, default=2)
+    s.add_argument("--slo-recovery-ratio", type=float, default=0.9)
+    s.add_argument("--slo-queue-to-claim-p90-seconds", type=float)
+    s.add_argument("--slo-claim-to-first-output-p90-seconds", type=float)
+    s.add_argument("--slo-claim-to-done-p90-seconds", type=float)
+    s.add_argument("--slo-blocked-rate-percent", type=float)
+    s.add_argument("--slo-retry-rate-percent", type=float)
     s.add_argument(
         "--process-sample-retention-seconds",
         type=int,

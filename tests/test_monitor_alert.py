@@ -34,6 +34,37 @@ def test_should_send_alert_persists_and_throttles(tmp_path):
     assert monitor_alert.should_send_alert(state_file, "boom", resend_seconds=900, now=2001) is True
 
 
+def test_alert_config_passes_slo_thresholds_from_environment(tmp_path, monkeypatch):
+    config = monitor_alert.AlertConfig.from_env({
+        "GITHUB_AGENT_BRIDGE_STATE_DIR": str(tmp_path),
+        "GITHUB_AGENT_BRIDGE_SLO_WINDOW": "24h",
+        "GITHUB_AGENT_BRIDGE_SLO_MIN_SAMPLES": "30",
+        "GITHUB_AGENT_BRIDGE_SLO_BREACH_OBSERVATIONS": "4",
+        "GITHUB_AGENT_BRIDGE_SLO_RECOVERY_OBSERVATIONS": "2",
+        "GITHUB_AGENT_BRIDGE_SLO_RECOVERY_RATIO": "0.8",
+        "GITHUB_AGENT_BRIDGE_SLO_QUEUE_TO_CLAIM_P90_SECONDS": "45",
+        "GITHUB_AGENT_BRIDGE_SLO_CLAIM_TO_FIRST_OUTPUT_P90_SECONDS": "90",
+        "GITHUB_AGENT_BRIDGE_SLO_CLAIM_TO_DONE_P90_SECONDS": "1800",
+        "GITHUB_AGENT_BRIDGE_SLO_BLOCKED_RATE_PERCENT": "5",
+        "GITHUB_AGENT_BRIDGE_SLO_RETRY_RATE_PERCENT": "12.5",
+    })
+    calls = []
+    monkeypatch.setattr(
+        monitor_alert,
+        "_run",
+        lambda args, check=False: calls.append(args) or type("Proc", (), {"stdout": "", "returncode": 0})(),
+    )
+
+    monitor_alert.run_monitor(config)
+
+    args = calls[0]
+    assert args[args.index("--slo-window") + 1] == "24h"
+    assert args[args.index("--slo-min-samples") + 1] == "30"
+    assert args[args.index("--slo-queue-to-claim-p90-seconds") + 1] == "45.0"
+    assert args[args.index("--slo-blocked-rate-percent") + 1] == "5.0"
+    assert args[args.index("--slo-retry-rate-percent") + 1] == "12.5"
+
+
 def test_load_state_accepts_legacy_shell_format(tmp_path):
     state_file = tmp_path / "monitor-alert.state"
     state_file.write_text("LAST_HASH='abc'\nLAST_TS=123\n", encoding="utf-8")

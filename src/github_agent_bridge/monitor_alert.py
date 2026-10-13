@@ -33,6 +33,16 @@ class AlertConfig:
     terminate_grace_seconds: int
     proc_idle_seconds: int
     executor_unit: str = "github-agent-bridge.service"
+    slo_window: str = "7d"
+    slo_min_samples: int = 20
+    slo_breach_observations: int = 3
+    slo_recovery_observations: int = 2
+    slo_recovery_ratio: float = 0.9
+    slo_queue_to_claim_p90_seconds: float | None = None
+    slo_claim_to_first_output_p90_seconds: float | None = None
+    slo_claim_to_done_p90_seconds: float | None = None
+    slo_blocked_rate_percent: float | None = None
+    slo_retry_rate_percent: float | None = None
 
     @property
     def state_file(self) -> Path:
@@ -64,6 +74,26 @@ class AlertConfig:
             terminate_grace_seconds=int(values.get("GITHUB_AGENT_BRIDGE_TERMINATE_GRACE_SECONDS", "5")),
             proc_idle_seconds=int(values.get("GITHUB_AGENT_BRIDGE_PROC_IDLE_SECONDS", "240")),
             executor_unit=values.get("GITHUB_AGENT_BRIDGE_EXECUTOR_UNIT", "github-agent-bridge.service"),
+            slo_window=values.get("GITHUB_AGENT_BRIDGE_SLO_WINDOW", "7d"),
+            slo_min_samples=int(values.get("GITHUB_AGENT_BRIDGE_SLO_MIN_SAMPLES", "20")),
+            slo_breach_observations=int(values.get("GITHUB_AGENT_BRIDGE_SLO_BREACH_OBSERVATIONS", "3")),
+            slo_recovery_observations=int(values.get("GITHUB_AGENT_BRIDGE_SLO_RECOVERY_OBSERVATIONS", "2")),
+            slo_recovery_ratio=float(values.get("GITHUB_AGENT_BRIDGE_SLO_RECOVERY_RATIO", "0.9")),
+            slo_queue_to_claim_p90_seconds=_parse_optional_float(
+                values.get("GITHUB_AGENT_BRIDGE_SLO_QUEUE_TO_CLAIM_P90_SECONDS")
+            ),
+            slo_claim_to_first_output_p90_seconds=_parse_optional_float(
+                values.get("GITHUB_AGENT_BRIDGE_SLO_CLAIM_TO_FIRST_OUTPUT_P90_SECONDS")
+            ),
+            slo_claim_to_done_p90_seconds=_parse_optional_float(
+                values.get("GITHUB_AGENT_BRIDGE_SLO_CLAIM_TO_DONE_P90_SECONDS")
+            ),
+            slo_blocked_rate_percent=_parse_optional_float(
+                values.get("GITHUB_AGENT_BRIDGE_SLO_BLOCKED_RATE_PERCENT")
+            ),
+            slo_retry_rate_percent=_parse_optional_float(
+                values.get("GITHUB_AGENT_BRIDGE_SLO_RETRY_RATE_PERCENT")
+            ),
         )
 
 
@@ -74,6 +104,15 @@ def _parse_optional_int(value: str | None) -> int | None:
     if not value:
         return None
     return int(value)
+
+
+def _parse_optional_float(value: str | None) -> float | None:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    return float(value)
 
 
 def _parse_bool(value: str | None) -> bool:
@@ -89,26 +128,45 @@ def _run(args: list[str], check: bool = False) -> subprocess.CompletedProcess[st
 
 
 def run_monitor(config: AlertConfig) -> subprocess.CompletedProcess[str]:
-    return _run(
-        [
-            _expand(config.bridge_bin),
-            "--db",
-            _expand(config.db),
-            "--policy",
-            _expand(config.policy),
-            "monitor",
-            "--pending-warn-seconds",
-            str(config.pending_warn_seconds),
-            "--review-running-warn-seconds",
-            str(config.review_running_warn_seconds),
-            "--work-running-warn-seconds",
-            str(config.work_running_warn_seconds),
-            "--progress-warn-seconds",
-            str(config.progress_warn_seconds),
-            "--executor-unit",
-            config.executor_unit,
-        ]
+    args = [
+        _expand(config.bridge_bin),
+        "--db",
+        _expand(config.db),
+        "--policy",
+        _expand(config.policy),
+        "monitor",
+        "--pending-warn-seconds",
+        str(config.pending_warn_seconds),
+        "--review-running-warn-seconds",
+        str(config.review_running_warn_seconds),
+        "--work-running-warn-seconds",
+        str(config.work_running_warn_seconds),
+        "--progress-warn-seconds",
+        str(config.progress_warn_seconds),
+        "--executor-unit",
+        config.executor_unit,
+        "--slo-window",
+        config.slo_window,
+        "--slo-min-samples",
+        str(config.slo_min_samples),
+        "--slo-breach-observations",
+        str(config.slo_breach_observations),
+        "--slo-recovery-observations",
+        str(config.slo_recovery_observations),
+        "--slo-recovery-ratio",
+        str(config.slo_recovery_ratio),
+    ]
+    optional_thresholds = (
+        ("--slo-queue-to-claim-p90-seconds", config.slo_queue_to_claim_p90_seconds),
+        ("--slo-claim-to-first-output-p90-seconds", config.slo_claim_to_first_output_p90_seconds),
+        ("--slo-claim-to-done-p90-seconds", config.slo_claim_to_done_p90_seconds),
+        ("--slo-blocked-rate-percent", config.slo_blocked_rate_percent),
+        ("--slo-retry-rate-percent", config.slo_retry_rate_percent),
     )
+    for flag, value in optional_thresholds:
+        if value is not None:
+            args.extend((flag, str(value)))
+    return _run(args)
 
 
 def get_main_pid(unit: str = "github-agent-bridge.service") -> str:

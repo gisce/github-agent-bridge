@@ -9,6 +9,9 @@ from typing import Any
 from .database import Database, TransactionMode
 
 
+MONITOR_SLO_STATE_KEY = "monitor_slo_state_v1"
+
+
 @dataclass(frozen=True)
 class ProcessSample:
     id: int
@@ -73,6 +76,7 @@ class ObservabilityRepository:
         metrics: dict[str, Any],
         alerts: list[str],
         retention_seconds: int,
+        monitor_slo_state: dict[str, Any] | None = None,
     ) -> None:
         with self.database.transaction(
             TransactionMode.DEFERRED,
@@ -141,6 +145,34 @@ class ObservabilityRepository:
                     (now, retention_seconds),
                 )
             self._record_alerts(con, now, metrics, alerts)
+            if monitor_slo_state is not None:
+                con.execute(
+                    """INSERT INTO state(key, value) VALUES(?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                    (
+                        MONITOR_SLO_STATE_KEY,
+                        json.dumps(
+                            monitor_slo_state,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                    ),
+                )
+
+    def monitor_slo_state(self) -> dict[str, Any]:
+        with self.database.read("observability.monitor_slo_state") as con:
+            row = con.execute(
+                "SELECT value FROM state WHERE key=?",
+                (MONITOR_SLO_STATE_KEY,),
+            ).fetchone()
+        if row is None:
+            return {}
+        try:
+            state = json.loads(row["value"])
+        except (TypeError, json.JSONDecodeError):
+            return {}
+        return state if isinstance(state, dict) else {}
 
     def recent_process_samples(self, limit: int) -> list[ProcessSample]:
         with self.database.read("observability.recent_process_samples") as con:
@@ -171,20 +203,26 @@ class ObservabilityRepository:
         cls, con, now: str, metrics: dict[str, Any], alerts: list[str]
     ) -> None:
         fingerprints: set[str] = set()
-        context = {
+        common_context = {
             "running_jobs": metrics.get("running_jobs", []),
             "executor_service": metrics.get("executor_service"),
             "executor_pid": metrics.get("executor_pid"),
             "reader_timer": metrics.get("reader_timer"),
             "reader_recent": metrics.get("reader_recent"),
         }
-        context_json = json.dumps(
-            context, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
-        for message in alerts:
-            fingerprint = hashlib.sha256(
+        details = metrics.get("alert_details") or []
+        for index, message in enumerate(alerts):
+            detail = details[index] if index < len(details) and isinstance(details[index], dict) else {}
+            fingerprint = str(detail.get("fingerprint") or "") or hashlib.sha256(
                 f"monitor\0{message}".encode("utf-8")
             ).hexdigest()
+            context = dict(common_context)
+            detail_context = detail.get("context")
+            if isinstance(detail_context, dict):
+                context.update(detail_context)
+            context_json = json.dumps(
+                context, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
             fingerprints.add(fingerprint)
             con.execute(
                 """INSERT INTO alerts(
@@ -192,6 +230,7 @@ class ObservabilityRepository:
                     first_seen, last_seen, resolved_at, observations
                 ) VALUES(?,?,?,?,?,?,?,NULL,1)
                 ON CONFLICT(fingerprint) DO UPDATE SET
+                  message=excluded.message,
                   context_json=excluded.context_json,
                   last_seen=excluded.last_seen,
                   resolved_at=NULL,

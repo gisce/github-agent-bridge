@@ -147,7 +147,8 @@ It checks:
 - last reader service result;
 - blocked jobs;
 - pending jobs older than 300 seconds;
-- running jobs older than review/work thresholds.
+- running jobs older than review/work thresholds;
+- configured SLO thresholds after a minimum sample count and sustained breach.
 
 By default the monitor command also writes bounded observability rows to the
 bridge database:
@@ -170,6 +171,52 @@ gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 \
 
 Use `--no-persist-observability` for ad hoc monitor runs that should not write
 observability records.
+
+### Sustained SLO alerts
+
+SLO alert thresholds are disabled by default. First collect data and calibrate
+the budgets from the dashboard, then configure any combination of p90 latency
+and reliability thresholds in the private systemd environment:
+
+```text
+GITHUB_AGENT_BRIDGE_SLO_WINDOW=7d
+GITHUB_AGENT_BRIDGE_SLO_MIN_SAMPLES=20
+GITHUB_AGENT_BRIDGE_SLO_BREACH_OBSERVATIONS=3
+GITHUB_AGENT_BRIDGE_SLO_RECOVERY_OBSERVATIONS=2
+GITHUB_AGENT_BRIDGE_SLO_RECOVERY_RATIO=0.9
+GITHUB_AGENT_BRIDGE_SLO_QUEUE_TO_CLAIM_P90_SECONDS=300
+GITHUB_AGENT_BRIDGE_SLO_CLAIM_TO_FIRST_OUTPUT_P90_SECONDS=600
+GITHUB_AGENT_BRIDGE_SLO_CLAIM_TO_DONE_P90_SECONDS=5400
+GITHUB_AGENT_BRIDGE_SLO_BLOCKED_RATE_PERCENT=10
+GITHUB_AGENT_BRIDGE_SLO_RETRY_RATE_PERCENT=15
+```
+
+The monitor evaluates the existing `DashboardQueries.metrics_summary()` read
+model over `24h`, `7d`, or `30d`. A metric alerts only after the configured
+number of consecutive breaches and only when its own `sample_count` reaches
+`SLO_MIN_SAMPLES`. An active alert recovers after the configured number of
+observations at or below `threshold * SLO_RECOVERY_RATIO`; values in the band
+between that recovery boundary and the alert threshold keep the alert active
+without flapping.
+
+The observation streak is stored in the existing bridge `state` table when
+monitor observability persistence is enabled (the default). Alert fingerprints
+are stable for code + metric + window; the observed value and sample count live
+in alert context and may change without creating a new incident. Pending or
+incompatible migrations, missing values, and undersized samples do not produce
+healthy-looking zeroes or new SLO alerts. Run `gab migrate-db` through the
+controlled deployment path before enabling thresholds on a stale schema.
+
+The same settings are available directly as `gab monitor --slo-*` options. For
+example, an ad hoc 24-hour queue-latency check is:
+
+```bash
+gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 monitor \
+  --slo-window 24h \
+  --slo-min-samples 20 \
+  --slo-breach-observations 1 \
+  --slo-queue-to-claim-p90-seconds 300
+```
 
 ## Sentry error reporting
 

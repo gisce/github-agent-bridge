@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from github_agent_bridge.models import Notification
 from github_agent_bridge import monitor as monitor_module
 from github_agent_bridge.monitor import MonitorThresholds, monitor
@@ -10,6 +12,39 @@ from github_agent_bridge.queue import JobQueue
 
 def notif(uid=1, mid="<1@github.com>", body="@pilipilisbot https://github.com/gisce/erp/pull/1#issuecomment-10"):
     return Notification(uid=uid, message_id=mid, subject="Re: [gisce/erp] PR", from_addr="ecarreras <notifications@github.com>", body=body, auth={"spf": True, "dkim": True, "dmarc": True})
+
+
+def slo_metrics(*, queue_p90=120, sample_count=20, schema_error=None):
+    if schema_error:
+        return {"schema_ok": False, "schema_error": schema_error}
+    latency = {
+        "unit": "seconds",
+        "p50": queue_p90,
+        "p90": queue_p90,
+        "p99": queue_p90,
+        "sample_count": sample_count,
+        "missing_count": 0,
+    }
+    rate = {
+        "rate": 0.1,
+        "percent": 10.0,
+        "numerator": 2,
+        "denominator": sample_count,
+        "sample_count": sample_count,
+        "missing_count": 0,
+    }
+    return {
+        "schema_ok": True,
+        "slo": {
+            "window": {"value": "7d"},
+            "latencies": {
+                "queued_to_claimed": latency,
+                "claimed_to_first_output": latency,
+                "claimed_to_done": latency,
+            },
+            "rates": {"blocked": rate, "retry": rate},
+        },
+    }
 
 
 def test_monitor_ok_on_empty_initialized_db(tmp_path):
@@ -311,6 +346,260 @@ def test_monitor_persists_and_resolves_alerts(tmp_path):
     assert list_alerts(db) == []
     resolved = list_alerts(db, include_resolved=True)
     assert resolved[0]["resolved_at"] is not None
+
+
+def test_monitor_alerts_after_sustained_slo_breaches_with_stable_fingerprint(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    observed = iter((120, 180))
+    monkeypatch.setattr(
+        monitor_module.DashboardQueries,
+        "metrics_summary",
+        lambda self, **kwargs: slo_metrics(queue_p90=next(observed)),
+    )
+    thresholds = MonitorThresholds(
+        slo_queued_to_claimed_p90_seconds=60,
+        slo_min_samples=10,
+        slo_breach_observations=2,
+    )
+
+    first = monitor(db, thresholds=thresholds, check_systemd=False, persist_observability=True)
+    second = monitor(db, thresholds=thresholds, check_systemd=False, persist_observability=True)
+
+    assert first.ok is True
+    assert first.metrics["slo_monitor"]["evaluations"][0]["breach_observations"] == 1
+    assert second.ok is False
+    assert second.metrics["alert_codes"] == ["monitor.slo.queued_to_claimed_p90"]
+    active = list_alerts(db)
+    assert len(active) == 1
+    assert active[0]["observations"] == 1
+    assert active[0]["context"]["metric"] == "queued_to_claimed.p90"
+    assert active[0]["context"]["observed"] == 180
+
+    monkeypatch.setattr(
+        monitor_module.DashboardQueries,
+        "metrics_summary",
+        lambda self, **kwargs: slo_metrics(queue_p90=240),
+    )
+    third = monitor(db, thresholds=thresholds, check_systemd=False, persist_observability=True)
+
+    assert third.metrics["alert_details"][0]["fingerprint"] == active[0]["fingerprint"]
+    refreshed = list_alerts(db)
+    assert len(refreshed) == 1
+    assert refreshed[0]["observations"] == 2
+    assert refreshed[0]["context"]["observed"] == 240
+    assert "240s" in refreshed[0]["message"]
+
+
+@pytest.mark.parametrize(
+    ("threshold_field", "threshold", "expected_code"),
+    [
+        ("slo_queued_to_claimed_p90_seconds", 60, "monitor.slo.queued_to_claimed_p90"),
+        ("slo_claimed_to_first_output_p90_seconds", 60, "monitor.slo.claimed_to_first_output_p90"),
+        ("slo_claimed_to_done_p90_seconds", 60, "monitor.slo.claimed_to_done_p90"),
+        ("slo_blocked_rate_percent", 5, "monitor.slo.blocked_rate"),
+        ("slo_retry_rate_percent", 5, "monitor.slo.retry_rate"),
+    ],
+)
+def test_monitor_evaluates_each_configurable_slo_metric(
+    tmp_path,
+    monkeypatch,
+    threshold_field,
+    threshold,
+    expected_code,
+):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    monkeypatch.setattr(
+        monitor_module.DashboardQueries,
+        "metrics_summary",
+        lambda self, **kwargs: slo_metrics(),
+    )
+    thresholds = MonitorThresholds(
+        **{
+            threshold_field: threshold,
+            "slo_min_samples": 10,
+            "slo_breach_observations": 1,
+        }
+    )
+
+    report = monitor(db, thresholds=thresholds, check_systemd=False)
+
+    assert report.metrics["alert_codes"] == [expected_code]
+
+
+def test_monitor_recovers_slo_alert_with_hysteresis(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    observed = iter((120, 95, 85, 80))
+    monkeypatch.setattr(
+        monitor_module.DashboardQueries,
+        "metrics_summary",
+        lambda self, **kwargs: slo_metrics(queue_p90=next(observed)),
+    )
+    thresholds = MonitorThresholds(
+        slo_queued_to_claimed_p90_seconds=100,
+        slo_min_samples=10,
+        slo_breach_observations=1,
+        slo_recovery_observations=2,
+        slo_recovery_ratio=0.9,
+    )
+
+    reports = [
+        monitor(db, thresholds=thresholds, check_systemd=False, persist_observability=True)
+        for _ in range(4)
+    ]
+
+    assert [report.ok for report in reports] == [False, False, False, True]
+    assert reports[1].metrics["slo_monitor"]["evaluations"][0]["recovery_observations"] == 0
+    assert reports[2].metrics["slo_monitor"]["evaluations"][0]["recovery_observations"] == 1
+    assert list_alerts(db) == []
+    resolved = list_alerts(db, include_resolved=True)
+    assert len(resolved) == 1
+    assert resolved[0]["resolved_at"] is not None
+
+
+def test_monitor_skips_slo_alerts_without_enough_samples_or_compatible_schema(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    thresholds = MonitorThresholds(
+        slo_queued_to_claimed_p90_seconds=60,
+        slo_min_samples=10,
+        slo_breach_observations=1,
+    )
+    monkeypatch.setattr(
+        monitor_module.DashboardQueries,
+        "metrics_summary",
+        lambda self, **kwargs: slo_metrics(queue_p90=120, sample_count=9),
+    )
+
+    insufficient = monitor(
+        db,
+        thresholds=thresholds,
+        check_systemd=False,
+        persist_observability=True,
+    )
+
+    assert insufficient.ok is True
+    assert insufficient.metrics["slo_monitor"]["evaluations"][0]["status"] == "insufficient_samples"
+
+    monkeypatch.setattr(
+        monitor_module.DashboardQueries,
+        "metrics_summary",
+        lambda self, **kwargs: slo_metrics(schema_error="pending migrations 5"),
+    )
+    incompatible = monitor(
+        db,
+        thresholds=thresholds,
+        check_systemd=False,
+        persist_observability=True,
+    )
+
+    assert incompatible.ok is True
+    assert incompatible.metrics["slo_monitor"]["schema_ok"] is False
+    assert incompatible.metrics["slo_monitor"]["schema_error"] == "pending migrations 5"
+    assert list_alerts(db) == []
+
+
+def test_monitor_does_not_resolve_active_slo_incident_without_enough_samples(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    thresholds = MonitorThresholds(
+        slo_queued_to_claimed_p90_seconds=60,
+        slo_min_samples=10,
+        slo_breach_observations=1,
+    )
+    monkeypatch.setattr(
+        monitor_module.DashboardQueries,
+        "metrics_summary",
+        lambda self, **kwargs: slo_metrics(queue_p90=120),
+    )
+    monitor(db, thresholds=thresholds, check_systemd=False, persist_observability=True)
+
+    monkeypatch.setattr(
+        monitor_module.DashboardQueries,
+        "metrics_summary",
+        lambda self, **kwargs: slo_metrics(queue_p90=None, sample_count=0),
+    )
+    insufficient = monitor(
+        db,
+        thresholds=thresholds,
+        check_systemd=False,
+        persist_observability=True,
+    )
+
+    assert insufficient.ok is False
+    evaluation = insufficient.metrics["slo_monitor"]["evaluations"][0]
+    assert evaluation["status"] == "insufficient_samples"
+    assert evaluation["active"] is True
+    active = list_alerts(db)
+    assert len(active) == 1
+    assert active[0]["context"]["observed"] is None
+    assert "observed n/a" in active[0]["message"]
+
+
+def test_disabling_slo_thresholds_clears_the_persisted_streak(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    monkeypatch.setattr(
+        monitor_module.DashboardQueries,
+        "metrics_summary",
+        lambda self, **kwargs: slo_metrics(queue_p90=120),
+    )
+    thresholds = MonitorThresholds(
+        slo_queued_to_claimed_p90_seconds=60,
+        slo_min_samples=10,
+        slo_breach_observations=2,
+    )
+    monitor(db, thresholds=thresholds, check_systemd=False, persist_observability=True)
+    active = monitor(db, thresholds=thresholds, check_systemd=False, persist_observability=True)
+    assert active.ok is False
+
+    disabled = monitor(db, check_systemd=False, persist_observability=True)
+    restarted = monitor(
+        db,
+        thresholds=thresholds,
+        check_systemd=False,
+        persist_observability=True,
+    )
+
+    assert disabled.ok is True
+    assert list_alerts(db) == []
+    assert restarted.ok is True
+    assert restarted.metrics["slo_monitor"]["evaluations"][0]["breach_observations"] == 1
+
+
+def test_monitor_preserves_active_slo_incident_when_migrations_are_pending(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    monkeypatch.setattr(
+        monitor_module.DashboardQueries,
+        "metrics_summary",
+        lambda self, **kwargs: slo_metrics(queue_p90=120),
+    )
+    thresholds = MonitorThresholds(
+        slo_queued_to_claimed_p90_seconds=60,
+        slo_min_samples=10,
+        slo_breach_observations=1,
+    )
+    monitor(db, thresholds=thresholds, check_systemd=False, persist_observability=True)
+    original = list_alerts(db)
+    assert len(original) == 1
+
+    with queue.connect() as con:
+        con.execute("DELETE FROM schema_migrations WHERE version=5")
+
+    degraded = monitor(
+        db,
+        thresholds=thresholds,
+        check_systemd=False,
+        persist_observability=True,
+    )
+
+    assert degraded.ok is False
+    assert degraded.metrics["schema_ok"] is False
+    assert degraded.metrics["slo_monitor"]["schema_ok"] is False
+    assert list_alerts(db) == original
 
 
 def test_monitor_reports_recent_reader_from_systemd_age(tmp_path, monkeypatch):
