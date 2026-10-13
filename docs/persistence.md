@@ -99,6 +99,13 @@ Job-list callers pass a typed `JobListFilters` value. The query maps each field
 to a fixed column and binds every value; callers cannot supply column names.
 The list remains one SQL statement and keeps the indexed dashboard ordering.
 
+Knowledge callers select one active section (`proposals`, `rules`, or `events`)
+and page it with a bounded limit and offset. Source events and their job or
+coalesced-notification provenance are loaded in batches through one read
+connection; adding rules or source references must not add per-record database
+connections. The response still carries full filtered totals so unloaded tabs
+can show accurate counts without loading their records.
+
 The read model assumes the current migrated schema. Health/status first
 validates migration history and reports `schema_ok=false` for an old or partial
 database; normal queries do not carry indefinite `table_exists()` or
