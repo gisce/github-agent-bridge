@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v0.77.1 (2026-10-13)
+
+### Bug Fixes
+
+- Propagate node path to intent classifier
+  ([#301](https://github.com/gisce/github-agent-bridge/pull/301),
+  [`d1f2fce`](https://github.com/gisce/github-agent-bridge/commit/d1f2fceaed37099af30465f43e86df78f37eae38))
+
+### Documentation
+
+- Document webhook ingestion paths
+  ([`2c0351b`](https://github.com/gisce/github-agent-bridge/commit/2c0351bdd58a4cd9ee2cb41b485f1201fec8eab7))
+
+
 ## v0.77.0 (2026-10-09)
 
 ### Features
