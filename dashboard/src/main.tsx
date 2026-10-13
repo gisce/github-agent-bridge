@@ -619,6 +619,8 @@ type KnowledgeResponse = {
   proposals: KnowledgeProposal[];
   rules: KnowledgeRule[];
   summary: Record<string, number>;
+  section: KnowledgeTab | null;
+  next_offset: number | null;
 };
 
 type KnowledgeTab = "proposals" | "rules" | "events";
@@ -908,11 +910,13 @@ function buildJobQuery(filters: JobFilters, limit: number) {
   return `/api/jobs?${params.toString()}`;
 }
 
-function buildKnowledgeQuery(repo: string, status: string, limit = 50) {
+function buildKnowledgeQuery(repo: string, status: string, section: KnowledgeTab, limit = 50, offset = 0) {
   const params = new URLSearchParams();
   if (repo.trim()) params.set("repo", repo.trim());
-  if (status.trim()) params.set("status", status.trim());
+  if (section === "proposals" && status.trim()) params.set("status", status.trim());
+  params.set("section", section);
   params.set("limit", String(limit));
+  if (offset > 0) params.set("offset", String(offset));
   return `/api/knowledge?${params.toString()}`;
 }
 
@@ -1086,6 +1090,7 @@ function App() {
   const jobLoadPendingRef = React.useRef(false);
   const [knowledgeRepo, setKnowledgeRepo] = React.useState("");
   const [knowledgeStatus, setKnowledgeStatus] = React.useState("proposed");
+  const [knowledgeSection, setKnowledgeSection] = React.useState<KnowledgeTab>("proposals");
   const [webhookSection, setWebhookSection] = React.useState<WebhookSection>("overview");
   const [webhookDeliveryFilters, setWebhookDeliveryFilters] = React.useState<WebhookDeliveryFilters>({
     hook_id: "", event_name: "", repository: "", result: "", enqueue_status: "",
@@ -1170,9 +1175,11 @@ function App() {
     queryFn: () => api<WebhookDeliveryDetailResponse>(`/api/webhooks/github/deliveries/${encodeURIComponent(selectedWebhookDeliveryId ?? "")}`),
     enabled: webhookEnabled && selectedWebhookDeliveryId !== null,
   });
-  const knowledge = useQuery({
-    queryKey: ["knowledge", knowledgeRepo, knowledgeStatus],
-    queryFn: () => api<KnowledgeResponse>(buildKnowledgeQuery(knowledgeRepo, knowledgeStatus)),
+  const knowledge = useInfiniteQuery({
+    queryKey: ["knowledge", knowledgeSection, knowledgeRepo, knowledgeSection === "proposals" ? knowledgeStatus : ""],
+    queryFn: ({ pageParam }) => api<KnowledgeResponse>(buildKnowledgeQuery(knowledgeRepo, knowledgeStatus, knowledgeSection, 50, pageParam)),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => lastPage.next_offset ?? undefined,
     enabled: isKnowledgeRoute,
   });
   const mcpTokens = useQuery({
@@ -1426,6 +1433,17 @@ function App() {
   const detailStatus = <JobDetailStatus selectedJobId={selectedJobId} selectedJob={selectedJob} loading={detail.isLoading} error={detail.error} session={session.data?.session} sessionEvents={sessionEvents.data?.events} transcript={transcript.data?.entries} now={now} />;
   const webhookHookRows = webhookHooks.data?.pages.flatMap((page) => page.hooks) ?? [];
   const webhookDeliveryRows = webhookDeliveries.data?.pages.flatMap((page) => page.deliveries) ?? [];
+  const knowledgePages = knowledge.data?.pages ?? [];
+  const latestKnowledgePage = knowledgePages[knowledgePages.length - 1];
+  const knowledgeData = knowledgePages.length > 0 ? {
+    ...knowledgePages[0],
+    repositories: latestKnowledgePage?.repositories ?? knowledgePages[0].repositories,
+    summary: latestKnowledgePage?.summary ?? knowledgePages[0].summary,
+    proposals: knowledgePages.flatMap((page) => page.proposals),
+    rules: knowledgePages.flatMap((page) => page.rules),
+    events: knowledgePages.flatMap((page) => page.events),
+    next_offset: latestKnowledgePage?.next_offset ?? null,
+  } : undefined;
   const webhookSectionLoading = webhookSection === "overview" ? webhookTimeseries.isLoading : webhookSection === "hooks" ? webhookHooks.isLoading : webhookDeliveries.isLoading;
   const webhookSectionError = webhookSection === "overview" ? webhookTimeseries.error : webhookSection === "hooks" ? webhookHooks.error : webhookDeliveries.error;
   const refreshWebhooks = () => {
@@ -1473,20 +1491,25 @@ function App() {
           />
         ) : isKnowledgeRoute ? (
           <KnowledgePage
-            data={knowledge.data}
+            data={knowledgeData}
             loading={knowledge.isLoading}
             error={knowledge.error}
             repo={knowledgeRepo}
             status={knowledgeStatus}
+            activeTab={knowledgeSection}
             user={me.data?.user}
             now={now}
             onRepoChange={setKnowledgeRepo}
             onStatusChange={setKnowledgeStatus}
+            onTabChange={setKnowledgeSection}
             onApprove={(proposalId) => moderateKnowledgeProposal(proposalId, "approve")}
             onReject={(proposalId) => moderateKnowledgeProposal(proposalId, "reject")}
             onUpdateRuleScope={updateKnowledgeRuleScope}
             onDeleteRule={deleteKnowledgeRule}
             onRefresh={() => knowledge.refetch()}
+            hasMore={Boolean(knowledge.hasNextPage)}
+            loadingMore={knowledge.isFetchingNextPage}
+            onLoadMore={() => knowledge.fetchNextPage()}
           />
         ) : isMcpRoute ? (
           <McpPage
@@ -2399,37 +2422,58 @@ function KnowledgePage({
   error,
   repo,
   status,
+  activeTab: selectedTab,
   user,
   now,
   onRepoChange,
   onStatusChange,
+  onTabChange,
   onApprove,
   onReject,
   onUpdateRuleScope,
   onDeleteRule,
   onRefresh,
+  hasMore = false,
+  loadingMore = false,
+  onLoadMore = () => undefined,
 }: {
   data: KnowledgeResponse | undefined;
   loading: boolean;
   error: Error | null;
   repo: string;
   status: string;
+  activeTab?: KnowledgeTab;
   user: UserProfile | undefined;
   now: number;
   onRepoChange: (repo: string) => void;
   onStatusChange: (status: string) => void;
+  onTabChange?: (tab: KnowledgeTab) => void;
   onApprove: (proposalId: string) => Promise<void>;
   onReject: (proposalId: string) => Promise<void>;
   onUpdateRuleScope: (ruleId: string, scope: string) => Promise<void>;
   onDeleteRule: (ruleId: string) => Promise<void>;
   onRefresh: () => void;
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  onLoadMore?: () => void;
 }) {
   const summary = data?.summary ?? {};
-  const [activeTab, setActiveTab] = React.useState<KnowledgeTab>("proposals");
+  const [localTab, setLocalTab] = React.useState<KnowledgeTab>("proposals");
+  const activeTab = selectedTab ?? localTab;
+  const changeTab = (tab: KnowledgeTab) => {
+    setLocalTab(tab);
+    onTabChange?.(tab);
+  };
+  const proposalCount = summary.proposals ?? (
+    (summary.proposed ?? 0)
+    + (summary.approved ?? 0)
+    + (summary.rejected ?? 0)
+    + (summary.errors ?? 0)
+  );
   const tabs: Array<{ id: KnowledgeTab; label: string; count: number }> = [
-    { id: "proposals", label: "Proposals", count: data?.proposals.length ?? 0 },
-    { id: "rules", label: "Rules", count: data?.rules.length ?? 0 },
-    { id: "events", label: "Events", count: data?.events.length ?? 0 },
+    { id: "proposals", label: "Proposals", count: proposalCount },
+    { id: "rules", label: "Rules", count: summary.rules ?? 0 },
+    { id: "events", label: "Events", count: summary.events ?? 0 },
   ];
   return (
     <div className="grid min-w-0 gap-4">
@@ -2489,7 +2533,7 @@ function KnowledgePage({
                 role="tab"
                 aria-label={`${tab.label} (${tab.count})`}
                 aria-selected={activeTab === tab.id}
-                onClick={() => setActiveTab(tab.id)}
+                onClick={() => changeTab(tab.id)}
               >
                 <span>{tab.label}</span>
                 <span className={cn("rounded-sm border px-1 font-mono text-[10px]", activeTab === tab.id ? "border-white/40 text-white" : "border-border text-muted")}>{tab.count}</span>
@@ -2501,6 +2545,13 @@ function KnowledgePage({
         {activeTab === "proposals" ? <KnowledgeProposals proposals={data?.proposals ?? []} loading={loading} isAdmin={Boolean(user?.is_admin)} now={now} onApprove={onApprove} onReject={onReject} /> : null}
         {activeTab === "rules" ? <KnowledgeRules rules={data?.rules ?? []} loading={loading} now={now} onUpdateRuleScope={onUpdateRuleScope} onDeleteRule={onDeleteRule} /> : null}
         {activeTab === "events" ? <KnowledgeEvents events={data?.events ?? []} loading={loading} now={now} /> : null}
+        {hasMore ? (
+          <div className="mt-3 flex justify-center border-t border-border pt-3">
+            <button className="button-secondary" type="button" disabled={loadingMore} onClick={onLoadMore}>
+              {loadingMore ? "Loading more..." : "Load more knowledge records"}
+            </button>
+          </div>
+        ) : null}
       </Panel>
     </div>
   );

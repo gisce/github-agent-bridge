@@ -142,7 +142,7 @@ describe("dashboard routing and API query helpers", () => {
   });
 
   it("builds knowledge queries and recognizes the knowledge route", () => {
-    expect(buildKnowledgeQuery(" gisce/github-agent-bridge ", " proposed ", 25)).toBe("/api/knowledge?repo=gisce%2Fgithub-agent-bridge&status=proposed&limit=25");
+    expect(buildKnowledgeQuery(" gisce/github-agent-bridge ", " proposed ", "rules", 25, 50)).toBe("/api/knowledge?repo=gisce%2Fgithub-agent-bridge&section=rules&limit=25&offset=50");
     expect(isKnowledgePath("/knowledge")).toBe(true);
     expect(isKnowledgePath("/knowledge/")).toBe(true);
     expect(isKnowledgePath("/knowledge/extra")).toBe(false);
@@ -353,6 +353,46 @@ describe("dashboard routing and API query helpers", () => {
     expect(await screen.findByText("gisce/repository")).toBeInTheDocument();
     expect(screen.getByText("organization · #42")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith("/api/webhooks/github/hooks?limit=50&cursor=page-2", expect.anything());
+
+    window.history.replaceState({}, "", "/");
+    vi.unstubAllGlobals();
+  });
+
+  it("fetches only the active knowledge tab and accumulates offset pages", async () => {
+    window.history.replaceState({}, "", "/knowledge");
+    const jsonResponse = (body: unknown) => Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }));
+    const knowledgePage = (section: "proposals" | "rules" | "events", records: unknown[], nextOffset: number | null) => ({
+      repositories: ["gisce/github-agent-bridge"],
+      summary: { proposed: 1, approved: 0, rejected: 0, errors: 0, rules: 2, events: 3 },
+      proposals: section === "proposals" ? records : [],
+      rules: section === "rules" ? records : [],
+      events: section === "events" ? records : [],
+      section,
+      next_offset: nextOffset,
+    });
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path === "/api/status") return jsonResponse({ service: "github-agent-bridge-dashboard", read_only: false, admin_actions: [], webhook_configured: false, autoupdate: {} });
+      if (path === "/api/me") return jsonResponse({ user: { login: "operator", avatar_url: "", html_url: "", is_admin: true } });
+      if (path === "/api/about") return jsonResponse({ service: "github-agent-bridge", version: "0.78.0", repository_url: "https://github.com/gisce/github-agent-bridge" });
+      if (path === "/api/web-push/config") return jsonResponse({ status: { enabled: false } });
+      if (path === "/api/knowledge?status=proposed&section=proposals&limit=50") return jsonResponse(knowledgePage("proposals", [], null));
+      if (path === "/api/knowledge?section=rules&limit=50") return jsonResponse(knowledgePage("rules", [{ id: "rule-1", scope: "global", type: "operating_rule", confidence: 0.8, rule: "First rule", created_at: "2026-10-13T10:00:00Z", last_seen: "2026-10-13T10:00:00Z", source_events: [], source_event_details: [], observations: 1 }], 50));
+      if (path === "/api/knowledge?section=rules&limit=50&offset=50") return jsonResponse(knowledgePage("rules", [{ id: "rule-2", scope: "global", type: "operating_rule", confidence: 0.8, rule: "Second rule", created_at: "2026-10-13T10:00:00Z", last_seen: "2026-10-13T10:00:00Z", source_events: [], source_event_details: [], observations: 1 }], null));
+      throw new Error(`Unexpected fetch: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const user = userEvent.setup();
+    render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
+
+    await user.click(await screen.findByRole("tab", { name: /Rules \(2\)/i }));
+    expect(await screen.findByText("First rule")).toBeInTheDocument();
+    expect(fetchMock).not.toHaveBeenCalledWith(expect.stringContaining("section=events"), expect.anything());
+
+    await user.click(screen.getByRole("button", { name: /Load more knowledge records/i }));
+    expect(await screen.findByText("Second rule")).toBeInTheDocument();
+    expect(screen.getByText("First rule")).toBeInTheDocument();
 
     window.history.replaceState({}, "", "/");
     vi.unstubAllGlobals();
@@ -1545,6 +1585,8 @@ describe("knowledge proposals", () => {
         data={{
           repositories: ["gisce/github-agent-bridge"],
           summary: { proposed: 1, approved: 0, rules: 1, events: 1 },
+          section: null,
+          next_offset: null,
           proposals: [
             {
               id: "feedback-proposal-1",

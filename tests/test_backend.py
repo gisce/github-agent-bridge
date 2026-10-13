@@ -1343,6 +1343,63 @@ def test_dashboard_knowledge_lists_and_admin_moderates_feedback(tmp_path):
     assert client.get("/api/knowledge", params={"repo": "gisce/erp"}).json()["rules"] == []
 
 
+def test_dashboard_knowledge_paginates_only_the_requested_section(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    for index in range(3):
+        feedback.add_rule(
+            db,
+            "repo:gisce/erp",
+            "operating_rule",
+            f"Rule {index}",
+            0.8,
+        )
+    app = create_app(
+        DashboardConfig(
+            db=db,
+            secret_key="secret",
+            allowed_users={"alice"},
+        )
+    )
+    client = TestClient(app)
+    client.cookies.set(
+        "gab_dashboard_session",
+        _sign(
+            app.state.dashboard_config,
+            _encode_session({"login": "Alice"}),
+        ),
+    )
+
+    first = client.get(
+        "/api/knowledge",
+        params={
+            "repo": "gisce/erp",
+            "section": "rules",
+            "limit": 2,
+        },
+    )
+    second = client.get(
+        "/api/knowledge",
+        params={
+            "repo": "gisce/erp",
+            "section": "rules",
+            "limit": 2,
+            "offset": 2,
+        },
+    )
+
+    assert first.status_code == 200
+    assert first.json()["section"] == "rules"
+    assert first.json()["next_offset"] == 2
+    assert len(first.json()["rules"]) == 2
+    assert first.json()["events"] == []
+    assert first.json()["proposals"] == []
+    assert first.json()["summary"]["rules"] == 3
+    assert second.status_code == 200
+    assert len(second.json()["rules"]) == 1
+    assert second.json()["next_offset"] is None
+
+
 def test_dashboard_admin_can_change_knowledge_rule_scope(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     JobQueue(db)

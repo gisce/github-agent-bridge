@@ -33,11 +33,6 @@ from .cli import DEFAULT_DB
 from .feedback import (
     approve_proposal,
     delete_rule,
-    list_applicable_rules,
-    list_events,
-    list_proposals,
-    list_repositories,
-    list_rules,
     reject_proposal,
     update_rule_scope,
 )
@@ -1592,32 +1587,23 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         profile: dict[str, Any] = Depends(current_profile),
         repo: str | None = None,
         proposal_status: str | None = Query(default=None, alias="status"),
-        limit: int = 50,
+        section: str | None = Query(
+            default=None,
+            pattern="^(proposals|rules|events)$",
+        ),
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
     ) -> dict[str, Any]:
-        scope = f"repo:{repo.strip().lower()}" if repo and repo.strip() else ""
-        status_filter = (proposal_status or "").strip().lower()
-        proposals = list_proposals(config.db, status=status_filter, limit=limit)
-        if scope:
-            proposals = [item for item in proposals if item["scope"] == scope or item["scope"].startswith(f"{scope}:")]
-        events = list_events(config.db, scope=scope, limit=limit)
-        rules = list_applicable_rules(config.db, repo.strip().lower(), min_confidence=0) if scope else list_rules(config.db, min_confidence=0)
-        proposals = _mark_manageable_knowledge(proposals, profile)
-        events = _mark_manageable_knowledge(events, profile)
-        rules = _mark_manageable_knowledge(rules, profile)
-        return {
-            "repositories": list_repositories(config.db),
-            "events": events,
-            "proposals": proposals,
-            "rules": rules,
-            "summary": {
-                "events": len(events),
-                "rules": len(rules),
-                "proposed": sum(1 for item in proposals if item["status"] == "proposed"),
-                "approved": sum(1 for item in proposals if item["status"] == "approved"),
-                "rejected": sum(1 for item in proposals if item["status"] == "rejected"),
-                "errors": sum(1 for item in proposals if item["status"] == "error"),
-            },
-        }
+        page = queries.knowledge_page(
+            section=section,
+            repo=(repo or "").strip().lower(),
+            proposal_status=(proposal_status or "").strip().lower(),
+            limit=limit,
+            offset=offset,
+        )
+        for key in ("proposals", "events", "rules"):
+            page[key] = _mark_manageable_knowledge(page[key], profile)
+        return page
 
     @app.post("/api/knowledge/proposals/{proposal_id}/approve")
     def api_knowledge_approve(proposal_id: str, _: dict[str, Any] = Depends(current_admin_profile)) -> dict[str, Any]:
@@ -1635,7 +1621,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
 
     @app.delete("/api/knowledge/rules/{rule_id}")
     def api_knowledge_rule_delete(rule_id: str, profile: dict[str, Any] = Depends(current_profile)) -> dict[str, Any]:
-        rule = next((item for item in list_rules(config.db, min_confidence=0) if item["id"] == rule_id), None)
+        rule = queries.get_knowledge_rule(rule_id)
         if rule is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="knowledge_rule_not_found")
         if not profile.get("is_admin") and not _knowledge_item_owned_by(rule, str(profile.get("login") or "")):
@@ -1646,7 +1632,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
 
     @app.patch("/api/knowledge/rules/{rule_id}")
     def api_knowledge_rule_update(rule_id: str, payload: dict[str, Any], profile: dict[str, Any] = Depends(current_profile)) -> dict[str, Any]:
-        existing = next((item for item in list_rules(config.db, min_confidence=0) if item["id"] == rule_id), None)
+        existing = queries.get_knowledge_rule(rule_id)
         if existing is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="knowledge_rule_not_found")
         if not profile.get("is_admin") and not _knowledge_item_owned_by(existing, str(profile.get("login") or "")):
