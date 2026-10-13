@@ -216,3 +216,27 @@ def test_slo_query_index_migration_bounds_ingestion_cohorts(tmp_path):
         }
 
     assert expected <= indexes
+
+
+def test_webhook_dashboard_index_migration_avoids_payload_table_scans(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    expected = {"idx_webhook_shadow_summary"}
+    with queue.connect() as con:
+        for index in expected:
+            con.execute(f"DROP INDEX {index}")
+        con.execute("DELETE FROM schema_migrations WHERE version=6")
+
+    with pytest.raises(MigrationRequiredError, match="pending migrations 6"):
+        JobQueue(db)
+
+    JobQueue(db, migrate=True)
+    with sqlite3.connect(db) as con:
+        indexes = {
+            str(row[0])
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+
+    assert expected <= indexes
