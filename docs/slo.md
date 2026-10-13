@@ -81,6 +81,12 @@ the database has pending migrations or an incompatible schema, it returns HTTP
 200 with `metrics.schema_ok=false`, `metrics.schema_error`, and empty metric
 defaults; the read path never applies migrations.
 
+The main dashboard consumes this same summary endpoint to show reliability
+rates, latency percentiles, and daily trends. Operators can switch between the
+`24h`, `7d`, and `30d` windows without issuing separate metric queries. When
+`schema_ok=false`, the dashboard replaces the charts with the migration error
+instead of presenting empty values as healthy service data.
+
 ## Structured terminal outcomes
 
 `jobs.terminal_outcome` is the metric input. Consumers must not search job

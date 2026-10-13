@@ -17,6 +17,7 @@ import {
   McpPage,
   ProductMeta,
   SectionNav,
+  SloDashboard,
   StatusBadge,
   SystemdUnits,
   UserMenu,
@@ -48,6 +49,80 @@ import {
   selectedWebhookDeliveryIdFromPath,
   WebhookDeliveryDetailPage,
 } from "./main";
+
+function sampleSloRate(percent: number, numerator: number, denominator: number) {
+  return {
+    rate: percent / 100,
+    percent,
+    numerator,
+    denominator,
+    sample_count: denominator,
+    missing_count: 0,
+  };
+}
+
+function sampleSloLatency(p50: number, p90: number, p99: number) {
+  return {
+    unit: "seconds" as const,
+    p50,
+    p90,
+    p99,
+    sample_count: 4,
+    missing_count: 0,
+  };
+}
+
+function sampleSloMetrics() {
+  const rates = {
+    blocked: sampleSloRate(25, 1, 4),
+    no_op: sampleSloRate(10, 1, 10),
+    retry: { ...sampleSloRate(50, 2, 4), requeued_runs: 2 },
+    coalescing: sampleSloRate(20, 2, 10),
+  };
+  return {
+    db_exists: true,
+    schema_ok: true,
+    status_counts: { done: 4 },
+    by_repo: {},
+    by_action: {},
+    by_intent: {},
+    by_created_day: {},
+    runtime_usage: { day: [], month: [] },
+    runtime_seconds: { median: null, p90: null, p99: null },
+    queue_wait_seconds: { median: null, p90: null, p99: null },
+    slo: {
+      window: {
+        value: "7d" as const,
+        start: "2026-10-06T12:00:00Z",
+        end: "2026-10-13T12:00:00Z",
+        timezone: "Europe/Madrid",
+      },
+      cohort: {
+        decision: "auto_trusted",
+        terminal_outcomes: ["completed", "no_op", "blocked"],
+        sample_count: 4,
+        missing_count: 1,
+        excluded_count: 1,
+      },
+      latencies: {
+        source_received_to_queued: sampleSloLatency(60, 120, 180),
+        queued_to_claimed: sampleSloLatency(30, 60, 90),
+        claimed_to_first_output: sampleSloLatency(15, 30, 45),
+        claimed_to_done: sampleSloLatency(300, 600, 900),
+      },
+      rates,
+      trends: {
+        bucket: "day" as const,
+        timezone: "Europe/Madrid",
+        daily: [{
+          bucket: "2026-10-13",
+          cohort: { sample_count: 4, missing_count: 1, excluded_count: 1 },
+          rates,
+        }],
+      },
+    },
+  };
+}
 
 describe("dashboard routing and API query helpers", () => {
   it("builds trimmed job queries and preserves the requested limit", () => {
@@ -311,7 +386,8 @@ describe("dashboard routing and API query helpers", () => {
   });
 
   it("requests metrics using the browser timezone and labels runtime buckets", () => {
-    expect(metricsSummaryPath("America/New_York")).toBe("/api/metrics/summary?timezone=America%2FNew_York");
+    expect(metricsSummaryPath("America/New_York")).toBe("/api/metrics/summary?window=7d&timezone=America%2FNew_York");
+    expect(metricsSummaryPath("Europe/Madrid", "30d")).toBe("/api/metrics/summary?window=30d&timezone=Europe%2FMadrid");
     expect(runtimeBucketLabel("2026-06-02", "day")).toMatch(/Jun|2/);
     expect(runtimeBucketLabel("2026-06", "month")).toMatch(/Jun|2026/);
   });
@@ -321,6 +397,50 @@ describe("dashboard routing and API query helpers", () => {
     expect(formatRuntimeUsageSeconds(1800)).toBe("30m");
     expect(formatRuntimeUsageSeconds(5400)).toBe("1h 30m");
     expect(formatRuntimeUsageSeconds(7200)).toBe("2h");
+  });
+
+  it("renders SLO rates, latency percentiles, trends, and window controls", async () => {
+    class ResizeObserverMock {
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+    }
+    vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+    const onWindowChange = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <SloDashboard
+        summary={sampleSloMetrics()}
+        loading={false}
+        window="7d"
+        onWindowChange={onWindowChange}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByRole("heading", { name: "Service SLOs" })).toBeInTheDocument();
+    expect(screen.getByText("25%")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Source → queue" })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Daily SLO reliability rates chart" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "7 days" })).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("button", { name: "30 days" }));
+    expect(onWindowChange).toHaveBeenCalledWith("30d");
+    vi.unstubAllGlobals();
+  });
+
+  it("explains when SLO metrics are unavailable because migrations are pending", () => {
+    render(
+      <SloDashboard
+        summary={{ ...sampleSloMetrics(), schema_ok: false, schema_error: "pending migrations 5" }}
+        loading={false}
+        window="7d"
+        onWindowChange={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/SLO metrics are unavailable until the database schema is migrated: pending migrations 5/)).toBeInTheDocument();
   });
 
   it("decodes VAPID public keys for push manager subscriptions", () => {
