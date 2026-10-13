@@ -1353,11 +1353,13 @@ describe("autoupdate notice", () => {
     const systemLink = await screen.findByRole("link", { name: /System/ });
     expect(systemLink).toContainElement(await screen.findByLabelText("System update available"));
     expect(screen.queryByLabelText("Update available")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Service SLOs" })).not.toBeInTheDocument();
 
     await user.click(systemLink);
 
     expect(await screen.findByLabelText("Update available")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /apply update/i })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Service SLOs" })).toBeInTheDocument();
 
     window.history.replaceState({}, "", "/");
     vi.unstubAllGlobals();

@@ -1581,10 +1581,16 @@ function App() {
               alerts={alerts.data?.alerts}
               alertsLoading={alerts.isLoading}
               alertsError={alerts.error}
+              sloSummary={metrics.data?.metrics}
+              sloLoading={metrics.isLoading}
+              sloError={metrics.error}
+              sloWindow={sloWindow}
               now={now}
               onRefreshProcesses={() => processes.refetch()}
               onRefreshSystemd={() => systemd.refetch()}
               onRefreshAlerts={() => alerts.refetch()}
+              onSloWindowChange={setSloWindow}
+              onRefreshSlo={() => metrics.refetch()}
             />
           </>
         ) : (
@@ -1597,14 +1603,6 @@ function App() {
               <Metric title="Blocked" value={counts.blocked ?? 0} icon={<AlertTriangle className="h-5 w-5" />} />
               <Metric title="Done" value={counts.done ?? 0} icon={<CheckCircle2 className="h-5 w-5" />} />
             </section>
-
-            <SloDashboard
-              summary={metrics.data?.metrics}
-              loading={metrics.isLoading}
-              window={sloWindow}
-              onWindowChange={setSloWindow}
-              onRefresh={() => metrics.refetch()}
-            />
 
             <section className="grid gap-3">
               <JobsHeader count={jobRows.length} limit={jobLimit} loading={jobs.isLoading} onRefresh={() => jobs.refetch()} />
@@ -2121,10 +2119,16 @@ function SystemPage({
   alerts,
   alertsLoading,
   alertsError,
+  sloSummary,
+  sloLoading,
+  sloError,
+  sloWindow,
   now,
   onRefreshProcesses,
   onRefreshSystemd,
   onRefreshAlerts,
+  onSloWindowChange,
+  onRefreshSlo,
 }: {
   executorPause: ExecutorPauseState | undefined;
   executorPauseLoading: boolean;
@@ -2142,10 +2146,16 @@ function SystemPage({
   alerts: AlertRecord[] | undefined;
   alertsLoading: boolean;
   alertsError: Error | null;
+  sloSummary: MetricsSummary | undefined;
+  sloLoading: boolean;
+  sloError: Error | null;
+  sloWindow: SloWindow;
   now: number;
   onRefreshProcesses: () => void;
   onRefreshSystemd: () => void;
   onRefreshAlerts: () => void;
+  onSloWindowChange: (window: SloWindow) => void;
+  onRefreshSlo: () => void;
 }) {
   return (
     <section className="grid gap-4" aria-label="Bridge system">
@@ -2157,6 +2167,14 @@ function SystemPage({
         actionError={executorPauseError}
         isAdmin={isAdmin}
         onChange={onExecutorPauseChange}
+      />
+      {sloError ? <Banner tone="error" text={sloError.message} /> : null}
+      <SloDashboard
+        summary={sloSummary}
+        loading={sloLoading}
+        window={sloWindow}
+        onWindowChange={onSloWindowChange}
+        onRefresh={onRefreshSlo}
       />
       <Panel title="Systemd" action={<RefreshButton onClick={onRefreshSystemd} />}>
         {systemdError ? <Banner tone="error" text={systemdError.message} /> : null}
