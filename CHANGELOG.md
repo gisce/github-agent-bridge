@@ -2,6 +2,27 @@
 
 <!-- version list -->
 
+## v0.79.0 (2026-10-13)
+
+### Documentation
+
+- Record bounded knowledge read model
+  ([`d60ffb3`](https://github.com/gisce/github-agent-bridge/commit/d60ffb3229eb4a7d08bd9a098576d61855f81958))
+
+### Features
+
+- Add sustained SLO monitor alerts
+  ([`39b85af`](https://github.com/gisce/github-agent-bridge/commit/39b85af4630cceda7e74677d2f9579e196e88966))
+
+### Performance Improvements
+
+- Bound knowledge dashboard reads
+  ([`3a24281`](https://github.com/gisce/github-agent-bridge/commit/3a242812ff632ce2668a07e51d5257a29d7bdf7d))
+
+- Optimize webhook dashboard queries
+  ([`e7b9cb9`](https://github.com/gisce/github-agent-bridge/commit/e7b9cb9c0f9a90dcb4a53119db104c32d2f235a6))
+
+
 ## v0.78.1 (2026-10-13)
 
 ### Bug Fixes
