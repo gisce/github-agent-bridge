@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import threading
@@ -13,6 +12,7 @@ from .feedback import _extract_json_object, compact, load_prompt_rule, session_i
 from .models import GitHubContext, Notification
 from .parser import github_event_flags
 from .policy import DEFAULT_BOT_LOGINS, IntentClassifier, Policy
+from .subprocess_env import configured_node_bin, prepare_subprocess_env
 
 ALLOWED_ACTIONS = {
     "reply_comment",
@@ -131,7 +131,11 @@ def _text_from_model_run_json(raw: str) -> str:
 
 
 @lru_cache(maxsize=8)
-def assert_openclaw_model_run_supported(openclaw_bin: str) -> None:
+def assert_openclaw_model_run_supported(
+    openclaw_bin: str,
+    node_bin: str | None = None,
+) -> None:
+    env = prepare_subprocess_env(openclaw_bin, node_bin)
     try:
         proc = subprocess.run(
             [openclaw_bin, "infer", "model", "run", "--help"],
@@ -140,6 +144,7 @@ def assert_openclaw_model_run_supported(openclaw_bin: str) -> None:
             stderr=subprocess.PIPE,
             text=True,
             timeout=10,
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         detail = compact(str(exc), 300)
@@ -303,7 +308,8 @@ def classify_notification_with_llm(
     agent: str | None = None,
     prompt_template: str | None = None,
 ) -> IntentClassification:
-    assert_openclaw_model_run_supported(cfg.openclaw_bin)
+    node_bin = configured_node_bin(cfg.node_bin)
+    assert_openclaw_model_run_supported(cfg.openclaw_bin, node_bin)
     prompt = build_intent_prompt(n, ctx, parser_result, prompt_template, policy=policy, agent=agent)
     cmd = [
         cfg.openclaw_bin,
@@ -319,10 +325,7 @@ def classify_notification_with_llm(
     ]
     if cfg.model:
         cmd.extend(["--model", cfg.model])
-    env = os.environ.copy()
-    openclaw_dir = os.path.dirname(cfg.openclaw_bin)
-    if openclaw_dir:
-        env["PATH"] = openclaw_dir + os.pathsep + env.get("PATH", "")
+    env = prepare_subprocess_env(cfg.openclaw_bin, node_bin)
     errors: list[str] = []
     with _INTENT_CLASSIFIER_SEMAPHORE:
         for attempt in range(1, INTENT_CLASSIFIER_ATTEMPTS + 1):

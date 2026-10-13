@@ -100,6 +100,7 @@ gab --policy ~/.config/github-agent-bridge/policy.json enqueue-comment-url ...
     "minConfidence": 0.75,
     "onlyWhenParserDefaulted": true,
     "openclawBin": "openclaw",
+    "nodeBin": "/absolute/path/to/node",
     "sessionId": "github-agent-bridge-intent",
     "timeout": 60
   }
@@ -795,6 +796,7 @@ Example:
     "minConfidence": 0.75,
     "onlyWhenParserDefaulted": true,
     "openclawBin": "openclaw",
+    "nodeBin": "/absolute/path/to/node",
     "sessionId": "github-agent-bridge-intent",
     "timeout": 60
   }
@@ -809,6 +811,7 @@ Example:
 | `minConfidence` | number | `0.75` | Minimum classifier confidence required before replacing the deterministic parser action/work-intent result. |
 | `onlyWhenParserDefaulted` | boolean | `true` | Run the classifier for conservative comment/review classifications and for bot-mentioned comments even when the parser saw implementation-looking language. Set to `false` to let the classifier arbitrate all eligible trusted GitHub comments and reviews. |
 | `openclawBin` | string | `openclaw` | OpenClaw executable used for classifier subprocess calls. |
+| `nodeBin` | string | unset | Optional Node executable whose directory is prepended to `PATH` for OpenClaw classifier subprocesses. When unset, `GITHUB_AGENT_BRIDGE_NODE_BIN` or `NODE_BIN` is used if available. |
 | `sessionId` | string | `github-agent-bridge-intent` | Backward-compatible setting retained for older deployments. Current classifier execution uses raw `openclaw infer model run` and does not rely on a long-lived OpenClaw session id. |
 | `timeout` | integer | `60` | Maximum seconds to wait for one classifier call before falling back conservatively for webhook comments/reviews. |
 
