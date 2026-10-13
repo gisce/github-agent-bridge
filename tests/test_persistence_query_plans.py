@@ -78,17 +78,57 @@ def test_webhook_pagination_and_coverage_use_hot_path_indexes(tmp_path):
         50,
         cursor=("2026-10-09T12:00:00Z", "delivery-50"),
     ) == []
-    repository.summary("2026-10-08T12:00:00Z", "2026-10-09T12:00:00Z")
-
-    pagination = _plan(
-        database.path,
-        _captured(database, "from webhook_shadow_receipts r left join"),
+    pagination_statement = _captured(
+        database,
+        "from webhook_shadow_receipts r left join",
     )
-    coverage = _plan(database.path, _captured(database, "with email_events as"))
+    database.statements.clear()
+    repository.summary("2026-10-08T12:00:00Z", "2026-10-09T12:00:00Z")
+    summary_statements = [
+        statement
+        for statement in database.statements
+        if statement.lstrip().upper().startswith(("SELECT", "WITH"))
+    ]
+    coverage_statement = _captured(database, "with email_events as")
+    receipt_summary_statement = _captured(
+        database,
+        "duplicate_deliveries from webhook_shadow_receipts",
+    )
+    enqueue_summary_statement = _captured(
+        database,
+        "where enqueue_status is not null group by enqueue_status",
+    )
+    database.statements.clear()
+    assert repository.exceptions(
+        "2026-10-08T12:00:00Z",
+        "2026-10-09T12:00:00Z",
+        50,
+    ) == []
+    exception_statements = [
+        statement
+        for statement in database.statements
+        if statement.lstrip().upper().startswith(("SELECT", "WITH"))
+    ]
+    exceptions_statement = _captured(
+        database,
+        "with email_events as materialized",
+    )
+
+    pagination = _plan(database.path, pagination_statement)
+    coverage = _plan(database.path, coverage_statement)
+    receipt_summary = _plan(database.path, receipt_summary_statement)
+    enqueue_summary = _plan(database.path, enqueue_summary_statement)
+    exceptions = _plan(database.path, exceptions_statement)
+    assert len(summary_statements) == 4
+    assert len(exception_statements) == 1
     assert any("idx_webhook_shadow_delivery_page" in detail for detail in pagination)
     assert all("USE TEMP B-TREE FOR ORDER BY" not in detail for detail in pagination)
     assert any("idx_ingest_receipts_coverage" in detail for detail in coverage)
     assert any("idx_webhook_shadow_coverage" in detail for detail in coverage)
+    assert any("idx_webhook_shadow_summary" in detail for detail in receipt_summary)
+    assert any("idx_webhook_shadow_summary" in detail for detail in enqueue_summary)
+    assert all("CORRELATED SCALAR SUBQUERY" not in detail for detail in exceptions)
+    assert any("AUTOMATIC" in detail and "event_key" in detail for detail in exceptions)
 
 
 def test_feedback_mcp_and_push_lookups_use_domain_indexes(tmp_path):

@@ -158,7 +158,8 @@ class WebhookRepository:
             receipt = con.execute(
                 "SELECT COALESCE(SUM(CASE WHEN status='observed' THEN 1 ELSE 0 END),0) observed,"
                 "COALESCE(SUM(CASE WHEN status='unsupported' THEN 1 ELSE 0 END),0) unsupported,"
-                "COALESCE(SUM(duplicate_count),0) duplicate_deliveries FROM webhook_shadow_receipts"
+                "COALESCE(SUM(duplicate_count),0) duplicate_deliveries "
+                "FROM webhook_shadow_receipts INDEXED BY idx_webhook_shadow_summary"
             ).fetchone()
             coverage = con.execute(
                 "WITH email_events AS ("
@@ -185,6 +186,7 @@ class WebhookRepository:
                 str(row["enqueue_status"]): int(row["count"])
                 for row in con.execute(
                     "SELECT enqueue_status,COUNT(*) count FROM webhook_shadow_receipts "
+                    "INDEXED BY idx_webhook_shadow_summary "
                     "WHERE enqueue_status IS NOT NULL GROUP BY enqueue_status"
                 )
             }
@@ -206,21 +208,23 @@ class WebhookRepository:
     ) -> list[dict[str, Any]]:
         with self.database.read("webhooks.exceptions") as con:
             rows = con.execute(
-                "WITH email_events AS ("
-                " SELECT event_key,source_key,created_at FROM ingest_receipts"
+                "WITH email_events AS MATERIALIZED ("
+                " SELECT event_key,MIN(source_key) reference,MIN(created_at) created_at"
+                " FROM ingest_receipts"
                 f" WHERE source='email' AND julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_coverage_predicate('event_key')}"
-                "), webhook_events AS ("
-                " SELECT event_key,delivery_id,created_at,repository FROM webhook_shadow_receipts INDEXED BY idx_webhook_shadow_coverage"
+                " GROUP BY event_key"
+                "), webhook_events AS MATERIALIZED ("
+                " SELECT event_key,MIN(delivery_id) reference,MIN(created_at) created_at,"
+                " MIN(repository) repository FROM webhook_shadow_receipts INDEXED BY idx_webhook_shadow_coverage"
                 f" WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_coverage_predicate('event_key')}"
+                " GROUP BY event_key"
                 "), candidates AS ("
-                " SELECT 'imap_only' kind,i.event_key,i.source_key reference,i.created_at,NULL repository "
-                " FROM email_events i WHERE NOT EXISTS ("
-                "  SELECT 1 FROM webhook_events w WHERE w.event_key=i.event_key"
-                " ) UNION ALL "
-                " SELECT 'webhook_only',w.event_key,w.delivery_id,w.created_at,w.repository "
-                " FROM webhook_events w WHERE NOT EXISTS ("
-                "  SELECT 1 FROM email_events i WHERE i.event_key=w.event_key"
-                " ) UNION ALL "
+                " SELECT 'imap_only' kind,i.event_key,i.reference,i.created_at,NULL repository "
+                " FROM email_events i LEFT JOIN webhook_events w USING(event_key)"
+                " WHERE w.event_key IS NULL UNION ALL "
+                " SELECT 'webhook_only',w.event_key,w.reference,w.created_at,w.repository "
+                " FROM webhook_events w LEFT JOIN email_events i USING(event_key)"
+                " WHERE i.event_key IS NULL UNION ALL "
                 " SELECT 'unmatchable',NULL,w.delivery_id,w.created_at,w.repository "
                 " FROM webhook_shadow_receipts w INDEXED BY idx_webhook_shadow_coverage WHERE w.event_key IS NULL"
                 " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
