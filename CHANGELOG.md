@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.78.1 (2026-10-13)
+
+### Bug Fixes
+
+- Recover partial releases
+  ([`a071dc0`](https://github.com/gisce/github-agent-bridge/commit/a071dc0d1dc3cbd97c39b2ae4ec3bb9bfaaaf31e))
+
+
 ## v0.78.0 (2026-10-13)
 
 ### Bug Fixes
