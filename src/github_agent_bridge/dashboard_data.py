@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from .parser import extract_github_context
 from .persistence import Database
 from .session_events import redact_event_detail
 from .session_correlation import job_session_metadata
@@ -1192,6 +1193,453 @@ def created_day(value: str | None, timezone: ZoneInfo = ZoneInfo("UTC")) -> str 
     return created.astimezone(timezone).date().isoformat()
 
 
+def _knowledge_json_object(raw: str | None) -> dict[str, Any]:
+    try:
+        value = json.loads(raw or "{}")
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _knowledge_json_list(raw: str | None) -> list[str]:
+    try:
+        value = json.loads(raw or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if str(item).strip()]
+
+
+def _knowledge_scope_clause(
+    repo: str,
+    *,
+    applicable_rules: bool = False,
+) -> tuple[str, list[str]]:
+    normalized = repo.strip().lower()
+    if not normalized:
+        return "", []
+    repo_scope = f"repo:{normalized}"
+    scopes = [repo_scope]
+    if applicable_rules and "/" in normalized:
+        owner = normalized.split("/", 1)[0]
+        scopes = ["global", f"org:{owner}", repo_scope]
+    clauses = []
+    args: list[str] = []
+    for scope in scopes:
+        clauses.append("(scope=? OR scope LIKE ?)")
+        args.extend([scope, f"{scope}:%"])
+    return " WHERE " + " OR ".join(clauses), args
+
+
+def _knowledge_event_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "occurred_at": str(row["occurred_at"]),
+        "captured_at": str(row["captured_at"]),
+        "source": str(row["source"]),
+        "scope": str(row["scope"]),
+        "actor": str(row["actor"]),
+        "comment": str(row["comment"]),
+        "context": _knowledge_json_object(row["context_json"]),
+        "classification": str(row["classification"]),
+        "confidence": float(row["confidence"]),
+        "memorable": bool(row["memorable"]),
+    }
+
+
+def _knowledge_source_from_context(context: dict[str, Any]) -> dict[str, Any]:
+    github_context = (
+        context.get("github_context")
+        if isinstance(context.get("github_context"), dict)
+        else {}
+    )
+    urls = context.get("github_urls")
+    if not isinstance(urls, list):
+        urls = github_context.get("urls")
+    clean_urls = [
+        str(url)
+        for url in (urls if isinstance(urls, list) else [])
+        if isinstance(url, str) and url.strip()
+    ]
+    return {
+        "trigger_actor": context.get("trigger_actor"),
+        "trigger_actor_avatar_url": context.get("trigger_actor_avatar_url"),
+        "github_urls": clean_urls,
+        "source_url": context.get("source_url")
+        or (clean_urls[0] if clean_urls else None),
+        "github_context": github_context,
+        "source_job_id": context.get("source_job_id"),
+        "source_table": context.get("source_table"),
+    }
+
+
+def _knowledge_source_from_row(row: sqlite3.Row) -> dict[str, Any]:
+    github_context = _knowledge_json_object(row["context_json"])
+    urls = github_context.get("urls")
+    clean_urls = [
+        str(url)
+        for url in (urls if isinstance(urls, list) else [])
+        if isinstance(url, str) and url.strip()
+    ]
+    return {
+        "trigger_actor": row["trigger_actor"],
+        "trigger_actor_avatar_url": row["trigger_actor_avatar_url"],
+        "github_urls": clean_urls,
+        "source_url": clean_urls[0] if clean_urls else None,
+        "github_context": github_context,
+        "source_job_id": row["source_job_id"],
+        "source_table": row["source_table"],
+    }
+
+
+def _knowledge_fallback_source(comment: str) -> dict[str, Any]:
+    context = _knowledge_json_object(extract_github_context(comment).to_json())
+    urls = context.get("urls")
+    clean_urls = [
+        str(url)
+        for url in (urls if isinstance(urls, list) else [])
+        if isinstance(url, str) and url.strip()
+    ]
+    return {
+        "github_urls": clean_urls,
+        "source_url": clean_urls[0] if clean_urls else None,
+        "github_context": context,
+        "source_table": "feedback_comment" if clean_urls else None,
+    }
+
+
+def _knowledge_first(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, "", []):
+            return value
+    return None
+
+
+def _enrich_knowledge_event(
+    event: dict[str, Any],
+    sources_by_message_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    context = event["context"] if isinstance(event.get("context"), dict) else {}
+    stored = _knowledge_source_from_context(context)
+    joined = sources_by_message_id.get(str(context.get("message_id") or ""), {})
+    fallback = _knowledge_fallback_source(str(event.get("comment") or ""))
+    urls = _knowledge_first(
+        stored.get("github_urls"),
+        joined.get("github_urls"),
+        fallback.get("github_urls"),
+    ) or []
+    trigger_actor = _knowledge_first(
+        stored.get("trigger_actor"),
+        joined.get("trigger_actor"),
+        event.get("actor") if event.get("actor") != "github" else None,
+    )
+    enriched = {
+        **event,
+        "trigger_actor": trigger_actor,
+        "trigger_actor_avatar_url": _knowledge_first(
+            stored.get("trigger_actor_avatar_url"),
+            joined.get("trigger_actor_avatar_url"),
+        ),
+        "github_urls": urls,
+        "source_url": _knowledge_first(
+            stored.get("source_url"),
+            joined.get("source_url"),
+            fallback.get("source_url"),
+        ),
+        "github_context": _knowledge_first(
+            stored.get("github_context"),
+            joined.get("github_context"),
+            fallback.get("github_context"),
+        ) or {},
+        "source_job_id": _knowledge_first(
+            stored.get("source_job_id"),
+            joined.get("source_job_id"),
+        ),
+        "source_table": _knowledge_first(
+            stored.get("source_table"),
+            joined.get("source_table"),
+            fallback.get("source_table"),
+        ),
+    }
+    if trigger_actor and enriched.get("actor") == "github":
+        enriched["actor"] = trigger_actor
+    return enriched
+
+
+def _knowledge_summary(
+    con: sqlite3.Connection,
+    repo: str,
+) -> dict[str, int]:
+    event_where, event_args = _knowledge_scope_clause(repo)
+    rule_where, rule_args = _knowledge_scope_clause(
+        repo,
+        applicable_rules=True,
+    )
+    proposal_where, proposal_args = _knowledge_scope_clause(repo)
+    row = con.execute(
+        f"""WITH event_summary AS (
+            SELECT COUNT(*) AS events FROM feedback_events{event_where}
+        ), rule_summary AS (
+            SELECT COUNT(*) AS rules FROM feedback_rules{rule_where}
+        ), proposal_summary AS (
+            SELECT
+                COUNT(*) AS proposals,
+                COALESCE(SUM(status='proposed'), 0) AS proposed,
+                COALESCE(SUM(status='approved'), 0) AS approved,
+                COALESCE(SUM(status='rejected'), 0) AS rejected,
+                COALESCE(SUM(status='error'), 0) AS errors
+            FROM feedback_rule_proposals{proposal_where}
+        )
+        SELECT * FROM event_summary, rule_summary, proposal_summary""",
+        [*event_args, *rule_args, *proposal_args],
+    ).fetchone()
+    return {key: int(row[key]) for key in row.keys()}
+
+
+def _knowledge_repositories(con: sqlite3.Connection) -> list[str]:
+    rows = con.execute(
+        """SELECT scope FROM feedback_events
+        UNION SELECT scope FROM feedback_rules
+        UNION SELECT scope FROM feedback_rule_proposals"""
+    ).fetchall()
+    return sorted(
+        {
+            str(row["scope"]).removeprefix("repo:")
+            for row in rows
+            if str(row["scope"]).startswith("repo:")
+            and str(row["scope"]).removeprefix("repo:")
+        }
+    )
+
+
+def _knowledge_section_rows(
+    con: sqlite3.Connection,
+    section: str,
+    *,
+    repo: str,
+    proposal_status: str,
+    limit: int,
+    offset: int,
+) -> tuple[list[sqlite3.Row], int | None]:
+    applicable_rules = section == "rules"
+    where, args = _knowledge_scope_clause(
+        repo,
+        applicable_rules=applicable_rules,
+    )
+    clauses = [where.removeprefix(" WHERE ")] if where else []
+    table = {
+        "events": "feedback_events",
+        "proposals": "feedback_rule_proposals",
+        "rules": "feedback_rules",
+    }[section]
+    if section == "proposals" and proposal_status:
+        clauses.append("status=?")
+        args.append(proposal_status)
+    order_by = {
+        "events": "occurred_at DESC, id DESC",
+        "proposals": "created_at DESC, id DESC",
+        "rules": "last_seen DESC, created_at DESC, scope ASC, type ASC, rule ASC",
+    }[section]
+    sql = f"SELECT * FROM {table}"
+    if clauses:
+        sql += " WHERE " + " AND ".join(f"({clause})" for clause in clauses)
+    sql += f" ORDER BY {order_by} LIMIT ? OFFSET ?"
+    rows = con.execute(sql, [*args, limit + 1, offset]).fetchall()
+    next_offset = offset + limit if len(rows) > limit else None
+    return rows[:limit], next_offset
+
+
+def _knowledge_source_rows(
+    con: sqlite3.Connection,
+    message_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    rows = con.execute(
+        """WITH requested(message_id) AS (
+            SELECT value FROM json_each(?)
+        ), candidates AS (
+            SELECT jobs.message_id,
+                   jobs.id AS source_record_id,
+                   jobs.id AS source_job_id,
+                   jobs.trigger_actor,
+                   jobs.trigger_actor_avatar_url,
+                   jobs.context_json,
+                   'job' AS source_table,
+                   0 AS source_rank
+            FROM jobs
+            JOIN requested ON requested.message_id=jobs.message_id
+            UNION ALL
+            SELECT coalesced_notifications.message_id,
+                   coalesced_notifications.id AS source_record_id,
+                   coalesced_notifications.job_id AS source_job_id,
+                   coalesced_notifications.trigger_actor,
+                   coalesced_notifications.trigger_actor_avatar_url,
+                   coalesced_notifications.context_json,
+                   'coalesced_notification' AS source_table,
+                   1 AS source_rank
+            FROM coalesced_notifications
+            JOIN requested
+              ON requested.message_id=coalesced_notifications.message_id
+        ), ranked AS (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY message_id
+                ORDER BY source_rank ASC, source_record_id DESC
+            ) AS source_position
+            FROM candidates
+        )
+        SELECT * FROM ranked WHERE source_position=1""",
+        (json.dumps(message_ids),),
+    ).fetchall()
+    return {
+        str(row["message_id"]): _knowledge_source_from_row(row)
+        for row in rows
+    }
+
+
+def _knowledge_rule_dict(
+    row: sqlite3.Row,
+    events_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    source_events = _knowledge_json_list(row["source_events_json"])
+    return {
+        "id": str(row["id"]),
+        "scope": str(row["scope"]),
+        "type": str(row["type"]),
+        "confidence": float(row["confidence"]),
+        "rule": str(row["rule"]),
+        "created_at": str(row["created_at"]),
+        "last_seen": str(row["last_seen"]),
+        "source_events": source_events,
+        "source_event_details": [
+            events_by_id[event_id]
+            for event_id in source_events
+            if event_id in events_by_id
+        ],
+        "observations": int(row["observations"]),
+    }
+
+
+def _knowledge_events_by_id(
+    con: sqlite3.Connection,
+    event_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    event_rows = con.execute(
+        "SELECT * FROM feedback_events "
+        "WHERE id IN (SELECT value FROM json_each(?))",
+        (json.dumps(event_ids),),
+    ).fetchall()
+    events = [_knowledge_event_from_row(row) for row in event_rows]
+    message_ids = list(
+        dict.fromkeys(
+            str(event["context"].get("message_id") or "")
+            for event in events
+            if event["context"].get("message_id")
+        )
+    )
+    sources = _knowledge_source_rows(con, message_ids)
+    return {
+        str(event["id"]): _enrich_knowledge_event(event, sources)
+        for event in events
+    }
+
+
+def knowledge_rule(
+    db: str | Path,
+    rule_id: str,
+) -> dict[str, Any] | None:
+    with readonly_connect(db, operation="dashboard.knowledge_rule") as con:
+        row = con.execute(
+            "SELECT * FROM feedback_rules WHERE id=?",
+            (rule_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        source_events = _knowledge_json_list(row["source_events_json"])
+        events_by_id = _knowledge_events_by_id(con, source_events)
+    return _knowledge_rule_dict(row, events_by_id)
+
+
+def knowledge_page(
+    db: str | Path,
+    *,
+    section: str | None = None,
+    repo: str = "",
+    proposal_status: str = "",
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, Any]:
+    selected_sections = [section] if section else ["proposals", "rules", "events"]
+    if any(item not in {"proposals", "rules", "events"} for item in selected_sections):
+        raise ValueError("unsupported knowledge section")
+    bounded_limit = coerce_limit(limit, 100)
+    bounded_offset = max(0, offset)
+    page_rows: dict[str, list[sqlite3.Row]] = {
+        "proposals": [],
+        "rules": [],
+        "events": [],
+    }
+    next_offset: int | None = None
+    with readonly_connect(db, operation="dashboard.knowledge") as con:
+        summary = _knowledge_summary(con, repo)
+        repositories = _knowledge_repositories(con)
+        for selected in selected_sections:
+            rows, selected_next_offset = _knowledge_section_rows(
+                con,
+                selected,
+                repo=repo,
+                proposal_status=proposal_status,
+                limit=bounded_limit,
+                offset=bounded_offset,
+            )
+            page_rows[selected] = rows
+            if section == selected:
+                next_offset = selected_next_offset
+
+        event_ids: list[str] = []
+        event_ids.extend(str(row["id"]) for row in page_rows["events"])
+        event_ids.extend(str(row["event_id"]) for row in page_rows["proposals"])
+        for row in page_rows["rules"]:
+            event_ids.extend(_knowledge_json_list(row["source_events_json"]))
+        event_ids = list(dict.fromkeys(event_ids))
+        events_by_id = _knowledge_events_by_id(con, event_ids)
+    proposals = [
+        {
+            "id": str(row["id"]),
+            "event_id": str(row["event_id"]),
+            "created_at": str(row["created_at"]),
+            "updated_at": str(row["updated_at"]),
+            "status": str(row["status"]),
+            "scope": str(row["scope"]),
+            "type": str(row["type"]),
+            "confidence": float(row["confidence"]),
+            "rule": str(row["rule"]),
+            "reason": str(row["reason"]),
+            "model": str(row["model"]),
+            "error": row["error"],
+            "source_event": events_by_id.get(str(row["event_id"])),
+        }
+        for row in page_rows["proposals"]
+    ]
+    rules = [
+        _knowledge_rule_dict(row, events_by_id)
+        for row in page_rows["rules"]
+    ]
+    selected_events = [
+        events_by_id[str(row["id"])]
+        for row in page_rows["events"]
+        if str(row["id"]) in events_by_id
+    ]
+    return {
+        "repositories": repositories,
+        "events": selected_events,
+        "proposals": proposals,
+        "rules": rules,
+        "summary": summary,
+        "section": section,
+        "next_offset": next_offset,
+    }
+
+
 def runtime_usage(rows: list[sqlite3.Row], timezone: ZoneInfo) -> dict[str, list[dict[str, Any]]]:
     daily: dict[str, dict[str, int]] = {}
     monthly: dict[str, dict[str, int]] = {}
@@ -1335,6 +1783,27 @@ class DashboardQueries:
             until=selected.until,
             limit=limit,
         )
+
+    def knowledge_page(
+        self,
+        *,
+        section: str | None = None,
+        repo: str = "",
+        proposal_status: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        return knowledge_page(
+            self.path,
+            section=section,
+            repo=repo,
+            proposal_status=proposal_status,
+            limit=limit,
+            offset=offset,
+        )
+
+    def get_knowledge_rule(self, rule_id: str) -> dict[str, Any] | None:
+        return knowledge_rule(self.path, rule_id)
 
     def list_job_actors(self, *, limit: int = 100) -> list[dict[str, Any]]:
         return list_job_actors(self.path, limit=limit)

@@ -1,4 +1,5 @@
 import inspect
+import json
 import sqlite3
 
 from github_agent_bridge import backend, cli, monitor
@@ -77,6 +78,104 @@ def test_dashboard_job_list_executes_one_read_query(tmp_path, monkeypatch):
     assert len(read_queries) == 1
     assert "sqlite_master" not in read_queries[0]
     assert "PRAGMA table_info" not in read_queries[0]
+
+
+def test_knowledge_page_batches_enrichment_in_one_read_connection(
+    tmp_path,
+    monkeypatch,
+):
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    job, _ = queue.enqueue(
+        _notification(),
+        Policy(trusted_orgs={"gisce"}, bot_logins={"giscebot"}),
+    )
+    with sqlite3.connect(db) as con:
+        for index in range(20):
+            event_id = f"event-{index:02d}"
+            con.execute(
+                """INSERT INTO feedback_events(
+                    id, occurred_at, captured_at, source, scope, actor,
+                    comment, context_json, classification, confidence, memorable
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    event_id,
+                    f"2026-10-13T10:{index:02d}:00Z",
+                    f"2026-10-13T10:{index:02d}:01Z",
+                    "github-agent-bridge",
+                    "repo:gisce/github-agent-bridge",
+                    "github",
+                    "Use the dashboard read model.",
+                    json.dumps({"message_id": _notification().message_id}),
+                    "operating_rule",
+                    0.9,
+                    1,
+                ),
+            )
+            con.execute(
+                """INSERT INTO feedback_rules(
+                    id, scope, type, confidence, rule, created_at, last_seen,
+                    source_events_json, observations
+                ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    f"rule-{index:02d}",
+                    "repo:gisce/github-agent-bridge",
+                    "operating_rule",
+                    0.9,
+                    f"Rule {index:02d}",
+                    f"2026-10-13T10:{index:02d}:00Z",
+                    f"2026-10-13T10:{index:02d}:01Z",
+                    json.dumps([event_id]),
+                    1,
+                ),
+            )
+
+    statements: list[str] = []
+    connections = 0
+    original_read_only = Database.read_only
+
+    def traced_read_only(database):
+        nonlocal connections
+        connections += 1
+        connection = original_read_only(database)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    monkeypatch.setattr(Database, "read_only", traced_read_only)
+
+    page = DashboardQueries(db).knowledge_page(
+        section="rules",
+        repo="gisce/github-agent-bridge",
+        limit=5,
+        offset=0,
+    )
+
+    read_queries = [
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith(("SELECT", "WITH"))
+    ]
+    assert connections == 1
+    assert len(read_queries) == 5
+    assert len(page["rules"]) == 5
+    assert page["events"] == []
+    assert page["proposals"] == []
+    assert page["next_offset"] == 5
+    assert page["summary"]["rules"] == 20
+    assert page["rules"][0]["source_event_details"][0]["source_job_id"] == job.id
+    assert page["rules"][0]["source_event_details"][0]["source_url"].endswith(
+        "/issues/260#issuecomment-1"
+    )
+    with sqlite3.connect(db) as con:
+        query_plan = "\n".join(
+            row[3]
+            for statement in read_queries
+            for row in con.execute(f"EXPLAIN QUERY PLAN {statement}")
+        )
+    assert "CORRELATED" not in query_plan
+    assert "sqlite_autoindex_feedback_events_1" in query_plan
+    assert "sqlite_autoindex_jobs_1" in query_plan
+    assert "sqlite_autoindex_coalesced_notifications_1" in query_plan
 
 
 def test_dashboard_detail_and_metrics_pin_query_counts_and_plans(
