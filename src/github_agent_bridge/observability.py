@@ -80,13 +80,25 @@ def record_monitor_observation(
     alerts: list[str],
     *,
     process_sample_retention_seconds: int = DEFAULT_PROCESS_SAMPLE_RETENTION_SECONDS,
+    monitor_slo_state: dict[str, Any] | None = None,
 ) -> None:
     path = Path(db).expanduser()
     if not path.exists():
         return
     ObservabilityRepository(Database(path)).record_monitor_observation(
-        utc_now(), metrics, alerts, process_sample_retention_seconds
+        utc_now(),
+        metrics,
+        alerts,
+        process_sample_retention_seconds,
+        monitor_slo_state=monitor_slo_state,
     )
+
+
+def get_monitor_slo_state(db: str | Path) -> dict[str, Any]:
+    path = Path(db).expanduser()
+    if not path.exists():
+        return {}
+    return ObservabilityRepository(Database(path)).monitor_slo_state()
 
 
 def recent_process_samples(db: str | Path, *, limit: int = 60) -> list[dict[str, Any]]:

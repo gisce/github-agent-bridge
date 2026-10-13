@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -12,7 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from .dashboard_data import DashboardQueries
-from .observability import DEFAULT_PROCESS_SAMPLE_RETENTION_SECONDS, recent_process_samples, record_monitor_observation
+from .observability import (
+    DEFAULT_PROCESS_SAMPLE_RETENTION_SECONDS,
+    get_monitor_slo_state,
+    recent_process_samples,
+    record_monitor_observation,
+)
 from .process_inspection import direct_children, process_identity_matches
 
 
@@ -31,6 +37,21 @@ ALERT_RUNNING_JOB_STALLED = "monitor.running_job_stalled"
 ALERT_WORKER_HEARTBEAT_MISSING = "monitor.worker_heartbeat_missing"
 ALERT_WORKER_HEARTBEAT_STALE = "monitor.worker_heartbeat_stale"
 ALERT_QUARANTINED_NOTIFICATIONS = "monitor.quarantined_notifications"
+ALERT_SLO_QUEUED_TO_CLAIMED_P90 = "monitor.slo.queued_to_claimed_p90"
+ALERT_SLO_CLAIMED_TO_FIRST_OUTPUT_P90 = "monitor.slo.claimed_to_first_output_p90"
+ALERT_SLO_CLAIMED_TO_DONE_P90 = "monitor.slo.claimed_to_done_p90"
+ALERT_SLO_BLOCKED_RATE = "monitor.slo.blocked_rate"
+ALERT_SLO_RETRY_RATE = "monitor.slo.retry_rate"
+
+
+SLO_WINDOWS = {"24h", "7d", "30d"}
+SLO_THRESHOLD_FIELDS = (
+    "slo_queued_to_claimed_p90_seconds",
+    "slo_claimed_to_first_output_p90_seconds",
+    "slo_claimed_to_done_p90_seconds",
+    "slo_blocked_rate_percent",
+    "slo_retry_rate_percent",
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +62,54 @@ class MonitorThresholds:
     progress_warn_seconds: int = 600
     reader_recent_seconds: int = 180
     worker_heartbeat_warn_seconds: int = 20
+    slo_window: str = "7d"
+    slo_min_samples: int = 20
+    slo_breach_observations: int = 3
+    slo_recovery_observations: int = 2
+    slo_recovery_ratio: float = 0.9
+    slo_queued_to_claimed_p90_seconds: float | None = None
+    slo_claimed_to_first_output_p90_seconds: float | None = None
+    slo_claimed_to_done_p90_seconds: float | None = None
+    slo_blocked_rate_percent: float | None = None
+    slo_retry_rate_percent: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.slo_window not in SLO_WINDOWS:
+            raise ValueError(f"unsupported SLO window {self.slo_window!r}")
+        if self.slo_min_samples < 1:
+            raise ValueError("slo_min_samples must be at least 1")
+        if self.slo_breach_observations < 1:
+            raise ValueError("slo_breach_observations must be at least 1")
+        if self.slo_recovery_observations < 1:
+            raise ValueError("slo_recovery_observations must be at least 1")
+        if not 0 < self.slo_recovery_ratio <= 1:
+            raise ValueError("slo_recovery_ratio must be greater than 0 and at most 1")
+        for field_name in SLO_THRESHOLD_FIELDS:
+            value = getattr(self, field_name)
+            if value is not None and value < 0:
+                raise ValueError(f"{field_name} must be non-negative")
+        for field_name in ("slo_blocked_rate_percent", "slo_retry_rate_percent"):
+            value = getattr(self, field_name)
+            if value is not None and value > 100:
+                raise ValueError(f"{field_name} must be at most 100")
+
+    @property
+    def slo_enabled(self) -> bool:
+        return any(getattr(self, field_name) is not None for field_name in SLO_THRESHOLD_FIELDS)
+
+    def slo_config(self) -> dict[str, Any]:
+        return {
+            "window": self.slo_window,
+            "min_samples": self.slo_min_samples,
+            "breach_observations": self.slo_breach_observations,
+            "recovery_observations": self.slo_recovery_observations,
+            "recovery_ratio": self.slo_recovery_ratio,
+            "thresholds": {
+                field_name: getattr(self, field_name)
+                for field_name in SLO_THRESHOLD_FIELDS
+                if getattr(self, field_name) is not None
+            },
+        }
 
 
 @dataclass
@@ -211,10 +280,23 @@ def _release_summary(release: dict[str, str]) -> str:
     return release.get("name") or release.get("tag_name") or ""
 
 
-def _add_alert(metrics: dict[str, Any], alerts: list[str], code: str, message: str) -> None:
+def _add_alert(
+    metrics: dict[str, Any],
+    alerts: list[str],
+    code: str,
+    message: str,
+    *,
+    fingerprint: str | None = None,
+    context: dict[str, Any] | None = None,
+) -> None:
     alerts.append(message)
     metrics.setdefault("alert_codes", []).append(code)
-    metrics.setdefault("alert_details", []).append({"code": code, "message": message})
+    detail: dict[str, Any] = {"code": code, "message": message}
+    if fingerprint:
+        detail["fingerprint"] = fingerprint
+    if context:
+        detail["context"] = context
+    metrics.setdefault("alert_details", []).append(detail)
 
 
 def monitor(
@@ -389,15 +471,314 @@ def monitor(
                 f"running job {job.get('id')} {job.get('work_key')} age {age}s > {limit}s without recent progress",
             )
 
-    if persist_observability:
+    slo_state_update: dict[str, Any] | None = None
+    metrics["slo_monitor"] = {
+        "enabled": thresholds.slo_enabled,
+        "window": thresholds.slo_window,
+        "evaluations": [],
+    }
+    if thresholds.slo_enabled and metrics.get("db_exists") and metrics.get("schema_ok", True):
+        slo_monitor, slo_alerts, slo_state_update = _evaluate_slo_thresholds(
+            db,
+            thresholds,
+            persist_state=persist_observability,
+        )
+        metrics["slo_monitor"] = slo_monitor
+        for alert in slo_alerts:
+            _add_alert(
+                metrics,
+                alerts,
+                alert["code"],
+                alert["message"],
+                fingerprint=alert["fingerprint"],
+                context=alert["context"],
+            )
+    elif thresholds.slo_enabled:
+        metrics["slo_monitor"].update({
+            "schema_ok": False,
+            "schema_error": metrics.get("schema_error") or "database schema is unavailable",
+        })
+    elif persist_observability:
+        slo_state_update = {
+            "version": 1,
+            "config": thresholds.slo_config(),
+            "metrics": {},
+        }
+
+    if persist_observability and metrics.get("db_exists") and metrics.get("schema_ok", True):
         record_monitor_observation(
             db,
             metrics,
             alerts,
             process_sample_retention_seconds=process_sample_retention_seconds,
+            monitor_slo_state=slo_state_update,
         )
 
     return MonitorReport(ok=not alerts, alerts=alerts, metrics=metrics)
+
+
+def _evaluate_slo_thresholds(
+    db: str | Path,
+    thresholds: MonitorThresholds,
+    *,
+    persist_state: bool,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any] | None]:
+    previous_state = get_monitor_slo_state(db) if persist_state else {}
+    config = thresholds.slo_config()
+    if previous_state.get("version") != 1 or previous_state.get("config") != config:
+        previous_state = {"version": 1, "config": config, "metrics": {}}
+
+    summary = DashboardQueries(db).metrics_summary(window=thresholds.slo_window)
+    if summary.get("schema_ok") is False:
+        error = str(summary.get("schema_error") or "SLO schema is unavailable")
+        alerts = _preserved_slo_alerts(previous_state, error)
+        return (
+            {
+                "enabled": True,
+                "window": thresholds.slo_window,
+                "schema_ok": False,
+                "schema_error": error,
+                "evaluations": [],
+                "alerts_active": len(alerts),
+            },
+            alerts,
+            None,
+        )
+
+    slo = summary.get("slo") if isinstance(summary.get("slo"), dict) else {}
+    previous_metrics = previous_state.get("metrics")
+    if not isinstance(previous_metrics, dict):
+        previous_metrics = {}
+    state: dict[str, Any] = {"version": 1, "config": config, "metrics": {}}
+    evaluations: list[dict[str, Any]] = []
+    alerts: list[dict[str, Any]] = []
+
+    for spec in _slo_specs(thresholds):
+        metric = spec["metric"]
+        aggregate = _slo_aggregate(slo, spec["group"], spec["aggregate"])
+        raw_value = aggregate.get(spec["value"])
+        try:
+            observed = float(raw_value) if raw_value is not None else None
+        except (TypeError, ValueError):
+            observed = None
+        try:
+            sample_count = int(aggregate.get("sample_count") or 0)
+        except (TypeError, ValueError):
+            sample_count = 0
+
+        old = previous_metrics.get(metric)
+        if not isinstance(old, dict):
+            old = {}
+        active = bool(old.get("active"))
+        breach_count = int(old.get("breach_observations") or 0)
+        recovery_count = int(old.get("recovery_observations") or 0)
+        threshold = float(spec["threshold"])
+        recovery_threshold = threshold * thresholds.slo_recovery_ratio
+
+        if observed is None or sample_count < thresholds.slo_min_samples:
+            breach_count = breach_count if active else 0
+            recovery_count = 0
+            status = "insufficient_samples"
+        elif active:
+            if observed > threshold:
+                recovery_count = 0
+                status = "alerting"
+            elif observed <= recovery_threshold:
+                recovery_count += 1
+                if recovery_count >= thresholds.slo_recovery_observations:
+                    active = False
+                    breach_count = 0
+                    recovery_count = 0
+                    status = "recovered"
+                else:
+                    status = "recovering"
+            else:
+                recovery_count = 0
+                status = "hysteresis"
+        elif observed > threshold:
+            breach_count += 1
+            recovery_count = 0
+            if breach_count >= thresholds.slo_breach_observations:
+                active = True
+                status = "alerting"
+            else:
+                status = "breach_pending"
+        else:
+            breach_count = 0
+            recovery_count = 0
+            status = "healthy"
+
+        fingerprint = _slo_fingerprint(spec["code"], metric, thresholds.slo_window)
+        record = {
+            "code": spec["code"],
+            "metric": metric,
+            "unit": spec["unit"],
+            "threshold": threshold,
+            "recovery_threshold": recovery_threshold,
+            "observed": observed,
+            "sample_count": sample_count,
+            "active": active,
+            "status": status,
+            "breach_observations": breach_count,
+            "recovery_observations": recovery_count,
+            "fingerprint": fingerprint,
+        }
+        state["metrics"][metric] = record
+        evaluations.append(record)
+        if active:
+            alert = _slo_alert(record, thresholds)
+            alerts.append(alert)
+            record["message"] = alert["message"]
+            record["context"] = alert["context"]
+
+    return (
+        {
+            "enabled": True,
+            "window": thresholds.slo_window,
+            "schema_ok": True,
+            "min_samples": thresholds.slo_min_samples,
+            "evaluations": evaluations,
+            "alerts_active": len(alerts),
+        },
+        alerts,
+        state if persist_state else None,
+    )
+
+
+def _slo_specs(thresholds: MonitorThresholds) -> list[dict[str, Any]]:
+    candidates = (
+        (
+            "queued_to_claimed.p90",
+            ALERT_SLO_QUEUED_TO_CLAIMED_P90,
+            "latencies",
+            "queued_to_claimed",
+            "p90",
+            "seconds",
+            thresholds.slo_queued_to_claimed_p90_seconds,
+        ),
+        (
+            "claimed_to_first_output.p90",
+            ALERT_SLO_CLAIMED_TO_FIRST_OUTPUT_P90,
+            "latencies",
+            "claimed_to_first_output",
+            "p90",
+            "seconds",
+            thresholds.slo_claimed_to_first_output_p90_seconds,
+        ),
+        (
+            "claimed_to_done.p90",
+            ALERT_SLO_CLAIMED_TO_DONE_P90,
+            "latencies",
+            "claimed_to_done",
+            "p90",
+            "seconds",
+            thresholds.slo_claimed_to_done_p90_seconds,
+        ),
+        (
+            "blocked.percent",
+            ALERT_SLO_BLOCKED_RATE,
+            "rates",
+            "blocked",
+            "percent",
+            "percent",
+            thresholds.slo_blocked_rate_percent,
+        ),
+        (
+            "retry.percent",
+            ALERT_SLO_RETRY_RATE,
+            "rates",
+            "retry",
+            "percent",
+            "percent",
+            thresholds.slo_retry_rate_percent,
+        ),
+    )
+    return [
+        {
+            "metric": metric,
+            "code": code,
+            "group": group,
+            "aggregate": aggregate,
+            "value": value,
+            "unit": unit,
+            "threshold": threshold,
+        }
+        for metric, code, group, aggregate, value, unit, threshold in candidates
+        if threshold is not None
+    ]
+
+
+def _slo_aggregate(slo: dict[str, Any], group: str, aggregate: str) -> dict[str, Any]:
+    aggregates = slo.get(group)
+    if not isinstance(aggregates, dict):
+        return {}
+    value = aggregates.get(aggregate)
+    return value if isinstance(value, dict) else {}
+
+
+def _slo_fingerprint(code: str, metric: str, window: str) -> str:
+    return hashlib.sha256(
+        f"monitor\0{code}\0{metric}\0{window}".encode("utf-8")
+    ).hexdigest()
+
+
+def _slo_alert(record: dict[str, Any], thresholds: MonitorThresholds) -> dict[str, Any]:
+    suffix = "s" if record["unit"] == "seconds" else "%"
+    observed = _format_measurement(record["observed"], suffix)
+    limit = _format_measurement(record["threshold"], suffix)
+    message = (
+        f"SLO {record['metric']} observed {observed} with limit {limit} "
+        f"over {thresholds.slo_window} ({record['sample_count']} samples; {record['status']})"
+    )
+    context = {
+        "metric": record["metric"],
+        "window": thresholds.slo_window,
+        "observed": record["observed"],
+        "threshold": record["threshold"],
+        "recovery_threshold": record["recovery_threshold"],
+        "unit": record["unit"],
+        "sample_count": record["sample_count"],
+        "min_samples": thresholds.slo_min_samples,
+        "breach_observations": record["breach_observations"],
+        "required_breach_observations": thresholds.slo_breach_observations,
+        "recovery_observations": record["recovery_observations"],
+        "required_recovery_observations": thresholds.slo_recovery_observations,
+        "status": record["status"],
+    }
+    return {
+        "code": record["code"],
+        "message": message,
+        "fingerprint": record["fingerprint"],
+        "context": context,
+    }
+
+
+def _preserved_slo_alerts(state: dict[str, Any], error: str) -> list[dict[str, Any]]:
+    records = state.get("metrics")
+    if not isinstance(records, dict):
+        return []
+    alerts: list[dict[str, Any]] = []
+    for record in records.values():
+        if not isinstance(record, dict) or not record.get("active"):
+            continue
+        context = dict(record.get("context") or {})
+        context["evaluation_error"] = error
+        alerts.append({
+            "code": str(record.get("code") or "monitor.slo"),
+            "message": str(record.get("message") or f"SLO evaluation unavailable: {error}"),
+            "fingerprint": str(record.get("fingerprint") or ""),
+            "context": context,
+        })
+    return alerts
+
+
+def _format_threshold(value: Any) -> str:
+    numeric = float(value)
+    return str(int(numeric)) if numeric.is_integer() else str(round(numeric, 2))
+
+
+def _format_measurement(value: Any, suffix: str) -> str:
+    return "n/a" if value is None else f"{_format_threshold(value)}{suffix}"
 
 
 def _runtime_process_problem(

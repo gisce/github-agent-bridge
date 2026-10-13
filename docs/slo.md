@@ -87,6 +87,26 @@ between the `24h`, `7d`, and `30d` windows without issuing separate metric
 queries. When `schema_ok=false`, the dashboard replaces the charts with the
 migration error instead of presenting empty values as healthy service data.
 
+## Monitor alerts
+
+The monitor can evaluate p90 queued-to-claimed, claimed-to-first-output, and
+claimed-to-done latency plus blocked and retry percentages. Thresholds are
+operator-defined and disabled by default; the bridge does not ship a universal
+latency or reliability budget.
+
+Each enabled metric requires a configurable minimum sample count and a
+configurable number of consecutive breaches before it alerts. Recovery also
+requires consecutive observations below a configurable hysteresis boundary.
+The monitor stores this streak state in the existing `state` table together
+with the configured window and thresholds, so changing the configuration
+starts a fresh observation sequence.
+
+An alert fingerprint is derived only from its stable code, metric, and window.
+The current value, threshold, sample count, and breach/recovery observations
+belong in alert context, not in the fingerprint. If migration validation fails,
+the SLO query returns its degraded schema result and no new SLO conclusion is
+drawn; an already active SLO incident remains active until evaluation resumes.
+
 ## Structured terminal outcomes
 
 `jobs.terminal_outcome` is the metric input. Consumers must not search job
