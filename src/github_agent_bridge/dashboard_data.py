@@ -30,6 +30,62 @@ JOB_LIST_ORDER_SQL = """
     id DESC
 """
 EXECUTOR_PAUSE_STATE_KEY = "executor_paused"
+SLO_WINDOWS = {
+    "24h": timedelta(hours=24),
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
+}
+SERVICE_TERMINAL_OUTCOMES = ("completed", "no_op", "blocked")
+SLO_METRICS_SQL = """
+WITH service_candidates AS (
+    SELECT id, source_received_at, created_at, finished_at, terminal_outcome
+    FROM jobs
+    WHERE decision='auto_trusted'
+      AND finished_at>=?
+      AND finished_at<=?
+),
+run_stats AS (
+    SELECT job_runs.job_id,
+           MIN(job_runs.started_at) AS first_claimed_at,
+           COUNT(*) AS run_count,
+           SUM(CASE WHEN job_runs.result='requeued' THEN 1 ELSE 0 END) AS requeued_runs
+    FROM job_runs
+    JOIN service_candidates ON service_candidates.id=job_runs.job_id
+    GROUP BY job_runs.job_id
+),
+progress_stats AS (
+    SELECT job_progress.job_id, MIN(job_progress.ts) AS first_visible_at
+    FROM job_progress
+    JOIN service_candidates ON service_candidates.id=job_progress.job_id
+    WHERE job_progress.kind='visible'
+    GROUP BY job_progress.job_id
+)
+SELECT 'service' AS record_type,
+       service_candidates.id AS item_id,
+       service_candidates.source_received_at,
+       service_candidates.created_at,
+       service_candidates.finished_at,
+       service_candidates.terminal_outcome,
+       run_stats.first_claimed_at,
+       progress_stats.first_visible_at,
+       COALESCE(run_stats.run_count, 0) AS run_count,
+       COALESCE(run_stats.requeued_runs, 0) AS requeued_runs,
+       NULL AS event_at
+FROM service_candidates
+LEFT JOIN run_stats ON run_stats.job_id=service_candidates.id
+LEFT JOIN progress_stats ON progress_stats.job_id=service_candidates.id
+UNION ALL
+SELECT 'new_job', jobs.id, NULL, NULL, NULL, NULL, NULL, NULL, 0, 0,
+       jobs.created_at
+FROM jobs
+WHERE jobs.created_at>=? AND jobs.created_at<=?
+UNION ALL
+SELECT 'coalesced', coalesced_notifications.id, NULL, NULL, NULL, NULL,
+       NULL, NULL, 0, 0, coalesced_notifications.created_at
+FROM coalesced_notifications
+WHERE coalesced_notifications.created_at>=?
+  AND coalesced_notifications.created_at<=?
+"""
 
 
 def readonly_connect(
@@ -778,19 +834,54 @@ def _bounded_transcript_text(text: str) -> str:
     return text
 
 
-def metrics_summary(db: str | Path, *, timezone_name: str = "UTC") -> dict[str, Any]:
+def metrics_summary(
+    db: str | Path,
+    *,
+    timezone_name: str = "UTC",
+    window: str = "7d",
+    now: datetime | None = None,
+) -> dict[str, Any]:
     path = Path(db).expanduser()
-    if not path.exists():
-        return {"db_exists": False, "status_counts": {}, "runtime_seconds": {}}
     timezone = dashboard_timezone(timezone_name)
+    window_start, window_end = slo_window_bounds(window, now=now)
+    if not path.exists():
+        return empty_metrics_summary(
+            db_exists=False,
+            window=window,
+            window_start=window_start,
+            window_end=window_end,
+            timezone=timezone,
+        )
     with readonly_connect(path, operation="dashboard.metrics_summary") as con:
-        rows = con.execute("SELECT status, repo, action, work_intent, created_at, started_at, finished_at FROM jobs").fetchall()
-        run_rows = con.execute(
-            """SELECT job_runs.started_at, job_runs.finished_at, jobs.work_intent
-            FROM job_runs
-            JOIN jobs ON jobs.id=job_runs.job_id
-            WHERE job_runs.finished_at IS NOT NULL"""
-        ).fetchall()
+        try:
+            validate_migrations(con)
+            rows = con.execute("SELECT status, repo, action, work_intent, created_at, started_at, finished_at FROM jobs").fetchall()
+            run_rows = con.execute(
+                """SELECT job_runs.started_at, job_runs.finished_at, jobs.work_intent
+                FROM job_runs
+                JOIN jobs ON jobs.id=job_runs.job_id
+                WHERE job_runs.finished_at IS NOT NULL"""
+            ).fetchall()
+            slo_rows = con.execute(
+                SLO_METRICS_SQL,
+                (
+                    format_utc(window_start),
+                    format_utc(window_end),
+                    format_utc(window_start),
+                    format_utc(window_end),
+                    format_utc(window_start),
+                    format_utc(window_end),
+                ),
+            ).fetchall()
+        except (MigrationError, sqlite3.OperationalError) as exc:
+            return empty_metrics_summary(
+                db_exists=True,
+                window=window,
+                window_start=window_start,
+                window_end=window_end,
+                timezone=timezone,
+                schema_error=str(exc),
+            )
     status_counts = Counter(row["status"] for row in rows)
     by_repo = Counter(row["repo"] or "unknown" for row in rows)
     by_action = Counter(row["action"] for row in rows)
@@ -813,6 +904,275 @@ def metrics_summary(db: str | Path, *, timezone_name: str = "UTC") -> dict[str, 
         "runtime_usage": runtime_usage(run_rows, timezone),
         "runtime_seconds": percentiles(runtimes),
         "queue_wait_seconds": percentiles(waits),
+        "slo": slo_summary(
+            slo_rows,
+            window=window,
+            window_start=window_start,
+            window_end=window_end,
+            timezone=timezone,
+        ),
+    }
+
+
+def empty_metrics_summary(
+    *,
+    db_exists: bool,
+    window: str,
+    window_start: datetime,
+    window_end: datetime,
+    timezone: ZoneInfo,
+    schema_error: str | None = None,
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {
+        "db_exists": db_exists,
+        "status_counts": {},
+        "by_repo": {},
+        "by_action": {},
+        "by_intent": {},
+        "by_created_day": {},
+        "runtime_usage": {"day": [], "month": []},
+        "runtime_seconds": percentiles([]),
+        "queue_wait_seconds": percentiles([]),
+        "slo": slo_summary(
+            [],
+            window=window,
+            window_start=window_start,
+            window_end=window_end,
+            timezone=timezone,
+        ),
+    }
+    if schema_error is not None:
+        summary.update({"schema_ok": False, "schema_error": schema_error})
+    return summary
+
+
+def slo_window_bounds(
+    window: str,
+    *,
+    now: datetime | None = None,
+) -> tuple[datetime, datetime]:
+    duration = SLO_WINDOWS.get(window)
+    if duration is None:
+        raise ValueError(
+            f"unsupported SLO window {window!r}; expected one of {', '.join(SLO_WINDOWS)}"
+        )
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    current = current.astimezone(UTC).replace(microsecond=0)
+    return current - duration, current
+
+
+def format_utc(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def slo_summary(
+    rows: list[sqlite3.Row],
+    *,
+    window: str,
+    window_start: datetime,
+    window_end: datetime,
+    timezone: ZoneInfo,
+) -> dict[str, Any]:
+    service_candidates = [row for row in rows if row["record_type"] == "service"]
+    service_rows = [
+        row
+        for row in service_candidates
+        if row["terminal_outcome"] in SERVICE_TERMINAL_OUTCOMES
+    ]
+    cohort_missing = sum(
+        row["terminal_outcome"] is None for row in service_candidates
+    )
+    cohort_excluded = len(service_candidates) - len(service_rows) - cohort_missing
+
+    latency_clocks = {
+        "source_received_to_queued": ("source_received_at", "created_at"),
+        "queued_to_claimed": ("created_at", "first_claimed_at"),
+        "claimed_to_first_output": ("first_claimed_at", "first_visible_at"),
+        "claimed_to_done": ("first_claimed_at", "finished_at"),
+    }
+    latencies: dict[str, dict[str, int | str | None]] = {}
+    for name, (start_key, end_key) in latency_clocks.items():
+        values = [
+            value
+            for value in (
+                slo_duration_seconds(row[start_key], row[end_key])
+                for row in service_rows
+            )
+            if value is not None
+        ]
+        latencies[name] = slo_latency_summary(values, len(service_rows))
+
+    blocked = sum(row["terminal_outcome"] == "blocked" for row in service_rows)
+    no_op = sum(row["terminal_outcome"] == "no_op" for row in service_rows)
+    claimed = sum(int(row["run_count"]) > 0 for row in service_rows)
+    retried = sum(int(row["run_count"]) > 1 for row in service_rows)
+    requeued_runs = sum(int(row["requeued_runs"]) for row in service_rows)
+    new_jobs = sum(row["record_type"] == "new_job" for row in rows)
+    coalesced = sum(row["record_type"] == "coalesced" for row in rows)
+
+    trends = slo_daily_trends(
+        rows,
+        window_start=window_start,
+        window_end=window_end,
+        timezone=timezone,
+    )
+    return {
+        "window": {
+            "value": window,
+            "start": format_utc(window_start),
+            "end": format_utc(window_end),
+            "timezone": str(timezone),
+        },
+        "cohort": {
+            "decision": "auto_trusted",
+            "terminal_outcomes": list(SERVICE_TERMINAL_OUTCOMES),
+            "sample_count": len(service_rows),
+            "missing_count": cohort_missing,
+            "excluded_count": cohort_excluded,
+        },
+        "latencies": latencies,
+        "rates": {
+            "blocked": slo_rate(blocked, len(service_rows)),
+            "no_op": slo_rate(no_op, len(service_rows)),
+            "retry": slo_rate(
+                retried,
+                claimed,
+                missing_count=len(service_rows) - claimed,
+                extra={"requeued_runs": requeued_runs},
+            ),
+            "coalescing": slo_rate(coalesced, new_jobs + coalesced),
+        },
+        "trends": {
+            "bucket": "day",
+            "timezone": str(timezone),
+            "daily": trends,
+        },
+    }
+
+
+def slo_duration_seconds(start: str | None, end: str | None) -> int | None:
+    started = parse_utc(start)
+    finished = parse_utc(end)
+    if started is None or finished is None or finished < started:
+        return None
+    return int((finished - started).total_seconds())
+
+
+def slo_latency_summary(
+    values: list[int],
+    cohort_count: int,
+) -> dict[str, int | str | None]:
+    values.sort()
+    return {
+        "unit": "seconds",
+        "p50": nearest_rank(values, 0.50) if values else None,
+        "p90": nearest_rank(values, 0.90) if values else None,
+        "p99": nearest_rank(values, 0.99) if values else None,
+        "sample_count": len(values),
+        "missing_count": cohort_count - len(values),
+    }
+
+
+def slo_rate(
+    numerator: int,
+    denominator: int,
+    *,
+    missing_count: int = 0,
+    extra: dict[str, int] | None = None,
+) -> dict[str, int | float | None]:
+    rate = numerator / denominator if denominator else None
+    return {
+        "rate": round(rate, 4) if rate is not None else None,
+        "percent": round(rate * 100, 2) if rate is not None else None,
+        "numerator": numerator,
+        "denominator": denominator,
+        "sample_count": denominator,
+        "missing_count": missing_count,
+        **(extra or {}),
+    }
+
+
+def slo_daily_trends(
+    rows: list[sqlite3.Row],
+    *,
+    window_start: datetime,
+    window_end: datetime,
+    timezone: ZoneInfo,
+) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, int]] = {}
+    current_day = window_start.astimezone(timezone).date()
+    end_day = window_end.astimezone(timezone).date()
+    while current_day <= end_day:
+        buckets[current_day.isoformat()] = slo_trend_counts()
+        current_day += timedelta(days=1)
+
+    for row in rows:
+        record_type = row["record_type"]
+        timestamp = row["finished_at"] if record_type == "service" else row["event_at"]
+        bucket = created_day(timestamp, timezone)
+        if bucket is None:
+            continue
+        counts = buckets.setdefault(bucket, slo_trend_counts())
+        if record_type == "service":
+            outcome = row["terminal_outcome"]
+            if outcome in SERVICE_TERMINAL_OUTCOMES:
+                counts["cohort"] += 1
+                counts["blocked"] += outcome == "blocked"
+                counts["no_op"] += outcome == "no_op"
+                if int(row["run_count"]) > 0:
+                    counts["claimed"] += 1
+                    counts["retried"] += int(row["run_count"]) > 1
+                counts["requeued_runs"] += int(row["requeued_runs"])
+            elif outcome is None:
+                counts["cohort_missing"] += 1
+            else:
+                counts["cohort_excluded"] += 1
+        elif record_type == "new_job":
+            counts["new_jobs"] += 1
+        elif record_type == "coalesced":
+            counts["coalesced"] += 1
+
+    return [
+        {
+            "bucket": bucket,
+            "cohort": {
+                "sample_count": counts["cohort"],
+                "missing_count": counts["cohort_missing"],
+                "excluded_count": counts["cohort_excluded"],
+            },
+            "rates": {
+                "blocked": slo_rate(counts["blocked"], counts["cohort"]),
+                "no_op": slo_rate(counts["no_op"], counts["cohort"]),
+                "retry": slo_rate(
+                    counts["retried"],
+                    counts["claimed"],
+                    missing_count=counts["cohort"] - counts["claimed"],
+                    extra={"requeued_runs": counts["requeued_runs"]},
+                ),
+                "coalescing": slo_rate(
+                    counts["coalesced"],
+                    counts["new_jobs"] + counts["coalesced"],
+                ),
+            },
+        }
+        for bucket, counts in sorted(buckets.items())
+    ]
+
+
+def slo_trend_counts() -> dict[str, int]:
+    return {
+        "cohort": 0,
+        "cohort_missing": 0,
+        "cohort_excluded": 0,
+        "blocked": 0,
+        "no_op": 0,
+        "claimed": 0,
+        "retried": 0,
+        "requeued_runs": 0,
+        "new_jobs": 0,
+        "coalesced": 0,
     }
 
 
@@ -1020,5 +1380,14 @@ class DashboardQueries:
     ) -> list[dict[str, Any]]:
         return job_session_transcript(self.path, job_id, limit=limit)
 
-    def metrics_summary(self, *, timezone_name: str = "UTC") -> dict[str, Any]:
-        return metrics_summary(self.path, timezone_name=timezone_name)
+    def metrics_summary(
+        self,
+        *,
+        timezone_name: str = "UTC",
+        window: str = "7d",
+    ) -> dict[str, Any]:
+        return metrics_summary(
+            self.path,
+            timezone_name=timezone_name,
+            window=window,
+        )

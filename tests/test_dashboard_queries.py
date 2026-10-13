@@ -115,7 +115,10 @@ def test_dashboard_detail_and_metrics_pin_query_counts_and_plans(
     ]
 
     assert len(detail_queries) == 5
-    assert len(metric_queries) == 2
+    assert len(metric_queries) == 5
+    assert "sqlite_master" in metric_queries[0]
+    assert "schema_migrations" in metric_queries[1]
+    metric_data_queries = metric_queries[2:]
     with sqlite3.connect(db) as con:
         detail_plans = [
             [row[3] for row in con.execute(f"EXPLAIN QUERY PLAN {statement}")]
@@ -123,7 +126,7 @@ def test_dashboard_detail_and_metrics_pin_query_counts_and_plans(
         ]
         metric_plans = [
             [row[3] for row in con.execute(f"EXPLAIN QUERY PLAN {statement}")]
-            for statement in metric_queries
+            for statement in metric_data_queries
         ]
 
     detail_plan = "\n".join(
@@ -140,6 +143,10 @@ def test_dashboard_detail_and_metrics_pin_query_counts_and_plans(
         "SEARCH jobs USING INTEGER PRIMARY KEY" in detail
         for detail in metric_plans[1]
     )
+    slo_plan = "\n".join(metric_plans[2])
+    assert "idx_jobs_finished_at" in slo_plan
+    assert "idx_jobs_created_at" in slo_plan
+    assert "idx_coalesced_notifications_created_at" in slo_plan
 
 
 def test_http_cli_and_monitor_use_dashboard_query_boundary():

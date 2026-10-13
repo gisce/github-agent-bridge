@@ -13,6 +13,7 @@ type StatusCounts = Record<string, number>;
 type MetricsSummary = {
   db_exists: boolean;
   schema_ok?: boolean;
+  schema_error?: string;
   status_counts: StatusCounts;
   by_repo: Record<string, number>;
   by_action: Record<string, number>;
@@ -21,6 +22,71 @@ type MetricsSummary = {
   runtime_usage: RuntimeUsage;
   runtime_seconds: Percentiles;
   queue_wait_seconds: Percentiles;
+  slo?: SloSummary;
+};
+
+type SloWindow = "24h" | "7d" | "30d";
+
+type SloLatency = {
+  unit: "seconds";
+  p50: number | null;
+  p90: number | null;
+  p99: number | null;
+  sample_count: number;
+  missing_count: number;
+};
+
+type SloRate = {
+  rate: number | null;
+  percent: number | null;
+  numerator: number;
+  denominator: number;
+  sample_count: number;
+  missing_count: number;
+  requeued_runs?: number;
+};
+
+type SloRates = {
+  blocked: SloRate;
+  no_op: SloRate;
+  retry: SloRate;
+  coalescing: SloRate;
+};
+
+type SloSummary = {
+  window: {
+    value: SloWindow;
+    start: string;
+    end: string;
+    timezone: string;
+  };
+  cohort: {
+    decision: string;
+    terminal_outcomes: string[];
+    sample_count: number;
+    missing_count: number;
+    excluded_count: number;
+  };
+  latencies: {
+    source_received_to_queued: SloLatency;
+    queued_to_claimed: SloLatency;
+    claimed_to_first_output: SloLatency;
+    claimed_to_done: SloLatency;
+  };
+  rates: SloRates;
+  trends: {
+    bucket: "day";
+    timezone: string;
+    daily: Array<{
+      bucket: string;
+      cohort: {
+        sample_count: number;
+        missing_count: number;
+        excluded_count: number;
+      };
+      rates: SloRates;
+    }>;
+  };
 };
 
 type RuntimeUsage = {
@@ -885,8 +951,9 @@ function webhookMonitoringWindow(now = new Date()) {
   };
 }
 
-function metricsSummaryPath(timezone = dashboardTimeZone) {
-  return `/api/metrics/summary?timezone=${encodeURIComponent(timezone)}`;
+function metricsSummaryPath(timezone = dashboardTimeZone, window: SloWindow = "7d") {
+  const params = new URLSearchParams({ window, timezone });
+  return `/api/metrics/summary?${params.toString()}`;
 }
 
 function safeExternalUrl(value: string) {
@@ -1028,6 +1095,7 @@ function App() {
   const [autoupdateError, setAutoupdateError] = React.useState("");
   const [executorPausePending, setExecutorPausePending] = React.useState(false);
   const [executorPauseError, setExecutorPauseError] = React.useState("");
+  const [sloWindow, setSloWindow] = React.useState<SloWindow>("7d");
   const [pathname, setPathname] = React.useState(() => window.location.pathname);
   const [inAppPush, setInAppPush] = React.useState<InAppPushNotification | null>(null);
   const jobRouteId = selectedJobIdFromPath(pathname);
@@ -1040,7 +1108,7 @@ function App() {
   const selectedWebhookDeliveryId = selectedWebhookDeliveryIdFromPath(pathname);
   const isDashboardRoute = !isJobDetailRoute && !isKnowledgeRoute && !isMcpRoute && !isSystemRoute && !isWebhooksRoute;
   const selectedJobId = jobRouteId;
-  const metrics = useQuery({ queryKey: ["metrics", dashboardTimeZone], queryFn: () => api<{ metrics: MetricsSummary }>(metricsSummaryPath()), enabled: isDashboardRoute || isSystemRoute });
+  const metrics = useQuery({ queryKey: ["metrics", dashboardTimeZone, sloWindow], queryFn: () => api<{ metrics: MetricsSummary }>(metricsSummaryPath(dashboardTimeZone, sloWindow)), enabled: isDashboardRoute || isSystemRoute });
   const dashboardStatus = useQuery({ queryKey: ["dashboard-status"], queryFn: () => api<DashboardStatus>("/api/status"), refetchInterval: isSystemRoute ? 10000 : false });
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<{ user: UserProfile }>("/api/me"), refetchInterval: false });
   const webhookEnabled = isWebhooksRoute && Boolean(me.data?.user?.is_admin && dashboardStatus.data?.webhook_configured);
@@ -1513,10 +1581,16 @@ function App() {
               alerts={alerts.data?.alerts}
               alertsLoading={alerts.isLoading}
               alertsError={alerts.error}
+              sloSummary={metrics.data?.metrics}
+              sloLoading={metrics.isLoading}
+              sloError={metrics.error}
+              sloWindow={sloWindow}
               now={now}
               onRefreshProcesses={() => processes.refetch()}
               onRefreshSystemd={() => systemd.refetch()}
               onRefreshAlerts={() => alerts.refetch()}
+              onSloWindowChange={setSloWindow}
+              onRefreshSlo={() => metrics.refetch()}
             />
           </>
         ) : (
@@ -2045,10 +2119,16 @@ function SystemPage({
   alerts,
   alertsLoading,
   alertsError,
+  sloSummary,
+  sloLoading,
+  sloError,
+  sloWindow,
   now,
   onRefreshProcesses,
   onRefreshSystemd,
   onRefreshAlerts,
+  onSloWindowChange,
+  onRefreshSlo,
 }: {
   executorPause: ExecutorPauseState | undefined;
   executorPauseLoading: boolean;
@@ -2066,10 +2146,16 @@ function SystemPage({
   alerts: AlertRecord[] | undefined;
   alertsLoading: boolean;
   alertsError: Error | null;
+  sloSummary: MetricsSummary | undefined;
+  sloLoading: boolean;
+  sloError: Error | null;
+  sloWindow: SloWindow;
   now: number;
   onRefreshProcesses: () => void;
   onRefreshSystemd: () => void;
   onRefreshAlerts: () => void;
+  onSloWindowChange: (window: SloWindow) => void;
+  onRefreshSlo: () => void;
 }) {
   return (
     <section className="grid gap-4" aria-label="Bridge system">
@@ -2081,6 +2167,14 @@ function SystemPage({
         actionError={executorPauseError}
         isAdmin={isAdmin}
         onChange={onExecutorPauseChange}
+      />
+      {sloError ? <Banner tone="error" text={sloError.message} /> : null}
+      <SloDashboard
+        summary={sloSummary}
+        loading={sloLoading}
+        window={sloWindow}
+        onWindowChange={onSloWindowChange}
+        onRefresh={onRefreshSlo}
       />
       <Panel title="Systemd" action={<RefreshButton onClick={onRefreshSystemd} />}>
         {systemdError ? <Banner tone="error" text={systemdError.message} /> : null}
@@ -3254,6 +3348,183 @@ function Metric({ title, value, icon }: { title: string; value: number | string;
         {icon}
       </div>
       <strong className="mt-3 block text-2xl leading-none md:mt-4 md:text-3xl">{value}</strong>
+    </div>
+  );
+}
+
+const sloWindows: Array<{ value: SloWindow; label: string }> = [
+  { value: "24h", label: "24 hours" },
+  { value: "7d", label: "7 days" },
+  { value: "30d", label: "30 days" },
+];
+
+const sloRateDefinitions: Array<{ key: keyof SloRates; label: string; detail: string; color: string }> = [
+  { key: "blocked", label: "Blocked", detail: "finished service jobs", color: "#dc2626" },
+  { key: "no_op", label: "No-op", detail: "finished service jobs", color: "#7c3aed" },
+  { key: "retry", label: "Retried", detail: "claimed service jobs", color: "#d97706" },
+  { key: "coalescing", label: "Coalesced", detail: "ingested notifications", color: "#0284c7" },
+];
+
+const sloLatencyDefinitions: Array<{ key: keyof SloSummary["latencies"]; label: string }> = [
+  { key: "source_received_to_queued", label: "Source → queue" },
+  { key: "queued_to_claimed", label: "Queue → claim" },
+  { key: "claimed_to_first_output", label: "Claim → first output" },
+  { key: "claimed_to_done", label: "Claim → done" },
+];
+
+function SloDashboard({
+  summary,
+  loading,
+  window,
+  onWindowChange,
+  onRefresh,
+}: {
+  summary: MetricsSummary | undefined;
+  loading: boolean;
+  window: SloWindow;
+  onWindowChange: (window: SloWindow) => void;
+  onRefresh: () => void;
+}) {
+  const action = (
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="inline-flex h-8 rounded-md border border-border bg-white p-0.5" role="group" aria-label="SLO window">
+        {sloWindows.map((item) => (
+          <button
+            key={item.value}
+            className={cn("rounded px-2.5 text-xs font-semibold", window === item.value ? "bg-primary text-white" : "text-muted hover:bg-slate-50")}
+            type="button"
+            aria-label={item.label}
+            aria-pressed={window === item.value}
+            onClick={() => onWindowChange(item.value)}
+          >
+            {item.value}
+          </button>
+        ))}
+      </div>
+      <RefreshButton onClick={onRefresh} compactOnMobile />
+    </div>
+  );
+
+  if (loading && !summary?.slo) {
+    return (
+      <Panel title="Service SLOs" action={action}>
+        <div className="flex min-h-24 items-center justify-center gap-2 rounded-md border border-dashed border-border text-sm text-muted">
+          <RefreshCw className="h-4 w-4 animate-spin" aria-hidden />
+          Loading SLO metrics…
+        </div>
+      </Panel>
+    );
+  }
+  if (summary?.schema_ok === false) {
+    return (
+      <Panel title="Service SLOs" action={action}>
+        <Banner tone="warning" text={`SLO metrics are unavailable until the database schema is migrated${summary.schema_error ? `: ${summary.schema_error}` : "."}`} />
+      </Panel>
+    );
+  }
+  if (!summary?.slo) {
+    return (
+      <Panel title="Service SLOs" action={action}>
+        <EmptyState text="No SLO read model is available." />
+      </Panel>
+    );
+  }
+
+  const slo = summary.slo;
+  const trendData = slo.trends.daily.map((row) => ({
+    bucket: row.bucket,
+    blocked: row.rates.blocked.percent,
+    no_op: row.rates.no_op.percent,
+    retry: row.rates.retry.percent,
+    coalescing: row.rates.coalescing.percent,
+  }));
+  return (
+    <Panel title="Service SLOs" action={action}>
+      <div className="grid gap-4">
+        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 text-xs text-muted">
+          <span>
+            <strong className="text-foreground">{slo.cohort.sample_count}</strong> finished auto-trusted service job{slo.cohort.sample_count === 1 ? "" : "s"}
+            {slo.cohort.missing_count > 0 ? ` · ${slo.cohort.missing_count} missing outcome` : ""}
+            {slo.cohort.excluded_count > 0 ? ` · ${slo.cohort.excluded_count} excluded` : ""}
+          </span>
+          <span className="font-mono">{slo.window.timezone}</span>
+        </div>
+
+        <section className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4" aria-label="SLO reliability rates">
+          {sloRateDefinitions.map((definition) => (
+            <SloRateCard key={definition.key} definition={definition} rate={slo.rates[definition.key]} />
+          ))}
+        </section>
+
+        <section aria-labelledby="slo-latency-heading">
+          <h3 id="slo-latency-heading" className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Latency percentiles</h3>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            {sloLatencyDefinitions.map((definition) => (
+              <SloLatencyCard key={definition.key} label={definition.label} latency={slo.latencies[definition.key]} />
+            ))}
+          </div>
+        </section>
+
+        <section aria-labelledby="slo-trend-heading">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <h3 id="slo-trend-heading" className="text-xs font-semibold uppercase tracking-wide text-muted">Daily reliability trend</h3>
+            <span className="text-xs text-muted">Percent of each daily cohort</span>
+          </div>
+          <div className="h-64" role="img" aria-label="Daily SLO reliability rates chart">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={trendData}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="bucket" minTickGap={20} tick={{ fontSize: 11 }} />
+                <YAxis domain={[0, 100]} tickFormatter={(value) => `${value}%`} width={44} />
+                <Legend />
+                <Tooltip formatter={(value, name) => [value === null || value === undefined ? "n/a" : `${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}%`, sloRateDefinitions.find((item) => item.key === name)?.label ?? name]} />
+                {sloRateDefinitions.map((definition) => (
+                  <Line key={definition.key} type="monotone" dataKey={definition.key} name={definition.label} stroke={definition.color} strokeWidth={2} dot={{ r: 2 }} activeDot={{ r: 4 }} connectNulls={false} isAnimationActive={false} />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </section>
+      </div>
+    </Panel>
+  );
+}
+
+function SloRateCard({ definition, rate }: { definition: (typeof sloRateDefinitions)[number]; rate: SloRate }) {
+  const percent = rate.percent === null ? "n/a" : `${rate.percent.toLocaleString(undefined, { maximumFractionDigits: 2 })}%`;
+  return (
+    <div className="rounded-md border border-border bg-slate-50/70 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold text-muted">{definition.label}</span>
+        <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: definition.color }} aria-hidden />
+      </div>
+      <strong className="mt-2 block text-2xl leading-none">{percent}</strong>
+      <p className="mt-2 text-xs text-muted">{rate.numerator} / {rate.denominator} {definition.detail}</p>
+      {rate.missing_count > 0 ? <p className="mt-1 text-xs text-amber-700">{rate.missing_count} missing sample{rate.missing_count === 1 ? "" : "s"}</p> : null}
+      {definition.key === "retry" && rate.requeued_runs ? <p className="mt-1 text-xs text-muted">{rate.requeued_runs} requeued run{rate.requeued_runs === 1 ? "" : "s"}</p> : null}
+    </div>
+  );
+}
+
+function SloLatencyCard({ label, latency }: { label: string; latency: SloLatency }) {
+  return (
+    <div className="rounded-md border border-border p-3">
+      <h4 className="text-xs font-semibold text-muted">{label}</h4>
+      <div className="mt-3 grid grid-cols-3 gap-2 text-center">
+        <SloPercentile label="p50" value={latency.p50} />
+        <SloPercentile label="p90" value={latency.p90} />
+        <SloPercentile label="p99" value={latency.p99} />
+      </div>
+      <p className="mt-3 text-xs text-muted">{latency.sample_count} sample{latency.sample_count === 1 ? "" : "s"}{latency.missing_count > 0 ? ` · ${latency.missing_count} missing` : ""}</p>
+    </div>
+  );
+}
+
+function SloPercentile({ label, value }: { label: string; value: number | null }) {
+  return (
+    <div>
+      <div className="font-mono text-sm font-semibold">{formatSeconds(value)}</div>
+      <div className="mt-0.5 text-[10px] font-semibold uppercase text-muted">{label}</div>
     </div>
   );
 }
@@ -4658,6 +4929,7 @@ export {
   JobsList,
   ProductMeta,
   SectionNav,
+  SloDashboard,
   StatusBadge,
   SystemdUnits,
   ExecutorPauseControl,

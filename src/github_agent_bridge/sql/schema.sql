@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS idx_jobs_status_created ON jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_work_status ON jobs(work_key, status);
 CREATE INDEX IF NOT EXISTS idx_jobs_finished_at ON jobs(finished_at) WHERE finished_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at);
 CREATE TABLE IF NOT EXISTS job_acknowledgements (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
@@ -189,6 +190,7 @@ CREATE TABLE IF NOT EXISTS coalesced_notifications (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_coalesced_notifications_job_id ON coalesced_notifications(job_id, id);
+CREATE INDEX IF NOT EXISTS idx_coalesced_notifications_created_at ON coalesced_notifications(created_at);
 CREATE TABLE IF NOT EXISTS quarantined_notifications (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   uid INTEGER,

@@ -58,6 +58,35 @@ Retry reporting should also expose the absolute number of `job_runs` whose
 result is `requeued`. Coalescing is a notification-level rate, not a job-level
 rate; counting `jobs.coalesced_count > 0` would undercount bursts.
 
+## Summary API
+
+`GET /api/metrics/summary?window=7d&timezone=Europe/Madrid` accepts `24h`,
+`7d`, or `30d`. Existing top-level metric fields remain available; the SLO
+contract is returned under `metrics.slo`:
+
+- `window` contains the UTC start/end and the resolved trend timezone;
+- `cohort` exposes service samples plus missing and explicitly excluded rows;
+- `latencies` exposes p50/p90/p99 seconds with sample and missing counts;
+- `rates` exposes ratio, percentage, numerator, denominator, samples, and
+  missing counts; retry also includes the absolute `requeued_runs` count;
+- `trends.daily` returns the same reliability rate contract per local day,
+  including empty buckets so consumers do not have to invent missing days.
+
+A rate with no denominator is `null`, not `0`. The coalescing aggregate and
+trend use jobs created during the window plus coalesced notifications created
+during the window; they do not reuse the finished-job service cohort.
+
+The endpoint validates migration history before running aggregate queries. If
+the database has pending migrations or an incompatible schema, it returns HTTP
+200 with `metrics.schema_ok=false`, `metrics.schema_error`, and empty metric
+defaults; the read path never applies migrations.
+
+The dashboard's **System** page consumes this same summary endpoint to show
+reliability rates, latency percentiles, and daily trends. Operators can switch
+between the `24h`, `7d`, and `30d` windows without issuing separate metric
+queries. When `schema_ok=false`, the dashboard replaces the charts with the
+migration error instead of presenting empty values as healthy service data.
+
 ## Structured terminal outcomes
 
 `jobs.terminal_outcome` is the metric input. Consumers must not search job

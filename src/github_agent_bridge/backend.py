@@ -1514,8 +1514,17 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         )
 
     @app.get("/api/metrics/summary")
-    def api_metrics(timezone: str = "UTC", _: str = Depends(current_user)) -> dict[str, Any]:
-        return {"metrics": queries.metrics_summary(timezone_name=timezone)}
+    def api_metrics(
+        timezone: str = "UTC",
+        window: str = Query("7d", pattern="^(24h|7d|30d)$"),
+        _: str = Depends(current_user),
+    ) -> dict[str, Any]:
+        return {
+            "metrics": queries.metrics_summary(
+                timezone_name=timezone,
+                window=window,
+            )
+        }
 
     @app.get("/api/processes")
     def api_processes(_: str = Depends(current_user)) -> dict[str, Any]:
