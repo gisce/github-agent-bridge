@@ -32,24 +32,55 @@ jobs:
 
       - name: Check workflow SHA is still current
         id: release_head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -o pipefail
+          set -euo pipefail
+          git fetch origin "refs/heads/${GITHUB_REF_NAME}" --tags
           remote_sha="$(git ls-remote --exit-code origin "refs/heads/${GITHUB_REF_NAME}" | cut -f1)"
           if [[ "$remote_sha" == "$GITHUB_SHA" ]]; then
             echo "current=true" >> "$GITHUB_OUTPUT"
+            echo "resume=false" >> "$GITHUB_OUTPUT"
           else
             echo "current=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Skipping stale release run for ${GITHUB_SHA}; ${GITHUB_REF_NAME} is now at ${remote_sha}."
+            release_subject="$(git show -s --format=%s "$remote_sha")"
+            release_parent="$(git rev-parse "${remote_sha}^")"
+            if [[ "$release_parent" == "$GITHUB_SHA" && "$release_subject" =~ ^chore\(release\):\ ([0-9]+\.[0-9]+\.[0-9]+)\ \[skip\ ci\]$ ]]; then
+              release_version="${BASH_REMATCH[1]}"
+              release_tag="v${release_version}"
+              tag_sha="$(git ls-remote origin "refs/tags/${release_tag}^{}" | cut -f1)"
+              if [[ -z "$tag_sha" ]]; then
+                tag_sha="$(git ls-remote origin "refs/tags/${release_tag}" | cut -f1)"
+              fi
+              release_assets="$(gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+              wheel="github_agent_bridge-${release_version}-py3-none-any.whl"
+              sdist="github_agent_bridge-${release_version}.tar.gz"
+              if [[ "$tag_sha" == "$remote_sha" ]] \
+                && grep -Fxq "$wheel" <<< "$release_assets" \
+                && grep -Fxq "$sdist" <<< "$release_assets"; then
+                echo "resume=false" >> "$GITHUB_OUTPUT"
+                echo "::notice::Skipping stale release run for ${GITHUB_SHA}; ${release_tag} is already complete."
+              else
+                echo "resume=true" >> "$GITHUB_OUTPUT"
+                echo "release_sha=${remote_sha}" >> "$GITHUB_OUTPUT"
+                echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+                git checkout -B "$GITHUB_REF_NAME" "$remote_sha"
+                echo "::warning::Resuming incomplete release ${release_tag} at ${remote_sha}."
+              fi
+            else
+              echo "resume=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::Skipping stale release run for ${GITHUB_SHA}; ${GITHUB_REF_NAME} is now at ${remote_sha}."
+            fi
           fi
 
       - name: Set up Python
-        if: steps.release_head.outputs.current == 'true'
+        if: steps.release_head.outputs.current == 'true' || steps.release_head.outputs.resume == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: pip
       - name: Set up Node
-        if: steps.release_head.outputs.current == 'true'
+        if: steps.release_head.outputs.current == 'true' || steps.release_head.outputs.resume == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -57,23 +88,23 @@ jobs:
           cache-dependency-path: dashboard/package-lock.json
 
       - name: Install package with test dependencies
-        if: steps.release_head.outputs.current == 'true'
+        if: steps.release_head.outputs.current == 'true' || steps.release_head.outputs.resume == 'true'
         run: python -m pip install -e '.[test]'
       - name: Install dashboard dependencies
-        if: steps.release_head.outputs.current == 'true'
+        if: steps.release_head.outputs.current == 'true' || steps.release_head.outputs.resume == 'true'
         run: npm ci
         working-directory: dashboard
       - name: Run dashboard tests
-        if: steps.release_head.outputs.current == 'true'
+        if: steps.release_head.outputs.current == 'true' || steps.release_head.outputs.resume == 'true'
         run: npm test
         working-directory: dashboard
       - name: Build dashboard
-        if: steps.release_head.outputs.current == 'true'
+        if: steps.release_head.outputs.current == 'true' || steps.release_head.outputs.resume == 'true'
         run: npm run build
         working-directory: dashboard
 
       - name: Run tests before release
-        if: steps.release_head.outputs.current == 'true'
+        if: steps.release_head.outputs.current == 'true' || steps.release_head.outputs.resume == 'true'
         run: pytest -q
 
       - name: Recheck workflow SHA before release
@@ -92,23 +123,97 @@ jobs:
       - name: Semantic version release
         id: release
         if: steps.pre_release_head.outputs.current == 'true'
+        continue-on-error: true
         uses: python-semantic-release/python-semantic-release@v10.5.3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           git_committer_name: github-actions
           git_committer_email: actions@users.noreply.github.com
 
+      - name: Recover partial semantic release
+        id: partial_release
+        if: success() && (steps.release_head.outputs.resume == 'true' || steps.release.outcome == 'failure')
+        run: |
+          set -euo pipefail
+          git fetch origin "refs/heads/${GITHUB_REF_NAME}" --tags
+          remote_sha="$(git ls-remote --exit-code origin "refs/heads/${GITHUB_REF_NAME}" | cut -f1)"
+          release_subject="$(git show -s --format=%s "$remote_sha")"
+          release_parent="$(git rev-parse "${remote_sha}^")"
+          if [[ "$release_parent" != "$GITHUB_SHA" || ! "$release_subject" =~ ^chore\(release\):\ ([0-9]+\.[0-9]+\.[0-9]+)\ \[skip\ ci\]$ ]]; then
+            echo "::error::Semantic release failed without a recoverable release commit on ${GITHUB_REF_NAME}."
+            exit 1
+          fi
+
+          release_version="${BASH_REMATCH[1]}"
+          release_tag="v${release_version}"
+          file_version="$(git show "$remote_sha:pyproject.toml" | python -c 'import sys, tomllib; print(tomllib.loads(sys.stdin.read())["project"]["version"])')"
+          if [[ "$file_version" != "$release_version" ]]; then
+            echo "::error::Release commit subject says ${release_version}, but pyproject.toml says ${file_version}."
+            exit 1
+          fi
+
+          git checkout -B "$GITHUB_REF_NAME" "$remote_sha"
+          if ! compgen -G 'dist/*.whl' >/dev/null || ! compgen -G 'dist/*.tar.gz' >/dev/null; then
+            python -m pip install build
+            python -m build
+          fi
+
+          tag_sha="$(git ls-remote origin "refs/tags/${release_tag}^{}" | cut -f1)"
+          if [[ -z "$tag_sha" ]]; then
+            direct_tag_sha="$(git ls-remote origin "refs/tags/${release_tag}" | cut -f1)"
+            if [[ -n "$direct_tag_sha" ]]; then
+              tag_sha="$direct_tag_sha"
+            fi
+          fi
+          if [[ -n "$tag_sha" && "$tag_sha" != "$remote_sha" ]]; then
+            echo "::error::${release_tag} already points to ${tag_sha}, not ${remote_sha}."
+            exit 1
+          fi
+          if [[ -z "$tag_sha" ]]; then
+            git tag -d "$release_tag" 2>/dev/null || true
+            git tag -a "$release_tag" "$remote_sha" -m "$release_tag"
+            pushed=false
+            for attempt in 1 2 3; do
+              if git push origin "refs/tags/${release_tag}"; then
+                pushed=true
+                break
+              fi
+              echo "::warning::Tag push attempt ${attempt} failed for ${release_tag}."
+              sleep "$attempt"
+            done
+            if [[ "$pushed" != true ]]; then
+              echo "::error::Unable to push ${release_tag} after three attempts."
+              exit 1
+            fi
+          fi
+          echo "recovered=true" >> "$GITHUB_OUTPUT"
+          echo "tag=${release_tag}" >> "$GITHUB_OUTPUT"
+
       - name: Upload distributions to GitHub Release
-        if: steps.release.outputs.released == 'true'
+        if: steps.release.outputs.released == 'true' || steps.partial_release.outputs.recovered == 'true'
         uses: python-semantic-release/publish-action@v10.5.3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ steps.release.outputs.tag }}
+          tag: ${{ steps.release.outputs.tag || steps.partial_release.outputs.tag }}
 
       - name: Upload distribution artifacts
-        if: steps.release.outputs.released == 'true'
+        if: steps.release.outputs.released == 'true' || steps.partial_release.outputs.recovered == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: distribution-artifacts
           path: dist
           if-no-files-found: error
+
+      - name: Verify published release
+        if: steps.release.outputs.released == 'true' || steps.partial_release.outputs.recovered == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag || steps.partial_release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          release_version="${RELEASE_TAG#v}"
+          assets="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')"
+          grep -Fxq "github_agent_bridge-${release_version}-py3-none-any.whl" <<< "$assets"
+          grep -Fxq "github_agent_bridge-${release_version}.tar.gz" <<< "$assets"
+          tag_sha="$(git ls-remote origin "refs/tags/${RELEASE_TAG}^{}" | cut -f1)"
+          [[ -n "$tag_sha" ]]
