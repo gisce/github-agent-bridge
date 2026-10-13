@@ -313,6 +313,46 @@ def test_classify_notification_with_llm_uses_toolless_model_run(monkeypatch):
     ]
 
 
+def test_classifier_resolves_env_node_from_bridge_setting(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "runtime"
+    bin_dir.mkdir()
+    node = bin_dir / "node"
+    node.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        "  *--help*) printf '%s\\n' 'Usage: openclaw infer model run' '--local' "
+        "'--prompt <text>' '--json' '--model <provider/model>' '--thinking <level>' ;;\n"
+        "  *) printf '%s\\n' "
+        "'{\"addressed_to_agent\":true,\"action\":\"reply_comment\","
+        "\"work_intent\":\"work_allowed\",\"write_permission\":"
+        "\"state_change_allowed\",\"confidence\":0.99,\"reason\":"
+        "\"Implementation requested.\"}' ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    node.chmod(0o755)
+    openclaw = tmp_path / "openclaw"
+    openclaw.write_text("#!/usr/bin/env node\n", encoding="utf-8")
+    openclaw.chmod(0o755)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("GITHUB_AGENT_BRIDGE_NODE_BIN", str(node))
+    assert_openclaw_model_run_supported.cache_clear()
+    notif = notification("<node-path@github.com>", "@pilipilisbot implement this")
+
+    result = classify_notification_with_llm(
+        notif,
+        extract_github_context(notif.body),
+        ParserResult("reply_comment", "work_allowed"),
+        IntentClassifier(
+            enabled=True,
+            openclaw_bin=str(openclaw),
+        ),
+    )
+
+    assert result.applied is True
+    assert result.work_intent == "work_allowed"
+
+
 def test_openclaw_model_run_contract_rejects_unsupported_cli(monkeypatch):
     assert_openclaw_model_run_supported.cache_clear()
 

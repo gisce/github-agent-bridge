@@ -18,6 +18,7 @@ from . import feedback
 from .models import GitHubContext, Job
 from .policy import DEFAULT_REPO_ROLE, Policy, Route, complexity_from_metadata
 from .process_inspection import process_stat
+from .subprocess_env import prepare_subprocess_env
 from .session_correlation import (
     normalize_session_id,
     session_id_for_job,
@@ -740,13 +741,11 @@ class OpenClawDispatcher:
             "--message",
             self.build_prompt(job, policy),
         ]
-        env = os.environ.copy()
+        env = prepare_subprocess_env(self.openclaw_bin, self.node_bin)
         env["GITHUB_AGENT_BRIDGE_ACTION_MODE"] = action_mode_for_job(job)
         env["GITHUB_AGENT_BRIDGE_WORK_INTENT"] = job.work_intent
         env["GITHUB_AGENT_BRIDGE_ALLOW_REPOSITORY_WRITE"] = "1" if job.work_intent == "work_allowed" else "0"
         env["GITHUB_AGENT_BRIDGE_ALLOW_PUSH"] = "1" if job.work_intent == "work_allowed" else "0"
-        if self.node_bin:
-            env["PATH"] = os.path.dirname(self.node_bin) + os.pathsep + env.get("PATH", "")
         if self.mode != RunMode.LIVE:
             return DispatchResult(True, 0, "side effects skipped", "", False, reaction_ok, cmd)
         with self._process_lock:

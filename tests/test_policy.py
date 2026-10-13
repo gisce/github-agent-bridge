@@ -115,6 +115,7 @@ def test_policy_from_file_loads_intent_classifier(tmp_path):
             "minConfidence": 0.8,
             "onlyWhenParserDefaulted": false,
             "openclawBin": "/tmp/openclaw",
+            "nodeBin": "/tmp/node",
             "sessionId": "intent-test",
             "timeout": 12
           }
@@ -129,6 +130,7 @@ def test_policy_from_file_loads_intent_classifier(tmp_path):
     assert policy.intent_classifier.min_confidence == 0.8
     assert policy.intent_classifier.only_when_parser_defaulted is False
     assert policy.intent_classifier.openclaw_bin == "/tmp/openclaw"
+    assert policy.intent_classifier.node_bin == "/tmp/node"
     assert policy.intent_classifier.session_id == "intent-test"
     assert policy.intent_classifier.timeout == 12
 

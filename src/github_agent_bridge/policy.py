@@ -140,6 +140,7 @@ class IntentClassifier:
     min_confidence: float = 0.75
     only_when_parser_defaulted: bool = True
     openclaw_bin: str = "openclaw"
+    node_bin: str | None = None
     session_id: str = "github-agent-bridge-intent"
     timeout: int = 60
 
@@ -321,6 +322,7 @@ class Policy:
                 min_confidence=min_confidence,
                 only_when_parser_defaulted=bool(raw.get("onlyWhenParserDefaulted", True)),
                 openclaw_bin=str(raw.get("openclawBin", "openclaw")),
+                node_bin=str(raw["nodeBin"]) if raw.get("nodeBin") else None,
                 session_id=str(raw.get("sessionId", "github-agent-bridge-intent")),
                 timeout=timeout,
             )
