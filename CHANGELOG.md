@@ -2,6 +2,25 @@
 
 <!-- version list -->
 
+## v0.78.0 (2026-10-13)
+
+### Bug Fixes
+
+- Degrade SLO metrics for incompatible schemas
+  ([`dddda51`](https://github.com/gisce/github-agent-bridge/commit/dddda519739d1347ee1a3614d982874c697334b5))
+
+- Move SLO metrics to system page
+  ([`f6dbcf6`](https://github.com/gisce/github-agent-bridge/commit/f6dbcf61c3cc878dcc8becb5f936e39d85f8cde8))
+
+### Features
+
+- Expose SLO metrics read model
+  ([`960e833`](https://github.com/gisce/github-agent-bridge/commit/960e833df6d3a391cc70e68367460452fbc1f8ee))
+
+- Visualize SLO metrics in dashboard
+  ([`9da15eb`](https://github.com/gisce/github-agent-bridge/commit/9da15eb9f50ddc974746b03e61e12d8a81f68b0c))
+
+
 ## v0.77.1 (2026-10-13)
 
 ### Bug Fixes
