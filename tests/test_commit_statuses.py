@@ -1,5 +1,7 @@
 import sqlite3
 
+import pytest
+
 from github_agent_bridge.dispatch import DispatchResult
 from github_agent_bridge.executor import ExecutorConfig, ExecutorPool
 from github_agent_bridge.models import Notification
@@ -68,6 +70,35 @@ def commit_status_row(queue: JobQueue, job_id: int) -> sqlite3.Row | None:
         return con.execute(
             "SELECT * FROM job_commit_statuses WHERE job_id=?", (job_id,)
         ).fetchone()
+
+
+def test_commit_status_context_is_distinct_per_instance_and_persisted(tmp_path, monkeypatch):
+    contexts = []
+    for instance_id in ("production", "canary"):
+        monkeypatch.setenv("GITHUB_AGENT_BRIDGE_INSTANCE_ID", instance_id)
+        queue = JobQueue(tmp_path / f"{instance_id}.sqlite3")
+        job = ingest_webhook(
+            queue, webhook_notification(delivery=f"instance-{instance_id}")
+        )
+        monkeypatch.delenv("GITHUB_AGENT_BRIDGE_INSTANCE_ID")
+        claim = queue.claim_commit_status(job.id)
+        assert claim is not None
+        contexts.append(claim.context_name)
+
+    assert contexts == [
+        "github-agent-bridge/agent/production",
+        "github-agent-bridge/agent/canary",
+    ]
+
+
+@pytest.mark.parametrize("instance_id", ["bad/name", "bad name", "x" * 100])
+def test_commit_status_rejects_invalid_instance_id(tmp_path, monkeypatch, instance_id):
+    monkeypatch.setenv("GITHUB_AGENT_BRIDGE_INSTANCE_ID", instance_id)
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    with pytest.raises(ValueError, match="GITHUB_AGENT_BRIDGE_INSTANCE_ID"):
+        ingest_webhook(queue, webhook_notification(delivery="invalid-instance"))
+    with queue.connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
 
 
 def test_only_webhook_pr_and_commit_jobs_create_commit_status_feedback(tmp_path):
