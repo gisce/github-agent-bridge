@@ -858,7 +858,8 @@ def metrics_summary(
             validate_migrations(con)
             rows = con.execute("SELECT status, repo, action, work_intent, created_at, started_at, finished_at FROM jobs").fetchall()
             run_rows = con.execute(
-                """SELECT job_runs.started_at, job_runs.finished_at, jobs.work_intent
+                """SELECT job_runs.started_at, job_runs.finished_at,
+                          jobs.work_intent, jobs.trigger_actor
                 FROM job_runs
                 JOIN jobs ON jobs.id=job_runs.job_id
                 WHERE job_runs.finished_at IS NOT NULL"""
@@ -903,6 +904,7 @@ def metrics_summary(
         "by_intent": dict(by_intent),
         "by_created_day": dict(sorted(by_created_day.items())),
         "runtime_usage": runtime_usage(run_rows, timezone),
+        "runtime_usage_by_actor": runtime_usage_by_actor(run_rows),
         "runtime_seconds": percentiles(runtimes),
         "queue_wait_seconds": percentiles(waits),
         "slo": slo_summary(
@@ -932,6 +934,7 @@ def empty_metrics_summary(
         "by_intent": {},
         "by_created_day": {},
         "runtime_usage": {"day": [], "month": []},
+        "runtime_usage_by_actor": [],
         "runtime_seconds": percentiles([]),
         "queue_wait_seconds": percentiles([]),
         "slo": slo_summary(
@@ -1660,6 +1663,42 @@ def runtime_usage(rows: list[sqlite3.Row], timezone: ZoneInfo) -> dict[str, list
         "day": runtime_bucket_rows(daily),
         "month": runtime_bucket_rows(monthly),
     }
+
+
+def runtime_usage_by_actor(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    users: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        seconds = completed_duration_seconds(row["started_at"], row["finished_at"])
+        if seconds is None:
+            continue
+        key = (str(row["trigger_actor"] or "").strip() or "unknown").casefold()
+        mode = runtime_usage_mode(row["work_intent"])
+        current = users.setdefault(
+            key,
+            {
+                "actor": key,
+                "seconds": 0,
+                "runs": 0,
+                "work_seconds": 0,
+                "review_seconds": 0,
+                "work_runs": 0,
+                "review_runs": 0,
+            },
+        )
+        current["seconds"] += seconds
+        current["runs"] += 1
+        current[f"{mode}_seconds"] += seconds
+        current[f"{mode}_runs"] += 1
+    return [
+        {
+            **values,
+            "minutes": round(values["seconds"] / 60, 2),
+        }
+        for values in sorted(
+            users.values(),
+            key=lambda item: (-item["seconds"], item["actor"].casefold()),
+        )
+    ]
 
 
 def majority_runtime_day(started: datetime, finished: datetime, timezone: ZoneInfo) -> str | None:

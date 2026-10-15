@@ -348,6 +348,7 @@ def test_metrics_api_degrades_safely_for_incompatible_schema(
     assert expected_error in metrics["schema_error"]
     assert metrics["status_counts"] == {}
     assert metrics["runtime_usage"] == {"day": [], "month": []}
+    assert metrics["runtime_usage_by_actor"] == []
     assert metrics["runtime_seconds"] == {
         "median": None,
         "p90": None,

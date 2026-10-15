@@ -457,7 +457,10 @@ view at `/system`, and dedicated job views at `/jobs/{id}`. Operators can share
 a job URL to open the dashboard with that job's session, worklog, activity feed
 and GitHub links selected. The UI is a Vite + React + TypeScript app styled with
 Tailwind and operational components, using TanStack Query for API state and
-Recharts for percentile charts.
+Recharts for runtime charts. The dashboard combines work/review runtime with
+job volume on a second axis and provides a separate work/review runtime view by
+triggering GitHub user; detailed latency percentiles live in the System SLO
+view.
 Webhook administrators can request a configuration refresh from a hook detail
 page. This runs `gh api --method POST <validated-ping-path>` under the dashboard
 service identity, so `gh auth status` must report an account with organization

@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider, useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, AlertTriangle, ArrowLeft, Bell, Brain, CheckCircle2, ChevronDown, Clock3, Cpu, Eye, ExternalLink, Filter, Gauge, KeyRound, Link, Pencil, RefreshCw, RotateCcw, Save, Search, ShieldCheck, TerminalSquare, TimerReset, Trash2, UserCircle2, Wrench, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
-import { Bar, BarChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, ComposedChart, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 import "./styles.css";
@@ -20,6 +20,7 @@ type MetricsSummary = {
   by_intent: Record<string, number>;
   by_created_day: Record<string, number>;
   runtime_usage: RuntimeUsage;
+  runtime_usage_by_actor: RuntimeUsageActor[];
   runtime_seconds: Percentiles;
   queue_wait_seconds: Percentiles;
   slo?: SloSummary;
@@ -106,6 +107,17 @@ type RuntimeUsageBucket = {
   review_runs: number;
   work_jobs: number;
   review_jobs: number;
+};
+
+type RuntimeUsageActor = {
+  actor: string;
+  seconds: number;
+  minutes: number;
+  runs: number;
+  work_seconds: number;
+  review_seconds: number;
+  work_runs: number;
+  review_runs: number;
 };
 
 type Percentiles = {
@@ -1646,20 +1658,20 @@ function App() {
                   onCancel={cancelJob}
                 />
               </Panel>
-              <Panel title="Runtime usage" action={<RefreshButton onClick={() => metrics.refetch()} />}>
-                <RuntimeUsageChart usage={metrics.data?.metrics.runtime_usage} loading={metrics.isLoading} totalJobs={totalJobs(counts)} />
+              <Panel title="Runtime & jobs" action={<RefreshButton onClick={() => metrics.refetch()} />}>
+                <RuntimeUsageChart
+                  usage={metrics.data?.metrics.runtime_usage}
+                  jobsByCreatedDay={metrics.data?.metrics.by_created_day}
+                  loading={metrics.isLoading}
+                  totalJobs={totalJobs(counts)}
+                />
               </Panel>
-            </section>
-
-            <section className="grid gap-4 xl:grid-cols-3">
-              <Panel title="Runtime percentiles">
-                <PercentileChart label="runtime" values={metrics.data?.metrics.runtime_seconds} />
-              </Panel>
-              <Panel title="Jobs per day">
-                <JobsPerDayChart values={metrics.data?.metrics.by_created_day} loading={metrics.isLoading} totalJobs={totalJobs(counts)} />
-              </Panel>
-              <Panel title="Queue wait percentiles">
-                <PercentileChart label="queue wait" values={metrics.data?.metrics.queue_wait_seconds} />
+              <Panel title="Runtime by user">
+                <RuntimeByUserChart
+                  usage={metrics.data?.metrics.runtime_usage_by_actor}
+                  loading={metrics.isLoading}
+                  totalJobs={totalJobs(counts)}
+                />
               </Panel>
             </section>
           </>
@@ -4452,57 +4464,24 @@ function CollapsibleLogSection({
   );
 }
 
-function PercentileChart({ label, values }: { label: string; values: Percentiles | undefined }) {
-  const data = [
-    { name: "median", seconds: values?.median ?? 0 },
-    { name: "p90", seconds: values?.p90 ?? 0 },
-    { name: "p99", seconds: values?.p99 ?? 0 },
-  ];
-  return (
-    <div className="h-56">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data}>
-          <CartesianGrid strokeDasharray="3 3" />
-          <XAxis dataKey="name" />
-          <YAxis tickFormatter={formatSeconds} />
-          <Tooltip formatter={(value) => [formatSeconds(Number(value)), label]} />
-          <Bar dataKey="seconds" fill="#0969da" radius={[4, 4, 0, 0]} />
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function JobsPerDayChart({ values, loading, totalJobs }: { values: Record<string, number> | undefined; loading: boolean; totalJobs: number }) {
-  const data = Object.entries(values ?? {}).map(([day, count]) => ({ day, count }));
-  if (loading && data.length === 0) return <EmptyState text="Loading job history..." />;
-  if (data.length === 0) return <EmptyState text={totalJobs > 0 ? "Job history has no valid creation dates." : "No job history available."} />;
-  return (
-    <div className="h-56">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data}>
-          <CartesianGrid strokeDasharray="3 3" />
-          <XAxis dataKey="day" minTickGap={16} />
-          <YAxis allowDecimals={false} />
-          <Tooltip formatter={(value) => [Number(value), "jobs"]} />
-          <Bar dataKey="count" fill="#16a34a" radius={[4, 4, 0, 0]} />
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function RuntimeUsageChart({ usage, loading, totalJobs }: { usage: RuntimeUsage | undefined; loading: boolean; totalJobs: number }) {
+function RuntimeUsageChart({
+  usage,
+  jobsByCreatedDay,
+  loading,
+  totalJobs,
+}: {
+  usage: RuntimeUsage | undefined;
+  jobsByCreatedDay: Record<string, number> | undefined;
+  loading: boolean;
+  totalJobs: number;
+}) {
   const [grouping, setGrouping] = React.useState<keyof RuntimeUsage>("day");
   const rows = usage?.[grouping] ?? [];
-  const data = rows.map((row) => ({
-    ...row,
-    label: runtimeBucketLabel(row.bucket, grouping),
-  }));
+  const data = runtimeUsageChartData(usage, jobsByCreatedDay, grouping);
   const totalSeconds = rows.reduce((total, row) => total + row.seconds, 0);
   const totalRuns = rows.reduce((total, row) => total + (row.runs ?? row.jobs), 0);
-  if (loading && data.length === 0) return <EmptyState text="Loading runtime usage..." />;
-  if (data.length === 0) return <EmptyState text={totalJobs > 0 ? "No jobs have recorded runtime yet." : "No job history available."} />;
+  if (loading && data.length === 0) return <EmptyState text="Loading runtime and job history..." />;
+  if (data.length === 0) return <EmptyState text={totalJobs > 0 ? "No jobs have valid runtime or creation dates." : "No job history available."} />;
   return (
     <div className="grid gap-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -4523,25 +4502,101 @@ function RuntimeUsageChart({ usage, loading, totalJobs }: { usage: RuntimeUsage 
           ))}
         </div>
       </div>
-      <div className="h-64">
+      <div className="h-64" role="img" aria-label="Runtime and jobs activity chart">
         <ResponsiveContainer width="100%" height="100%">
-          <BarChart data={data}>
+          <ComposedChart data={data}>
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey="label" minTickGap={16} tick={{ fontSize: 11 }} />
-            <YAxis tickFormatter={(value) => formatRuntimeUsageSeconds(Number(value))} />
+            <YAxis yAxisId="runtime" tickFormatter={(value) => formatRuntimeUsageSeconds(Number(value))} />
+            <YAxis yAxisId="jobs" orientation="right" allowDecimals={false} />
             <Legend />
             <Tooltip
               formatter={(value, name) => {
                 if (name === "Work") return [formatRuntimeUsageSeconds(Number(value)), "work"];
                 if (name === "Review") return [formatRuntimeUsageSeconds(Number(value)), "review"];
+                if (name === "Jobs") return [Number(value), "jobs"];
                 return [Number(value), String(name)];
               }}
               labelFormatter={(label) => String(label)}
             />
-            <Bar dataKey="work_seconds" name="Work" stackId="runtime" fill="#0969da" isAnimationActive={false} />
-            <Bar dataKey="review_seconds" name="Review" stackId="runtime" fill="#8250df" radius={[4, 4, 0, 0]} isAnimationActive={false} />
-          </BarChart>
+            <Bar yAxisId="runtime" dataKey="work_seconds" name="Work" stackId="runtime" fill="#0969da" isAnimationActive={false} />
+            <Bar yAxisId="runtime" dataKey="review_seconds" name="Review" stackId="runtime" fill="#8250df" radius={[4, 4, 0, 0]} isAnimationActive={false} />
+            <Line yAxisId="jobs" type="monotone" dataKey="jobs" name="Jobs" stroke="#16a34a" strokeWidth={2} dot={{ r: 3 }} activeDot={{ r: 5 }} isAnimationActive={false} />
+          </ComposedChart>
         </ResponsiveContainer>
+      </div>
+    </div>
+  );
+}
+
+function runtimeUsageChartData(
+  usage: RuntimeUsage | undefined,
+  jobsByCreatedDay: Record<string, number> | undefined,
+  grouping: keyof RuntimeUsage,
+) {
+  const rowsByBucket = new Map<string, RuntimeUsageBucket>();
+  for (const row of usage?.[grouping] ?? []) rowsByBucket.set(row.bucket, { ...row });
+  const jobsByBucket = new Map<string, number>();
+  for (const [day, count] of Object.entries(jobsByCreatedDay ?? {})) {
+    const bucket = grouping === "month" ? day.slice(0, 7) : day;
+    jobsByBucket.set(bucket, (jobsByBucket.get(bucket) ?? 0) + count);
+  }
+  for (const bucket of jobsByBucket.keys()) {
+    if (!rowsByBucket.has(bucket)) rowsByBucket.set(bucket, emptyRuntimeUsageBucket(bucket));
+  }
+  return [...rowsByBucket.values()]
+    .sort((left, right) => left.bucket.localeCompare(right.bucket))
+    .map((row) => ({
+      ...row,
+      jobs: jobsByBucket.get(row.bucket) ?? 0,
+      label: runtimeBucketLabel(row.bucket, grouping),
+    }));
+}
+
+function emptyRuntimeUsageBucket(bucket: string): RuntimeUsageBucket {
+  return {
+    bucket,
+    seconds: 0,
+    minutes: 0,
+    runs: 0,
+    jobs: 0,
+    work_seconds: 0,
+    review_seconds: 0,
+    work_runs: 0,
+    review_runs: 0,
+    work_jobs: 0,
+    review_jobs: 0,
+  };
+}
+
+function RuntimeByUserChart({ usage, loading, totalJobs }: { usage: RuntimeUsageActor[] | undefined; loading: boolean; totalJobs: number }) {
+  const data = (usage ?? []).map((row) => ({ ...row, label: row.actor === "unknown" ? "unknown" : `@${row.actor}` }));
+  const totalSeconds = data.reduce((total, row) => total + row.seconds, 0);
+  if (loading && data.length === 0) return <EmptyState text="Loading runtime by user..." />;
+  if (data.length === 0) return <EmptyState text={totalJobs > 0 ? "No jobs have recorded user runtime yet." : "No job history available."} />;
+  return (
+    <div className="grid gap-3">
+      <div className="flex items-center gap-2 text-sm text-muted">
+        <UserCircle2 className="h-4 w-4" aria-hidden />
+        <span>{formatRuntimeUsageSeconds(totalSeconds)} consumed across {data.length} user{data.length === 1 ? "" : "s"}</span>
+      </div>
+      <div className="overflow-x-auto" role="img" aria-label="Runtime usage by user chart">
+        <div className="h-64" style={{ minWidth: `${Math.max(720, data.length * 88)}px` }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={data}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis dataKey="label" interval={0} tick={{ fontSize: 11 }} />
+              <YAxis tickFormatter={(value) => formatRuntimeUsageSeconds(Number(value))} />
+              <Legend />
+              <Tooltip
+                formatter={(value, name) => [formatRuntimeUsageSeconds(Number(value)), String(name).toLowerCase()]}
+                labelFormatter={(label) => String(label)}
+              />
+              <Bar dataKey="work_seconds" name="Work" stackId="runtime" fill="#0969da" isAnimationActive={false} />
+              <Bar dataKey="review_seconds" name="Review" stackId="runtime" fill="#8250df" radius={[4, 4, 0, 0]} isAnimationActive={false} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
       </div>
     </div>
   );
@@ -4979,6 +5034,7 @@ export {
   JobDetailPage,
   JobsList,
   ProductMeta,
+  RuntimeByUserChart,
   SectionNav,
   SloDashboard,
   StatusBadge,
@@ -5007,6 +5063,7 @@ export {
   groupTranscriptEntries,
   formatRuntimeUsageSeconds,
   metricsSummaryPath,
+  runtimeUsageChartData,
   runtimeBucketLabel,
   selectedJobIdFromPath,
   shouldRefreshJobForSessionEvent,
