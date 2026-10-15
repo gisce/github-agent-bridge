@@ -111,6 +111,7 @@ type RuntimeUsageBucket = {
 
 type RuntimeUsageActor = {
   actor: string;
+  avatar_url: string | null;
   seconds: number;
   minutes: number;
   runs: number;
@@ -4570,7 +4571,7 @@ function emptyRuntimeUsageBucket(bucket: string): RuntimeUsageBucket {
 }
 
 function RuntimeByUserChart({ usage, loading, totalJobs }: { usage: RuntimeUsageActor[] | undefined; loading: boolean; totalJobs: number }) {
-  const data = (usage ?? []).map((row) => ({ ...row, label: row.actor === "unknown" ? "unknown" : `@${row.actor}` }));
+  const data = usage ?? [];
   const totalSeconds = data.reduce((total, row) => total + row.seconds, 0);
   if (loading && data.length === 0) return <EmptyState text="Loading runtime by user..." />;
   if (data.length === 0) return <EmptyState text={totalJobs > 0 ? "No jobs have recorded user runtime yet." : "No job history available."} />;
@@ -4585,12 +4586,12 @@ function RuntimeByUserChart({ usage, loading, totalJobs }: { usage: RuntimeUsage
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data}>
               <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="label" interval={0} tick={{ fontSize: 11 }} />
+              <XAxis dataKey="actor" interval={0} height={48} tick={<RuntimeActorAvatarTick usage={data} />} tickLine={false} />
               <YAxis tickFormatter={(value) => formatRuntimeUsageSeconds(Number(value))} />
               <Legend />
               <Tooltip
                 formatter={(value, name) => [formatRuntimeUsageSeconds(Number(value)), String(name).toLowerCase()]}
-                labelFormatter={(label) => String(label)}
+                labelFormatter={(actor) => actor === "unknown" ? "unknown" : `@${String(actor)}`}
               />
               <Bar dataKey="work_seconds" name="Work" stackId="runtime" fill="#0969da" isAnimationActive={false} />
               <Bar dataKey="review_seconds" name="Review" stackId="runtime" fill="#8250df" radius={[4, 4, 0, 0]} isAnimationActive={false} />
@@ -4600,6 +4601,55 @@ function RuntimeByUserChart({ usage, loading, totalJobs }: { usage: RuntimeUsage
       </div>
     </div>
   );
+}
+
+type RuntimeActorAvatarTickProps = {
+  x?: number;
+  y?: number;
+  payload?: { value?: string | number };
+  usage: RuntimeUsageActor[];
+};
+
+function RuntimeActorAvatarTick({ x = 0, y = 0, payload, usage }: RuntimeActorAvatarTickProps) {
+  const actor = String(payload?.value ?? "unknown");
+  const row = usage.find((candidate) => candidate.actor === actor);
+  const avatarUrl = runtimeActorAvatarUrl(row);
+  const label = actor === "unknown" ? "unknown user" : `@${actor}`;
+  const clipId = React.useId().replace(/:/g, "");
+  return (
+    <g transform={`translate(${x},${y})`}>
+      <title>{label}</title>
+      <defs>
+        <clipPath id={clipId}>
+          <circle cx="0" cy="18" r="14" />
+        </clipPath>
+      </defs>
+      <circle cx="0" cy="18" r="14" fill="#f1f5f9" stroke="#cbd5e1" />
+      {avatarUrl ? (
+        <image
+          x="-14"
+          y="4"
+          width="28"
+          height="28"
+          href={avatarUrl}
+          clipPath={`url(#${clipId})`}
+          preserveAspectRatio="xMidYMid slice"
+          role="img"
+          aria-label={`${label} avatar`}
+        />
+      ) : (
+        <text x="0" y="22" textAnchor="middle" fontSize="12" fill="#64748b" aria-label={label}>?</text>
+      )}
+    </g>
+  );
+}
+
+function runtimeActorAvatarUrl(row: RuntimeUsageActor | undefined) {
+  if (!row) return null;
+  const explicitUrl = safeExternalUrl(row.avatar_url ?? "");
+  if (explicitUrl !== "#") return explicitUrl;
+  if (!row.actor || row.actor === "unknown") return null;
+  return `https://github.com/${encodeURIComponent(row.actor)}.png?size=80`;
 }
 
 function runtimeBucketLabel(bucket: string, grouping: keyof RuntimeUsage) {
@@ -5035,6 +5085,7 @@ export {
   JobsList,
   ProductMeta,
   RuntimeByUserChart,
+  RuntimeActorAvatarTick,
   SectionNav,
   SloDashboard,
   StatusBadge,

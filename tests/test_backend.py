@@ -864,9 +864,18 @@ def test_dashboard_metrics_groups_runtime_usage_by_actor_and_intent(tmp_path):
         Policy(trusted_orgs=["gisce"]),
     )
     with q.connect() as con:
-        con.execute("UPDATE jobs SET trigger_actor=?, work_intent=? WHERE id=?", ("Alice", "work_allowed", alice_work.id))
-        con.execute("UPDATE jobs SET trigger_actor=?, work_intent=? WHERE id=?", ("alice", "review_only", alice_review.id))
-        con.execute("UPDATE jobs SET trigger_actor=?, work_intent=? WHERE id=?", ("bob", "review_only", bob_review.id))
+        con.execute(
+            "UPDATE jobs SET trigger_actor=?, trigger_actor_avatar_url=?, work_intent=? WHERE id=?",
+            ("Alice", "https://avatars.githubusercontent.com/u/1?v=4", "work_allowed", alice_work.id),
+        )
+        con.execute(
+            "UPDATE jobs SET trigger_actor=?, trigger_actor_avatar_url=?, work_intent=? WHERE id=?",
+            ("alice", None, "review_only", alice_review.id),
+        )
+        con.execute(
+            "UPDATE jobs SET trigger_actor=?, trigger_actor_avatar_url=?, work_intent=? WHERE id=?",
+            ("bob", "https://avatars.githubusercontent.com/u/2?v=4", "review_only", bob_review.id),
+        )
         con.executemany(
             """INSERT INTO job_runs(
                 job_id,attempt,started_at,finished_at,result,worker_id,session_id
@@ -881,8 +890,8 @@ def test_dashboard_metrics_groups_runtime_usage_by_actor_and_intent(tmp_path):
     metrics = metrics_summary(db)
 
     assert metrics["runtime_usage_by_actor"] == [
-        {"actor": "bob", "seconds": 7200, "minutes": 120.0, "runs": 1, "work_seconds": 0, "review_seconds": 7200, "work_runs": 0, "review_runs": 1},
-        {"actor": "alice", "seconds": 5400, "minutes": 90.0, "runs": 2, "work_seconds": 3600, "review_seconds": 1800, "work_runs": 1, "review_runs": 1},
+        {"actor": "bob", "avatar_url": "https://avatars.githubusercontent.com/u/2?v=4", "seconds": 7200, "minutes": 120.0, "runs": 1, "work_seconds": 0, "review_seconds": 7200, "work_runs": 0, "review_runs": 1},
+        {"actor": "alice", "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4", "seconds": 5400, "minutes": 90.0, "runs": 2, "work_seconds": 3600, "review_seconds": 1800, "work_runs": 1, "review_runs": 1},
     ]
 
 

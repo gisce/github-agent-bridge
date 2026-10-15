@@ -859,7 +859,8 @@ def metrics_summary(
             rows = con.execute("SELECT status, repo, action, work_intent, created_at, started_at, finished_at FROM jobs").fetchall()
             run_rows = con.execute(
                 """SELECT job_runs.started_at, job_runs.finished_at,
-                          jobs.work_intent, jobs.trigger_actor
+                          jobs.work_intent, jobs.trigger_actor,
+                          jobs.trigger_actor_avatar_url
                 FROM job_runs
                 JOIN jobs ON jobs.id=job_runs.job_id
                 WHERE job_runs.finished_at IS NOT NULL"""
@@ -1672,11 +1673,13 @@ def runtime_usage_by_actor(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
         if seconds is None:
             continue
         key = (str(row["trigger_actor"] or "").strip() or "unknown").casefold()
+        avatar_url = str(row["trigger_actor_avatar_url"] or "").strip() or None
         mode = runtime_usage_mode(row["work_intent"])
         current = users.setdefault(
             key,
             {
                 "actor": key,
+                "avatar_url": avatar_url,
                 "seconds": 0,
                 "runs": 0,
                 "work_seconds": 0,
@@ -1685,6 +1688,8 @@ def runtime_usage_by_actor(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
                 "review_runs": 0,
             },
         )
+        if current["avatar_url"] is None and avatar_url is not None:
+            current["avatar_url"] = avatar_url
         current["seconds"] += seconds
         current["runs"] += 1
         current[f"{mode}_seconds"] += seconds

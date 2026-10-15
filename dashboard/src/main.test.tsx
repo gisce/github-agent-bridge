@@ -16,6 +16,7 @@ import {
   KnowledgeRules,
   McpPage,
   ProductMeta,
+  RuntimeActorAvatarTick,
   SectionNav,
   SloDashboard,
   StatusBadge,
@@ -485,8 +486,8 @@ describe("dashboard routing and API query helpers", () => {
     render(
       <RuntimeByUserChart
         usage={[
-          { actor: "alice", seconds: 9000, minutes: 150, runs: 2, work_seconds: 7200, review_seconds: 1800, work_runs: 1, review_runs: 1 },
-          { actor: "bob", seconds: 3600, minutes: 60, runs: 1, work_seconds: 0, review_seconds: 3600, work_runs: 0, review_runs: 1 },
+          { actor: "alice", avatar_url: "https://avatars.githubusercontent.com/u/1?v=4", seconds: 9000, minutes: 150, runs: 2, work_seconds: 7200, review_seconds: 1800, work_runs: 1, review_runs: 1 },
+          { actor: "bob", avatar_url: null, seconds: 3600, minutes: 60, runs: 1, work_seconds: 0, review_seconds: 3600, work_runs: 0, review_runs: 1 },
         ]}
         loading={false}
         totalJobs={3}
@@ -496,6 +497,23 @@ describe("dashboard routing and API query helpers", () => {
     expect(screen.getByText("3h 30m consumed across 2 users")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "Runtime usage by user chart" })).toBeInTheDocument();
     vi.unstubAllGlobals();
+  });
+
+  it("renders a GitHub avatar as the runtime user axis tick", () => {
+    render(
+      <svg>
+        <RuntimeActorAvatarTick
+          x={40}
+          y={20}
+          payload={{ value: "alice" }}
+          usage={[
+            { actor: "alice", avatar_url: "https://avatars.githubusercontent.com/u/1?v=4", seconds: 9000, minutes: 150, runs: 2, work_seconds: 7200, review_seconds: 1800, work_runs: 1, review_runs: 1 },
+          ]}
+        />
+      </svg>,
+    );
+
+    expect(screen.getByLabelText("@alice avatar")).toHaveAttribute("href", "https://avatars.githubusercontent.com/u/1?v=4");
   });
 
   it("renders SLO rates, latency percentiles, trends, and window controls", async () => {
