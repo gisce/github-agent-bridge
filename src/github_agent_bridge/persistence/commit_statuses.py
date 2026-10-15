@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import re
 import sqlite3
 from dataclasses import dataclass
 
@@ -8,7 +10,25 @@ from .database import Database, TransactionMode
 
 
 COMMIT_STATUS_CONTEXT = "github-agent-bridge/agent"
+COMMIT_STATUS_INSTANCE_ENV = "GITHUB_AGENT_BRIDGE_INSTANCE_ID"
 COMMIT_STATUS_RETRY_LIMIT = 3
+
+
+def commit_status_context() -> str:
+    instance_id = os.getenv(COMMIT_STATUS_INSTANCE_ENV, "")
+    if not instance_id:
+        return COMMIT_STATUS_CONTEXT
+    context = f"{COMMIT_STATUS_CONTEXT}/{instance_id}"
+    if (
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", instance_id)
+        or len(context) > 100
+    ):
+        raise ValueError(
+            f"{COMMIT_STATUS_INSTANCE_ENV} must be an ASCII identifier using "
+            "letters, digits, dots, underscores or hyphens, with a resulting "
+            "commit status context of at most 100 characters"
+        )
+    return context
 
 
 @dataclass(frozen=True)
@@ -59,7 +79,7 @@ class CommitStatusRepository:
                 ctx.repo,
                 sha,
                 ctx.to_json(),
-                COMMIT_STATUS_CONTEXT,
+                commit_status_context(),
                 desired_state,
                 description[:140],
                 created_at,

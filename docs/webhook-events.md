@@ -45,10 +45,18 @@ second commit-status canary list.
   event was conclusively non-actionable;
 - `error`: the bridge blocked or cancelled the job.
 
-The stable context is `github-agent-bridge/agent`. It reports bridge processing,
-not test or review quality, and must not be configured as a required branch
-protection check. The PR head SHA is resolved once and pinned to the job, so a
-later push cannot receive the result of work started on an older commit.
+The context is `github-agent-bridge/agent` by default. When multiple bridge
+instances target the same repository, set a distinct, stable
+`GITHUB_AGENT_BRIDGE_INSTANCE_ID` in each instance's ingestion environment
+(for example, `production` and `canary`). The resulting contexts are
+`github-agent-bridge/agent/production` and `github-agent-bridge/agent/canary`.
+The ID may contain ASCII letters, digits, dots, underscores and hyphens, must
+start with a letter or digit, and must keep the full context within 100
+characters. Set it before accepting new webhooks; existing outbox rows retain
+their original context until delivered. It reports bridge processing, not test
+or review quality, and must not be configured as a required branch protection
+check. The PR head SHA is resolved once and pinned to the job, so a later push
+cannot receive the result of work started on an older commit.
 
 Delivery uses a SQLite outbox and is independent of the job result: exhausted
 GitHub API retries leave an auditable delivery error but do not block an
