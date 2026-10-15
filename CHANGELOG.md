@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.79.1 (2026-10-15)
+
+### Bug Fixes
+
+- Distinguish commit statuses by bridge instance
+  ([`823537d`](https://github.com/gisce/github-agent-bridge/commit/823537ddbccb0328aa2d822dcd73d20b66e893ba))
+
+
 ## v0.79.0 (2026-10-13)
 
 ### Documentation
