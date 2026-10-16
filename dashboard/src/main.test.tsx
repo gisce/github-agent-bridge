@@ -436,6 +436,48 @@ describe("dashboard routing and API query helpers", () => {
     expect(runtimeBucketLabel("2026-06", "month")).toMatch(/Jun|2026/);
   });
 
+  it("keeps runtime and queue wait percentiles visible on the jobs dashboard", async () => {
+    window.history.replaceState({}, "", "/");
+    class ResizeObserverMock {
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+    }
+    vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+    const jsonResponse = (body: unknown) => Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } }));
+    const fetchMock = vi.fn((input: RequestInfo | URL) => {
+      const path = String(input);
+      if (path.startsWith("/api/metrics/summary")) return jsonResponse({ metrics: {
+        db_exists: true,
+        schema_ok: true,
+        status_counts: {},
+        by_repo: {},
+        by_action: {},
+        by_intent: {},
+        by_created_day: {},
+        runtime_usage: { day: [], month: [] },
+        runtime_usage_by_actor: [],
+        runtime_seconds: { median: 60, p90: 120, p99: 180 },
+        queue_wait_seconds: { median: 5, p90: 15, p99: 30 },
+      } });
+      if (path === "/api/status") return jsonResponse({ service: "github-agent-bridge-dashboard", read_only: false, admin_actions: [], webhook_configured: false, autoupdate: {} });
+      if (path === "/api/me") return jsonResponse({ user: { login: "operator", avatar_url: "", html_url: "", is_admin: true } });
+      if (path === "/api/about") return jsonResponse({ service: "github-agent-bridge", version: "0.80.0", repository_url: "https://github.com/gisce/github-agent-bridge" });
+      if (path === "/api/web-push/config") return jsonResponse({ status: { enabled: false } });
+      if (path === "/api/jobs/actors") return jsonResponse({ actors: [] });
+      if (path.startsWith("/api/jobs?")) return jsonResponse({ jobs: [] });
+      throw new Error(`Unexpected fetch: ${path}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    render(<QueryClientProvider client={client}><App /></QueryClientProvider>);
+
+    expect(await screen.findByRole("heading", { name: "Runtime percentiles" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Queue wait percentiles" })).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
   it("formats runtime usage as human-readable hours and minutes", () => {
     expect(formatRuntimeUsageSeconds(30)).toBe("30s");
     expect(formatRuntimeUsageSeconds(1800)).toBe("30m");

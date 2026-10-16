@@ -1679,6 +1679,15 @@ function App() {
                 />
               </Panel>
             </section>
+
+            <section className="grid gap-4 xl:grid-cols-2">
+              <Panel title="Runtime percentiles">
+                <PercentileChart label="runtime" values={metrics.data?.metrics.runtime_seconds} />
+              </Panel>
+              <Panel title="Queue wait percentiles">
+                <PercentileChart label="queue wait" values={metrics.data?.metrics.queue_wait_seconds} />
+              </Panel>
+            </section>
           </>
         )}
       </main>
@@ -4466,6 +4475,27 @@ function CollapsibleLogSection({
       </summary>
       <div className="min-w-0 border-t border-border bg-white px-2 py-2">{children}</div>
     </details>
+  );
+}
+
+function PercentileChart({ label, values }: { label: string; values: Percentiles | undefined }) {
+  const data = [
+    { name: "median", seconds: values?.median ?? 0 },
+    { name: "p90", seconds: values?.p90 ?? 0 },
+    { name: "p99", seconds: values?.p99 ?? 0 },
+  ];
+  return (
+    <div className="h-56">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" />
+          <XAxis dataKey="name" />
+          <YAxis tickFormatter={formatSeconds} />
+          <Tooltip formatter={(value) => [formatSeconds(Number(value)), label]} />
+          <Bar dataKey="seconds" fill="#0969da" radius={[4, 4, 0, 0]} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
 
