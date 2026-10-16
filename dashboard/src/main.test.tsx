@@ -16,6 +16,7 @@ import {
   KnowledgeRules,
   McpPage,
   ProductMeta,
+  RuntimeActorAvatarTick,
   SectionNav,
   SloDashboard,
   StatusBadge,
@@ -37,6 +38,8 @@ import {
   isSystemPath,
   isWebhooksPath,
   metricsSummaryPath,
+  RuntimeByUserChart,
+  runtimeUsageChartData,
   runtimeBucketLabel,
   selectedJobIdFromPath,
   shouldRefreshJobForSessionEvent,
@@ -88,6 +91,7 @@ function sampleSloMetrics() {
     by_intent: {},
     by_created_day: {},
     runtime_usage: { day: [], month: [] },
+    runtime_usage_by_actor: [],
     runtime_seconds: { median: null, p90: null, p99: null },
     queue_wait_seconds: { median: null, p90: null, p99: null },
     slo: {
@@ -437,6 +441,80 @@ describe("dashboard routing and API query helpers", () => {
     expect(formatRuntimeUsageSeconds(1800)).toBe("30m");
     expect(formatRuntimeUsageSeconds(5400)).toBe("1h 30m");
     expect(formatRuntimeUsageSeconds(7200)).toBe("2h");
+  });
+
+  it("merges jobs into runtime buckets for the dual-axis chart", () => {
+    const usage = {
+      day: [
+        {
+          bucket: "2026-06-02",
+          seconds: 3600,
+          minutes: 60,
+          runs: 1,
+          jobs: 1,
+          work_seconds: 3600,
+          review_seconds: 0,
+          work_runs: 1,
+          review_runs: 0,
+          work_jobs: 1,
+          review_jobs: 0,
+        },
+      ],
+      month: [],
+    };
+
+    const daily = runtimeUsageChartData(usage, { "2026-06-02": 3, "2026-06-03": 2 }, "day");
+    const monthly = runtimeUsageChartData(usage, { "2026-06-02": 3, "2026-06-03": 2, "2026-07-01": 1 }, "month");
+
+    expect(daily.map(({ bucket, jobs, work_seconds, review_seconds }) => ({ bucket, jobs, work_seconds, review_seconds }))).toEqual([
+      { bucket: "2026-06-02", jobs: 3, work_seconds: 3600, review_seconds: 0 },
+      { bucket: "2026-06-03", jobs: 2, work_seconds: 0, review_seconds: 0 },
+    ]);
+    expect(monthly.map(({ bucket, jobs }) => ({ bucket, jobs }))).toEqual([
+      { bucket: "2026-06", jobs: 5 },
+      { bucket: "2026-07", jobs: 1 },
+    ]);
+  });
+
+  it("renders work and review runtime totals by user", () => {
+    class ResizeObserverMock {
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+    }
+    vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+    render(
+      <RuntimeByUserChart
+        usage={[
+          { actor: "alice", avatar_url: "https://avatars.githubusercontent.com/u/1?v=4", seconds: 9000, minutes: 150, runs: 2, work_seconds: 7200, review_seconds: 1800, work_runs: 1, review_runs: 1 },
+          { actor: "bob", avatar_url: null, seconds: 3600, minutes: 60, runs: 1, work_seconds: 0, review_seconds: 3600, work_runs: 0, review_runs: 1 },
+        ]}
+        loading={false}
+        totalJobs={3}
+      />,
+    );
+
+    expect(screen.getByText("3h 30m consumed across 2 users")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Runtime usage by user chart" })).toBeInTheDocument();
+    vi.unstubAllGlobals();
+  });
+
+  it("renders the GitHub avatar and user name together as the runtime axis tick", () => {
+    render(
+      <svg>
+        <RuntimeActorAvatarTick
+          x={40}
+          y={20}
+          payload={{ value: "alice" }}
+          usage={[
+            { actor: "alice", avatar_url: "https://avatars.githubusercontent.com/u/1?v=4", seconds: 9000, minutes: 150, runs: 2, work_seconds: 7200, review_seconds: 1800, work_runs: 1, review_runs: 1 },
+          ]}
+        />
+      </svg>,
+    );
+
+    expect(screen.getByLabelText("@alice avatar")).toHaveAttribute("href", "https://avatars.githubusercontent.com/u/1?v=4");
+    expect(screen.getByText("@alice", { selector: "text" })).toBeInTheDocument();
   });
 
   it("renders SLO rates, latency percentiles, trends, and window controls", async () => {
@@ -1368,6 +1446,7 @@ describe("autoupdate notice", () => {
       by_intent: {},
       by_created_day: {},
       runtime_usage: { day: [], month: [] },
+      runtime_usage_by_actor: [],
       runtime_seconds: { median: null, p90: null, p99: null },
       queue_wait_seconds: { median: null, p90: null, p99: null },
     };

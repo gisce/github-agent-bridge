@@ -322,6 +322,7 @@ def test_slo_summary_handles_missing_database_and_invalid_window(tmp_path):
     [
         ("pending", "pending migrations 5"),
         ("malformed", "source_received_at"),
+        ("missing_avatar", "trigger_actor_avatar_url"),
     ],
 )
 def test_metrics_api_degrades_safely_for_incompatible_schema(
@@ -334,8 +335,10 @@ def test_metrics_api_degrades_safely_for_incompatible_schema(
     with queue.connect() as con:
         if schema_damage == "pending":
             con.execute("DELETE FROM schema_migrations WHERE version=5")
-        else:
+        elif schema_damage == "malformed":
             con.execute("ALTER TABLE jobs DROP COLUMN source_received_at")
+        else:
+            con.execute("ALTER TABLE jobs DROP COLUMN trigger_actor_avatar_url")
 
     client = TestClient(create_app(DashboardConfig(db=db, require_auth=False)))
 
@@ -348,6 +351,7 @@ def test_metrics_api_degrades_safely_for_incompatible_schema(
     assert expected_error in metrics["schema_error"]
     assert metrics["status_counts"] == {}
     assert metrics["runtime_usage"] == {"day": [], "month": []}
+    assert metrics["runtime_usage_by_actor"] == []
     assert metrics["runtime_seconds"] == {
         "median": None,
         "p90": None,

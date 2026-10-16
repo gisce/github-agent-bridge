@@ -851,6 +851,50 @@ def test_dashboard_metrics_groups_runtime_usage_by_requested_timezone(tmp_path):
     assert payload["runtime_usage"] == metrics["runtime_usage"]
 
 
+def test_dashboard_metrics_groups_runtime_usage_by_actor_and_intent(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    q = JobQueue(db)
+    alice_work, _ = q.enqueue(notif(uid=1, mid="<1@github.com>"), Policy(trusted_orgs=["gisce"]))
+    alice_review, _ = q.enqueue(
+        notif(uid=2, mid="<2@github.com>", body="@pilipilisbot https://github.com/gisce/erp/pull/2#issuecomment-20"),
+        Policy(trusted_orgs=["gisce"]),
+    )
+    bob_review, _ = q.enqueue(
+        notif(uid=3, mid="<3@github.com>", body="@pilipilisbot https://github.com/gisce/erp/pull/3#issuecomment-30"),
+        Policy(trusted_orgs=["gisce"]),
+    )
+    with q.connect() as con:
+        con.execute(
+            "UPDATE jobs SET trigger_actor=?, trigger_actor_avatar_url=?, work_intent=? WHERE id=?",
+            ("Alice", "https://avatars.githubusercontent.com/u/1?v=4", "work_allowed", alice_work.id),
+        )
+        con.execute(
+            "UPDATE jobs SET trigger_actor=?, trigger_actor_avatar_url=?, work_intent=? WHERE id=?",
+            ("alice", None, "review_only", alice_review.id),
+        )
+        con.execute(
+            "UPDATE jobs SET trigger_actor=?, trigger_actor_avatar_url=?, work_intent=? WHERE id=?",
+            ("bob", "https://avatars.githubusercontent.com/u/2?v=4", "review_only", bob_review.id),
+        )
+        con.executemany(
+            """INSERT INTO job_runs(
+                job_id,attempt,started_at,finished_at,result,worker_id,session_id
+            ) VALUES(?,?,?,?,?,?,?)""",
+            [
+                (alice_work.id, 1, "2026-06-01T08:00:00Z", "2026-06-01T09:00:00Z", "done", "worker-1", "run-1"),
+                (alice_review.id, 1, "2026-06-01T09:00:00Z", "2026-06-01T09:30:00Z", "done", "worker-1", "run-2"),
+                (bob_review.id, 1, "2026-06-01T10:00:00Z", "2026-06-01T12:00:00Z", "done", "worker-2", "run-3"),
+            ],
+        )
+
+    metrics = metrics_summary(db)
+
+    assert metrics["runtime_usage_by_actor"] == [
+        {"actor": "bob", "avatar_url": "https://avatars.githubusercontent.com/u/2?v=4", "seconds": 7200, "minutes": 120.0, "runs": 1, "work_seconds": 0, "review_seconds": 7200, "work_runs": 0, "review_runs": 1},
+        {"actor": "alice", "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4", "seconds": 5400, "minutes": 90.0, "runs": 2, "work_seconds": 3600, "review_seconds": 1800, "work_runs": 1, "review_runs": 1},
+    ]
+
+
 def test_dashboard_runtime_uses_elapsed_time_across_dst_fallback(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     q = JobQueue(db)
