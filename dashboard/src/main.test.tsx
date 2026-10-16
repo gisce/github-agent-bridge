@@ -499,7 +499,7 @@ describe("dashboard routing and API query helpers", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders a GitHub avatar as the runtime user axis tick", () => {
+  it("renders the GitHub avatar and user name together as the runtime axis tick", () => {
     render(
       <svg>
         <RuntimeActorAvatarTick
@@ -514,6 +514,7 @@ describe("dashboard routing and API query helpers", () => {
     );
 
     expect(screen.getByLabelText("@alice avatar")).toHaveAttribute("href", "https://avatars.githubusercontent.com/u/1?v=4");
+    expect(screen.getByText("@alice", { selector: "text" })).toBeInTheDocument();
   });
 
   it("renders SLO rates, latency percentiles, trends, and window controls", async () => {

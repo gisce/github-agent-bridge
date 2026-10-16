@@ -4582,11 +4582,11 @@ function RuntimeByUserChart({ usage, loading, totalJobs }: { usage: RuntimeUsage
         <span>{formatRuntimeUsageSeconds(totalSeconds)} consumed across {data.length} user{data.length === 1 ? "" : "s"}</span>
       </div>
       <div className="overflow-x-auto" role="img" aria-label="Runtime usage by user chart">
-        <div className="h-64" style={{ minWidth: `${Math.max(720, data.length * 88)}px` }}>
+        <div className="h-64" style={{ minWidth: `${Math.max(720, data.length * 112)}px` }}>
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data}>
               <CartesianGrid strokeDasharray="3 3" />
-              <XAxis dataKey="actor" interval={0} height={48} tick={<RuntimeActorAvatarTick usage={data} />} tickLine={false} />
+              <XAxis dataKey="actor" interval={0} height={68} tick={<RuntimeActorAvatarTick usage={data} />} tickLine={false} />
               <YAxis tickFormatter={(value) => formatRuntimeUsageSeconds(Number(value))} />
               <Legend />
               <Tooltip
@@ -4615,6 +4615,8 @@ function RuntimeActorAvatarTick({ x = 0, y = 0, payload, usage }: RuntimeActorAv
   const row = usage.find((candidate) => candidate.actor === actor);
   const avatarUrl = runtimeActorAvatarUrl(row);
   const label = actor === "unknown" ? "unknown user" : `@${actor}`;
+  const axisLabel = actor === "unknown" ? "unknown" : `@${actor}`;
+  const visibleAxisLabel = axisLabel.length > 18 ? `${axisLabel.slice(0, 17)}…` : axisLabel;
   const clipId = React.useId().replace(/:/g, "");
   return (
     <g transform={`translate(${x},${y})`}>
@@ -4640,6 +4642,17 @@ function RuntimeActorAvatarTick({ x = 0, y = 0, payload, usage }: RuntimeActorAv
       ) : (
         <text x="0" y="22" textAnchor="middle" fontSize="12" fill="#64748b" aria-label={label}>?</text>
       )}
+      <text
+        x="0"
+        y="49"
+        textAnchor="middle"
+        fontFamily="ui-monospace, SFMono-Regular, Menlo, monospace"
+        fontSize="11"
+        fontWeight="600"
+        fill="#475569"
+      >
+        {visibleAxisLabel}
+      </text>
     </g>
   );
 }
