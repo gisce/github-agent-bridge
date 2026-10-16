@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v0.80.0 (2026-10-16)
+
+### Bug Fixes
+
+- Label dashboard runtime users
+  ([`57985a4`](https://github.com/gisce/github-agent-bridge/commit/57985a47e8f8a0cfcf305e4c76a3abcbfdafdf26))
+
+### Features
+
+- Reshape dashboard runtime reporting
+  ([`7788261`](https://github.com/gisce/github-agent-bridge/commit/77882617c67c8340eb966c0148fc9f29e67d98ed))
+
+- Show avatars in runtime usage
+  ([`cdea2f7`](https://github.com/gisce/github-agent-bridge/commit/cdea2f72c9d5057cf1a5ec8900b82265ec233a9c))
+
+
 ## v0.79.1 (2026-10-15)
 
 ### Bug Fixes
