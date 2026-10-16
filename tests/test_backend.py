@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from datetime import UTC, datetime
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -887,12 +888,49 @@ def test_dashboard_metrics_groups_runtime_usage_by_actor_and_intent(tmp_path):
             ],
         )
 
-    metrics = metrics_summary(db)
+    metrics = metrics_summary(db, runtime_window="all")
 
     assert metrics["runtime_usage_by_actor"] == [
         {"actor": "bob", "avatar_url": "https://avatars.githubusercontent.com/u/2?v=4", "seconds": 7200, "minutes": 120.0, "runs": 1, "work_seconds": 0, "review_seconds": 7200, "work_runs": 0, "review_runs": 1},
         {"actor": "alice", "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4", "seconds": 5400, "minutes": 90.0, "runs": 2, "work_seconds": 3600, "review_seconds": 1800, "work_runs": 1, "review_runs": 1},
     ]
+
+
+def test_dashboard_metrics_filters_runtime_usage_by_actor_window(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    q = JobQueue(db)
+    recent, _ = q.enqueue(notif(uid=1, mid="<1@github.com>"), Policy(trusted_orgs=["gisce"]))
+    monthly, _ = q.enqueue(
+        notif(uid=2, mid="<2@github.com>", body="@pilipilisbot https://github.com/gisce/erp/pull/2#issuecomment-20"),
+        Policy(trusted_orgs=["gisce"]),
+    )
+    historical, _ = q.enqueue(
+        notif(uid=3, mid="<3@github.com>", body="@pilipilisbot https://github.com/gisce/erp/pull/3#issuecomment-30"),
+        Policy(trusted_orgs=["gisce"]),
+    )
+    with q.connect() as con:
+        con.execute("UPDATE jobs SET trigger_actor=? WHERE id=?", ("alice", recent.id))
+        con.execute("UPDATE jobs SET trigger_actor=? WHERE id=?", ("bob", monthly.id))
+        con.execute("UPDATE jobs SET trigger_actor=? WHERE id=?", ("carol", historical.id))
+        con.executemany(
+            """INSERT INTO job_runs(
+                job_id,attempt,started_at,finished_at,result,worker_id,session_id
+            ) VALUES(?,?,?,?,?,?,?)""",
+            [
+                (recent.id, 1, "2026-10-15T08:00:00Z", "2026-10-15T09:00:00Z", "done", "worker-1", "run-1"),
+                (monthly.id, 1, "2026-09-25T08:00:00Z", "2026-09-25T10:00:00Z", "done", "worker-1", "run-2"),
+                (historical.id, 1, "2026-08-01T08:00:00Z", "2026-08-01T11:00:00Z", "done", "worker-1", "run-3"),
+            ],
+        )
+
+    now = datetime(2026, 10, 16, 8, 0, tzinfo=UTC)
+    seven_days = metrics_summary(db, runtime_window="7d", now=now)
+    thirty_days = metrics_summary(db, runtime_window="30d", now=now)
+    all_time = metrics_summary(db, runtime_window="all", now=now)
+
+    assert [row["actor"] for row in seven_days["runtime_usage_by_actor"]] == ["alice"]
+    assert [row["actor"] for row in thirty_days["runtime_usage_by_actor"]] == ["bob", "alice"]
+    assert [row["actor"] for row in all_time["runtime_usage_by_actor"]] == ["carol", "bob", "alice"]
 
 
 def test_dashboard_runtime_uses_elapsed_time_across_dst_fallback(tmp_path):

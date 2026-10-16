@@ -27,6 +27,7 @@ type MetricsSummary = {
 };
 
 type SloWindow = "24h" | "7d" | "30d";
+type RuntimeWindow = "7d" | "30d" | "all";
 
 type SloLatency = {
   unit: "seconds";
@@ -968,8 +969,8 @@ function webhookMonitoringWindow(now = new Date()) {
   };
 }
 
-function metricsSummaryPath(timezone = dashboardTimeZone, window: SloWindow = "7d") {
-  const params = new URLSearchParams({ window, timezone });
+function metricsSummaryPath(timezone = dashboardTimeZone, window: SloWindow = "7d", runtimeWindow: RuntimeWindow = "7d") {
+  const params = new URLSearchParams({ window, runtime_window: runtimeWindow, timezone });
   return `/api/metrics/summary?${params.toString()}`;
 }
 
@@ -1114,6 +1115,7 @@ function App() {
   const [executorPausePending, setExecutorPausePending] = React.useState(false);
   const [executorPauseError, setExecutorPauseError] = React.useState("");
   const [sloWindow, setSloWindow] = React.useState<SloWindow>("7d");
+  const [runtimeWindow, setRuntimeWindow] = React.useState<RuntimeWindow>("7d");
   const [pathname, setPathname] = React.useState(() => window.location.pathname);
   const [inAppPush, setInAppPush] = React.useState<InAppPushNotification | null>(null);
   const jobRouteId = selectedJobIdFromPath(pathname);
@@ -1126,7 +1128,7 @@ function App() {
   const selectedWebhookDeliveryId = selectedWebhookDeliveryIdFromPath(pathname);
   const isDashboardRoute = !isJobDetailRoute && !isKnowledgeRoute && !isMcpRoute && !isSystemRoute && !isWebhooksRoute;
   const selectedJobId = jobRouteId;
-  const metrics = useQuery({ queryKey: ["metrics", dashboardTimeZone, sloWindow], queryFn: () => api<{ metrics: MetricsSummary }>(metricsSummaryPath(dashboardTimeZone, sloWindow)), enabled: isDashboardRoute || isSystemRoute });
+  const metrics = useQuery({ queryKey: ["metrics", dashboardTimeZone, sloWindow, runtimeWindow], queryFn: () => api<{ metrics: MetricsSummary }>(metricsSummaryPath(dashboardTimeZone, sloWindow, runtimeWindow)), enabled: isDashboardRoute || isSystemRoute });
   const dashboardStatus = useQuery({ queryKey: ["dashboard-status"], queryFn: () => api<DashboardStatus>("/api/status"), refetchInterval: isSystemRoute ? 10000 : false });
   const me = useQuery({ queryKey: ["me"], queryFn: () => api<{ user: UserProfile }>("/api/me"), refetchInterval: false });
   const webhookEnabled = isWebhooksRoute && Boolean(me.data?.user?.is_admin && dashboardStatus.data?.webhook_configured);
@@ -1672,7 +1674,18 @@ function App() {
                   usage={metrics.data?.metrics.runtime_usage_by_actor}
                   loading={metrics.isLoading}
                   totalJobs={totalJobs(counts)}
+                  window={runtimeWindow}
+                  onWindowChange={setRuntimeWindow}
                 />
+              </Panel>
+            </section>
+
+            <section className="grid gap-4 xl:grid-cols-2">
+              <Panel title="Runtime percentiles">
+                <PercentileChart label="runtime" values={metrics.data?.metrics.runtime_seconds} />
+              </Panel>
+              <Panel title="Queue wait percentiles">
+                <PercentileChart label="queue wait" values={metrics.data?.metrics.queue_wait_seconds} />
               </Panel>
             </section>
           </>
@@ -4465,6 +4478,27 @@ function CollapsibleLogSection({
   );
 }
 
+function PercentileChart({ label, values }: { label: string; values: Percentiles | undefined }) {
+  const data = [
+    { name: "median", seconds: values?.median ?? 0 },
+    { name: "p90", seconds: values?.p90 ?? 0 },
+    { name: "p99", seconds: values?.p99 ?? 0 },
+  ];
+  return (
+    <div className="h-56">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" />
+          <XAxis dataKey="name" />
+          <YAxis tickFormatter={formatSeconds} />
+          <Tooltip formatter={(value) => [formatSeconds(Number(value)), label]} />
+          <Bar dataKey="seconds" fill="#0969da" radius={[4, 4, 0, 0]} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 function RuntimeUsageChart({
   usage,
   jobsByCreatedDay,
@@ -4570,18 +4604,54 @@ function emptyRuntimeUsageBucket(bucket: string): RuntimeUsageBucket {
   };
 }
 
-function RuntimeByUserChart({ usage, loading, totalJobs }: { usage: RuntimeUsageActor[] | undefined; loading: boolean; totalJobs: number }) {
+const runtimeWindows: Array<{ value: RuntimeWindow; label: string }> = [
+  { value: "7d", label: "Last 7 days" },
+  { value: "30d", label: "Last 30 days" },
+  { value: "all", label: "All time" },
+];
+
+function RuntimeByUserChart({
+  usage,
+  loading,
+  totalJobs,
+  window,
+  onWindowChange,
+}: {
+  usage: RuntimeUsageActor[] | undefined;
+  loading: boolean;
+  totalJobs: number;
+  window: RuntimeWindow;
+  onWindowChange: (window: RuntimeWindow) => void;
+}) {
   const data = usage ?? [];
   const totalSeconds = data.reduce((total, row) => total + row.seconds, 0);
-  if (loading && data.length === 0) return <EmptyState text="Loading runtime by user..." />;
-  if (data.length === 0) return <EmptyState text={totalJobs > 0 ? "No jobs have recorded user runtime yet." : "No job history available."} />;
   return (
     <div className="grid gap-3">
-      <div className="flex items-center gap-2 text-sm text-muted">
-        <UserCircle2 className="h-4 w-4" aria-hidden />
-        <span>{formatRuntimeUsageSeconds(totalSeconds)} consumed across {data.length} user{data.length === 1 ? "" : "s"}</span>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        {data.length > 0 ? (
+          <div className="flex items-center gap-2 text-sm text-muted">
+            <UserCircle2 className="h-4 w-4" aria-hidden />
+            <span>{formatRuntimeUsageSeconds(totalSeconds)} consumed across {data.length} user{data.length === 1 ? "" : "s"}</span>
+          </div>
+        ) : <span />}
+        <div className="inline-flex h-8 rounded-md border border-border bg-white p-0.5" role="group" aria-label="Runtime by user window">
+          {runtimeWindows.map((item) => (
+            <button
+              key={item.value}
+              className={cn("rounded px-2.5 text-xs font-semibold", window === item.value ? "bg-primary text-white" : "text-muted hover:bg-slate-50")}
+              type="button"
+              aria-label={item.label}
+              aria-pressed={window === item.value}
+              onClick={() => onWindowChange(item.value)}
+            >
+              {item.value === "all" ? "All" : item.value}
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="overflow-x-auto" role="img" aria-label="Runtime usage by user chart">
+      {loading && data.length === 0 ? <EmptyState text="Loading runtime by user..." /> : data.length === 0 ? (
+        <EmptyState text={totalJobs > 0 ? "No jobs have recorded user runtime in this window." : "No job history available."} />
+      ) : <div className="overflow-x-auto" role="img" aria-label="Runtime usage by user chart">
         <div className="h-64" style={{ minWidth: `${Math.max(720, data.length * 112)}px` }}>
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={data}>
@@ -4598,7 +4668,7 @@ function RuntimeByUserChart({ usage, loading, totalJobs }: { usage: RuntimeUsage
             </BarChart>
           </ResponsiveContainer>
         </div>
-      </div>
+      </div>}
     </div>
   );
 }
