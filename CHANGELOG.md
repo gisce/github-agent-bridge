@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.81.0 (2026-10-16)
+
+### Bug Fixes
+
+- Restore dashboard percentile charts
+  ([`add3568`](https://github.com/gisce/github-agent-bridge/commit/add35685c27510c4d058d79e6e2fd06edef1889a))
+
+### Features
+
+- Add runtime usage windows
+  ([`349b16d`](https://github.com/gisce/github-agent-bridge/commit/349b16db0d4a14fa42bb2aa855da8564ad316d8f))
+
+
 ## v0.80.0 (2026-10-16)
 
 ### Bug Fixes
