@@ -1512,12 +1512,14 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     def api_metrics(
         timezone: str = "UTC",
         window: str = Query("7d", pattern="^(24h|7d|30d)$"),
+        runtime_window: str = Query("7d", pattern="^(7d|30d|all)$"),
         _: str = Depends(current_user),
     ) -> dict[str, Any]:
         return {
             "metrics": queries.metrics_summary(
                 timezone_name=timezone,
                 window=window,
+                runtime_window=runtime_window,
             )
         }
 

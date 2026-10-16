@@ -372,7 +372,7 @@ def test_metrics_api_accepts_only_supported_slo_windows(tmp_path):
 
     response = client.get(
         "/api/metrics/summary",
-        params={"window": "24h", "timezone": "Europe/Madrid"},
+        params={"window": "24h", "runtime_window": "all", "timezone": "Europe/Madrid"},
     )
 
     assert response.status_code == 200
@@ -381,4 +381,8 @@ def test_metrics_api_accepts_only_supported_slo_windows(tmp_path):
     assert client.get(
         "/api/metrics/summary",
         params={"window": "90d"},
+    ).status_code == 422
+    assert client.get(
+        "/api/metrics/summary",
+        params={"runtime_window": "90d"},
     ).status_code == 422

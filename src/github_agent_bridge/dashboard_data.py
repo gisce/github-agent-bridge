@@ -36,6 +36,11 @@ SLO_WINDOWS = {
     "7d": timedelta(days=7),
     "30d": timedelta(days=30),
 }
+RUNTIME_WINDOWS = {
+    "7d": timedelta(days=7),
+    "30d": timedelta(days=30),
+    "all": None,
+}
 SERVICE_TERMINAL_OUTCOMES = ("completed", "no_op", "blocked")
 SLO_METRICS_SQL = """
 WITH service_candidates AS (
@@ -840,11 +845,17 @@ def metrics_summary(
     *,
     timezone_name: str = "UTC",
     window: str = "7d",
+    runtime_window: str = "7d",
     now: datetime | None = None,
 ) -> dict[str, Any]:
     path = Path(db).expanduser()
     timezone = dashboard_timezone(timezone_name)
     window_start, window_end = slo_window_bounds(window, now=now)
+    if runtime_window not in RUNTIME_WINDOWS:
+        raise ValueError(
+            f"unsupported runtime window {runtime_window!r}; expected one of {', '.join(RUNTIME_WINDOWS)}"
+        )
+    actor_run_rows: list[sqlite3.Row] = []
     if not path.exists():
         return empty_metrics_summary(
             db_exists=False,
@@ -865,6 +876,11 @@ def metrics_summary(
                 JOIN jobs ON jobs.id=job_runs.job_id
                 WHERE job_runs.finished_at IS NOT NULL"""
             ).fetchall()
+            actor_run_rows = runtime_rows_in_window(
+                run_rows,
+                window=runtime_window,
+                now=now,
+            )
             slo_rows = con.execute(
                 SLO_METRICS_SQL,
                 (
@@ -905,7 +921,7 @@ def metrics_summary(
         "by_intent": dict(by_intent),
         "by_created_day": dict(sorted(by_created_day.items())),
         "runtime_usage": runtime_usage(run_rows, timezone),
-        "runtime_usage_by_actor": runtime_usage_by_actor(run_rows),
+        "runtime_usage_by_actor": runtime_usage_by_actor(actor_run_rows),
         "runtime_seconds": percentiles(runtimes),
         "queue_wait_seconds": percentiles(waits),
         "slo": slo_summary(
@@ -966,6 +982,32 @@ def slo_window_bounds(
         current = current.replace(tzinfo=UTC)
     current = current.astimezone(UTC).replace(microsecond=0)
     return current - duration, current
+
+
+def runtime_rows_in_window(
+    rows: list[sqlite3.Row],
+    *,
+    window: str,
+    now: datetime | None = None,
+) -> list[sqlite3.Row]:
+    if window not in RUNTIME_WINDOWS:
+        raise ValueError(
+            f"unsupported runtime window {window!r}; expected one of {', '.join(RUNTIME_WINDOWS)}"
+        )
+    duration = RUNTIME_WINDOWS[window]
+    if duration is None:
+        return rows
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    current = current.astimezone(UTC).replace(microsecond=0)
+    window_start = current - duration
+    return [
+        row
+        for row in rows
+        if (finished := parse_utc(row["finished_at"])) is not None
+        and window_start <= finished <= current
+    ]
 
 
 def format_utc(value: datetime) -> str:
@@ -1898,9 +1940,11 @@ class DashboardQueries:
         *,
         timezone_name: str = "UTC",
         window: str = "7d",
+        runtime_window: str = "7d",
     ) -> dict[str, Any]:
         return metrics_summary(
             self.path,
             timezone_name=timezone_name,
             window=window,
+            runtime_window=runtime_window,
         )

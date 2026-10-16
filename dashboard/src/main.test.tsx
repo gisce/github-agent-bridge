@@ -430,8 +430,8 @@ describe("dashboard routing and API query helpers", () => {
   });
 
   it("requests metrics using the browser timezone and labels runtime buckets", () => {
-    expect(metricsSummaryPath("America/New_York")).toBe("/api/metrics/summary?window=7d&timezone=America%2FNew_York");
-    expect(metricsSummaryPath("Europe/Madrid", "30d")).toBe("/api/metrics/summary?window=30d&timezone=Europe%2FMadrid");
+    expect(metricsSummaryPath("America/New_York")).toBe("/api/metrics/summary?window=7d&runtime_window=7d&timezone=America%2FNew_York");
+    expect(metricsSummaryPath("Europe/Madrid", "30d", "all")).toBe("/api/metrics/summary?window=30d&runtime_window=all&timezone=Europe%2FMadrid");
     expect(runtimeBucketLabel("2026-06-02", "day")).toMatch(/Jun|2/);
     expect(runtimeBucketLabel("2026-06", "month")).toMatch(/Jun|2026/);
   });
@@ -476,13 +476,15 @@ describe("dashboard routing and API query helpers", () => {
     ]);
   });
 
-  it("renders work and review runtime totals by user", () => {
+  it("renders work and review runtime totals by user with window controls", async () => {
     class ResizeObserverMock {
       observe() {}
       disconnect() {}
       unobserve() {}
     }
     vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+    const onWindowChange = vi.fn();
+    const user = userEvent.setup();
     render(
       <RuntimeByUserChart
         usage={[
@@ -491,11 +493,16 @@ describe("dashboard routing and API query helpers", () => {
         ]}
         loading={false}
         totalJobs={3}
+        window="7d"
+        onWindowChange={onWindowChange}
       />,
     );
 
     expect(screen.getByText("3h 30m consumed across 2 users")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "Runtime usage by user chart" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Last 7 days" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(screen.getByRole("button", { name: "Last 30 days" }));
+    expect(onWindowChange).toHaveBeenCalledWith("30d");
     vi.unstubAllGlobals();
   });
 
