@@ -39,6 +39,7 @@ import {
   isWebhooksPath,
   metricsSummaryPath,
   RuntimeByUserChart,
+  RuntimeByRepositoryChart,
   runtimeUsageChartData,
   runtimeBucketLabel,
   selectedJobIdFromPath,
@@ -92,6 +93,7 @@ function sampleSloMetrics() {
     by_created_day: {},
     runtime_usage: { day: [], month: [] },
     runtime_usage_by_actor: [],
+    runtime_usage_by_repo: [],
     runtime_seconds: { median: null, p90: null, p99: null },
     queue_wait_seconds: { median: null, p90: null, p99: null },
     slo: {
@@ -457,6 +459,7 @@ describe("dashboard routing and API query helpers", () => {
         by_created_day: {},
         runtime_usage: { day: [], month: [] },
         runtime_usage_by_actor: [],
+        runtime_usage_by_repo: [],
         runtime_seconds: { median: 60, p90: 120, p99: 180 },
         queue_wait_seconds: { median: 5, p90: 15, p99: 30 },
       } });
@@ -545,6 +548,37 @@ describe("dashboard routing and API query helpers", () => {
     expect(screen.getByRole("button", { name: "Last 7 days" })).toHaveAttribute("aria-pressed", "true");
     await user.click(screen.getByRole("button", { name: "Last 30 days" }));
     expect(onWindowChange).toHaveBeenCalledWith("30d");
+    vi.unstubAllGlobals();
+  });
+
+  it("renders stacked work and review runtime by repository with window controls", async () => {
+    class ResizeObserverMock {
+      observe() {}
+      disconnect() {}
+      unobserve() {}
+    }
+    vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+    const onWindowChange = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <RuntimeByRepositoryChart
+        usage={[
+          { repo: "gisce/erp", seconds: 9000, minutes: 150, runs: 2, work_seconds: 7200, review_seconds: 1800, work_runs: 1, review_runs: 1 },
+          { repo: "gisce/github-agent-bridge", seconds: 3600, minutes: 60, runs: 1, work_seconds: 0, review_seconds: 3600, work_runs: 0, review_runs: 1 },
+        ]}
+        loading={false}
+        totalJobs={3}
+        window="7d"
+        onWindowChange={onWindowChange}
+      />,
+    );
+
+    expect(screen.getByText("3h 30m consumed across 2 repositories")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: "Runtime usage by repository chart" })).toBeInTheDocument();
+    const controls = screen.getByRole("group", { name: "Runtime by repository window" });
+    expect(within(controls).getByRole("button", { name: "Last 7 days" })).toHaveAttribute("aria-pressed", "true");
+    await user.click(within(controls).getByRole("button", { name: "All time" }));
+    expect(onWindowChange).toHaveBeenCalledWith("all");
     vi.unstubAllGlobals();
   });
 
@@ -1496,6 +1530,7 @@ describe("autoupdate notice", () => {
       by_created_day: {},
       runtime_usage: { day: [], month: [] },
       runtime_usage_by_actor: [],
+      runtime_usage_by_repo: [],
       runtime_seconds: { median: null, p90: null, p99: null },
       queue_wait_seconds: { median: null, p90: null, p99: null },
     };

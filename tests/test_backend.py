@@ -861,7 +861,7 @@ def test_dashboard_metrics_groups_runtime_usage_by_actor_and_intent(tmp_path):
         Policy(trusted_orgs=["gisce"]),
     )
     bob_review, _ = q.enqueue(
-        notif(uid=3, mid="<3@github.com>", body="@pilipilisbot https://github.com/gisce/erp/pull/3#issuecomment-30"),
+        notif(uid=3, mid="<3@github.com>", body="@pilipilisbot https://github.com/gisce/github-agent-bridge/pull/3#issuecomment-30"),
         Policy(trusted_orgs=["gisce"]),
     )
     with q.connect() as con:
@@ -893,6 +893,10 @@ def test_dashboard_metrics_groups_runtime_usage_by_actor_and_intent(tmp_path):
     assert metrics["runtime_usage_by_actor"] == [
         {"actor": "bob", "avatar_url": "https://avatars.githubusercontent.com/u/2?v=4", "seconds": 7200, "minutes": 120.0, "runs": 1, "work_seconds": 0, "review_seconds": 7200, "work_runs": 0, "review_runs": 1},
         {"actor": "alice", "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4", "seconds": 5400, "minutes": 90.0, "runs": 2, "work_seconds": 3600, "review_seconds": 1800, "work_runs": 1, "review_runs": 1},
+    ]
+    assert metrics["runtime_usage_by_repo"] == [
+        {"repo": "gisce/github-agent-bridge", "seconds": 7200, "minutes": 120.0, "runs": 1, "work_seconds": 0, "review_seconds": 7200, "work_runs": 0, "review_runs": 1},
+        {"repo": "gisce/erp", "seconds": 5400, "minutes": 90.0, "runs": 2, "work_seconds": 3600, "review_seconds": 1800, "work_runs": 1, "review_runs": 1},
     ]
 
 
@@ -931,6 +935,9 @@ def test_dashboard_metrics_filters_runtime_usage_by_actor_window(tmp_path):
     assert [row["actor"] for row in seven_days["runtime_usage_by_actor"]] == ["alice"]
     assert [row["actor"] for row in thirty_days["runtime_usage_by_actor"]] == ["bob", "alice"]
     assert [row["actor"] for row in all_time["runtime_usage_by_actor"]] == ["carol", "bob", "alice"]
+    assert seven_days["runtime_usage_by_repo"][0]["seconds"] == 3600
+    assert thirty_days["runtime_usage_by_repo"][0]["seconds"] == 10800
+    assert all_time["runtime_usage_by_repo"][0]["seconds"] == 21600
 
 
 def test_dashboard_runtime_uses_elapsed_time_across_dst_fallback(tmp_path):
