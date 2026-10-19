@@ -38,8 +38,10 @@ import {
   isSystemPath,
   isWebhooksPath,
   metricsSummaryPath,
+  runtimeRepositoryPieData,
   RuntimeByUserChart,
   RuntimeByRepositoryChart,
+  RuntimeRepositoryTooltip,
   runtimeUsageChartData,
   runtimeBucketLabel,
   selectedJobIdFromPath,
@@ -551,7 +553,7 @@ describe("dashboard routing and API query helpers", () => {
     vi.unstubAllGlobals();
   });
 
-  it("renders stacked work and review runtime by repository with window controls", async () => {
+  it("renders repository runtime percentages as a compact pie chart with window controls", async () => {
     class ResizeObserverMock {
       observe() {}
       disconnect() {}
@@ -575,11 +577,39 @@ describe("dashboard routing and API query helpers", () => {
 
     expect(screen.getByText("3h 30m consumed across 2 repositories")).toBeInTheDocument();
     expect(screen.getByRole("img", { name: "Runtime usage by repository chart" })).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Repository runtime percentages" })).toHaveTextContent("gisce/erp71.4%");
+    expect(screen.getByRole("list", { name: "Repository runtime percentages" })).toHaveTextContent("gisce/github-agent-bridge28.6%");
     const controls = screen.getByRole("group", { name: "Runtime by repository window" });
     expect(within(controls).getByRole("button", { name: "Last 7 days" })).toHaveAttribute("aria-pressed", "true");
     await user.click(within(controls).getByRole("button", { name: "All time" }));
     expect(onWindowChange).toHaveBeenCalledWith("all");
     vi.unstubAllGlobals();
+  });
+
+  it("groups repositories below two percent into Other and keeps their runtime detail", () => {
+    const data = runtimeRepositoryPieData([
+      { repo: "gisce/erp", seconds: 9600, minutes: 160, runs: 2, work_seconds: 8400, review_seconds: 1200, work_runs: 1, review_runs: 1 },
+      { repo: "gisce/small-a", seconds: 150, minutes: 2.5, runs: 1, work_seconds: 150, review_seconds: 0, work_runs: 1, review_runs: 0 },
+      { repo: "gisce/small-b", seconds: 100, minutes: 5 / 3, runs: 1, work_seconds: 0, review_seconds: 100, work_runs: 0, review_runs: 1 },
+      { repo: "gisce/zero", seconds: 0, minutes: 0, runs: 0, work_seconds: 0, review_seconds: 0, work_runs: 0, review_runs: 0 },
+    ]);
+
+    expect(data.map((row) => row.repo)).toEqual(["gisce/erp", "Other"]);
+    expect(data[1]).toMatchObject({
+      seconds: 250,
+      work_seconds: 150,
+      review_seconds: 100,
+      runs: 2,
+    });
+    expect(data[1].repositories.map((row) => row.repo)).toEqual(["gisce/small-a", "gisce/small-b"]);
+    expect(data.reduce((total, row) => total + row.percentage, 0)).toBeCloseTo(100);
+
+    render(<RuntimeRepositoryTooltip active payload={[{ payload: data[1] }]} totalSeconds={9850} />);
+    expect(screen.getByText("Other (2 repositories)")).toBeInTheDocument();
+    expect(screen.getByText("gisce/small-a")).toBeInTheDocument();
+    expect(screen.getByText("gisce/small-b")).toBeInTheDocument();
+    expect(screen.getByText("Work")).toBeInTheDocument();
+    expect(screen.getByText("Review")).toBeInTheDocument();
   });
 
   it("renders the GitHub avatar and user name together as the runtime axis tick", () => {
