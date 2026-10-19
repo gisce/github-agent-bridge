@@ -186,10 +186,14 @@ conclusions remain observational. Merged pull-request deliveries share the
 same canonical key as the equivalent IMAP merge notification, so dual ingestion
 does not enqueue cleanup twice.
 
-Coverage compares only canonical event families shared by both transports,
-starting at the first retained webhook receipt and ending before a configurable
-grace period. It excludes source-specific `email:*` fallbacks and historical
-IMAP receipts from before webhook observation began. Set
+Coverage compares canonical event families shared by both transports and also
+counts any source-specific email event that created trusted executable work.
+This keeps `email:*` and other uncorrelated IMAP events in the denominator and
+the exception queue instead of hiding the exact gaps that block promotion.
+Passive email handled as `archive_notification` remains excluded. The window
+starts at the first retained webhook receipt and ends before a configurable
+grace period; historical IMAP receipts from before webhook observation began
+remain excluded. Set
 `GITHUB_AGENT_BRIDGE_WEBHOOK_COVERAGE_GRACE_SECONDS` to change the default
 ten-minute grace period.
 

@@ -1495,9 +1495,15 @@ def test_webhook_repository_hook_ping_keeps_repository_target_when_organization_
     assert hook["admin_url"] == "https://github.com/gisce/github-agent-bridge/settings/hooks/42"
 
 
-def test_webhook_coverage_uses_comparable_window_keys_and_grace(tmp_path):
+def test_webhook_coverage_includes_actionable_uncorrelated_email_keys(
+    tmp_path, monkeypatch
+):
     db = tmp_path / "bridge.sqlite3"
-    JobQueue(db)
+    queue = JobQueue(db)
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.trigger_actor_details_for_enqueue",
+        lambda notification, ctx: None,
+    )
     now = datetime.now(UTC)
     within_window = (now - timedelta(minutes=20)).isoformat()
     rollout_start = (now - timedelta(hours=1)).isoformat()
@@ -1542,12 +1548,44 @@ def test_webhook_coverage_uses_comparable_window_keys_and_grace(tmp_path):
                 ("email-only", "hash-2", "issue_comment:created:gisce/repo:4", "accepted", within_window, within_window),
                 ("email-recent", "hash-3", "issue_comment:created:gisce/repo:5", "accepted", too_recent, too_recent),
                 ("email-old", "hash-4", "issue_comment:created:gisce/repo:6", "accepted", too_old, too_old),
-                ("email-fallback", "hash-5", "email:<fallback@github.com>", "accepted", within_window, within_window),
-                (
-                    "email-review-request", "hash-6", "email:<review-request@github.com>",
-                    "accepted", within_window, within_window,
-                ),
             ],
+        )
+    fallback_job, fallback_state = queue.enqueue(
+        Notification(
+            uid=10,
+            message_id="<fallback@github.com>",
+            subject="Re: [gisce/repo] Investigate the fallback event (Issue #7)",
+            from_addr="ecarreras <notifications@github.com>",
+            body=(
+                "@giscebot investigate this\n\n"
+                "https://github.com/gisce/repo/issues/7"
+            ),
+            auth={"spf": True, "dkim": True, "dmarc": True},
+        ),
+        Policy(trusted_orgs={"gisce"}, bot_logins={"giscebot"}),
+    )
+    assert fallback_state == "enqueued"
+    assert fallback_job is not None
+    archived_job, archived_state = queue.enqueue(
+        Notification(
+            uid=11,
+            message_id="<archived-fallback@github.com>",
+            subject="Re: [gisce/repo] Passive subscription update (Issue #8)",
+            from_addr="notifications@github.com",
+            body="https://github.com/gisce/repo/issues/8",
+            auth={"spf": True, "dkim": True, "dmarc": True},
+        ),
+        Policy(trusted_orgs={"gisce"}, bot_logins={"giscebot"}),
+    )
+    assert archived_state == "enqueued"
+    assert archived_job is not None
+    assert archived_job.action == "archive_notification"
+    with sqlite3.connect(db) as con:
+        con.execute(
+            "UPDATE ingest_receipts SET created_at=?,updated_at=? "
+            "WHERE source_key IN ('<fallback@github.com>',"
+            "'<archived-fallback@github.com>')",
+            (within_window, within_window),
         )
     client = TestClient(create_app(DashboardConfig(
         db=db,
@@ -1566,14 +1604,21 @@ def test_webhook_coverage_uses_comparable_window_keys_and_grace(tmp_path):
             "grace_seconds",
         )
     } == {
-        "both": 1, "imap_only": 1, "webhook_only": 1,
-        "imap_eligible": 2, "ratio": 0.5,
+        "both": 1, "imap_only": 2, "webhook_only": 1,
+        "imap_eligible": 3, "ratio": 1 / 3,
         "grace_seconds": 600,
     }
     assert {(item["kind"], item["event_key"]) for item in exceptions["exceptions"]} == {
         ("imap_only", "issue_comment:created:gisce/repo:4"),
+        ("imap_only", "email:<fallback@github.com>"),
         ("webhook_only", "issue_comment:created:gisce/repo:2"),
     }
+    fallback_exception = next(
+        item
+        for item in exceptions["exceptions"]
+        if item["event_key"] == "email:<fallback@github.com>"
+    )
+    assert fallback_exception["repository"] == "gisce/repo"
 
 
 def test_admin_can_request_hook_ping_and_action_is_audited(tmp_path, monkeypatch):

@@ -2066,7 +2066,7 @@ function WebhookPage({
             <MiniStat label="Webhook only" value={summary?.coverage?.webhook_only ?? 0} />
             <MiniStat label="Coverage" value={summary?.coverage?.ratio == null ? "not measurable" : `${Math.round(summary.coverage.ratio * 100)}%`} />
           </div>
-          {summary?.coverage?.window_start && summary.coverage.window_end ? <p className="mt-3 font-mono text-xs text-muted">Comparable canonical events from <TimeText value={summary.coverage.window_start} /> to <TimeText value={summary.coverage.window_end} />; newest {summary.coverage.grace_seconds ?? 0}s excluded.</p> : null}
+          {summary?.coverage?.window_start && summary.coverage.window_end ? <p className="mt-3 font-mono text-xs text-muted">Actionable IMAP events and comparable webhook events from <TimeText value={summary.coverage.window_start} /> to <TimeText value={summary.coverage.window_end} />; newest {summary.coverage.grace_seconds ?? 0}s excluded.</p> : null}
         </Panel>
         {Object.keys(summary?.enqueue ?? {}).length ? <Panel title="Canary ingestion decisions"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{Object.entries(summary?.enqueue ?? {}).sort(([left], [right]) => left.localeCompare(right)).map(([state, count]) => <MiniStat key={state} label={state} value={count} />)}</div></Panel> : null}
         <Panel title="Exceptions requiring review">
