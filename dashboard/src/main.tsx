@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider, useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, AlertTriangle, ArrowLeft, Bell, Brain, CheckCircle2, ChevronDown, Clock3, Cpu, Eye, ExternalLink, Filter, Gauge, KeyRound, Link, Pencil, RefreshCw, RotateCcw, Save, Search, ShieldCheck, TerminalSquare, TimerReset, Trash2, UserCircle2, Wrench, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
-import { Bar, BarChart, CartesianGrid, ComposedChart, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Bar, BarChart, CartesianGrid, Cell, ComposedChart, Legend, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { clsx } from "clsx";
 import { twMerge } from "tailwind-merge";
 import "./styles.css";
@@ -132,6 +132,11 @@ type RuntimeUsageRepository = {
   review_seconds: number;
   work_runs: number;
   review_runs: number;
+};
+
+type RuntimeRepositoryPieDatum = RuntimeUsageRepository & {
+  percentage: number;
+  repositories: RuntimeUsageRepository[];
 };
 
 type Percentiles = {
@@ -4631,6 +4636,9 @@ const runtimeWindows: Array<{ value: RuntimeWindow; label: string }> = [
   { value: "all", label: "All time" },
 ];
 
+const repositoryRuntimeOtherThresholdPercent = 2;
+const repositoryRuntimeColors = ["#0969da", "#8250df", "#1a7f37", "#bf8700", "#cf222e", "#0550ae", "#6e40c9", "#0a7f68"];
+
 function RuntimeByUserChart({
   usage,
   loading,
@@ -4709,6 +4717,7 @@ function RuntimeByRepositoryChart({
 }) {
   const data = usage ?? [];
   const totalSeconds = data.reduce((total, row) => total + row.seconds, 0);
+  const pieData = runtimeRepositoryPieData(data);
   return (
     <div className="grid gap-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -4735,26 +4744,120 @@ function RuntimeByRepositoryChart({
       </div>
       {loading && data.length === 0 ? <EmptyState text="Loading runtime by repository..." /> : data.length === 0 ? (
         <EmptyState text={totalJobs > 0 ? "No jobs have recorded repository runtime in this window." : "No job history available."} />
-      ) : <div className="overflow-x-auto" role="img" aria-label="Runtime usage by repository chart">
-        <div style={{ height: `${Math.max(260, data.length * 44)}px`, minWidth: "720px" }}>
+      ) : <div className="grid items-center gap-4 md:grid-cols-[minmax(0,1fr)_minmax(240px,0.8fr)]" role="img" aria-label="Runtime usage by repository chart">
+        <div className="h-72 min-w-0">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={data} layout="vertical" margin={{ left: 8, right: 20 }}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis type="number" tickFormatter={(value) => formatRuntimeUsageSeconds(Number(value))} />
-              <YAxis type="category" dataKey="repo" width={210} interval={0} tick={{ fontSize: 11 }} />
-              <Legend />
-              <Tooltip
-                formatter={(value, name) => [formatRuntimeUsageSeconds(Number(value)), String(name).toLowerCase()]}
-                labelFormatter={(repo) => String(repo)}
-              />
-              <Bar dataKey="work_seconds" name="Work" stackId="runtime" fill="#0969da" isAnimationActive={false} />
-              <Bar dataKey="review_seconds" name="Review" stackId="runtime" fill="#8250df" radius={[0, 4, 4, 0]} isAnimationActive={false} />
-            </BarChart>
+            <PieChart>
+              <Pie
+                data={pieData}
+                dataKey="seconds"
+                nameKey="repo"
+                innerRadius="54%"
+                outerRadius="86%"
+                paddingAngle={1}
+                stroke="#ffffff"
+                strokeWidth={2}
+                labelLine={false}
+                label={({ percent }) => formatRuntimePercentage((percent ?? 0) * 100)}
+                isAnimationActive={false}
+              >
+                {pieData.map((row, index) => (
+                  <Cell key={row.repo} fill={row.repo === "Other" ? "#94a3b8" : repositoryRuntimeColors[index % repositoryRuntimeColors.length]} />
+                ))}
+              </Pie>
+              <Tooltip content={<RuntimeRepositoryTooltip totalSeconds={totalSeconds} />} />
+            </PieChart>
           </ResponsiveContainer>
         </div>
+        <ul className="grid min-w-0 gap-2" aria-label="Repository runtime percentages">
+          {pieData.map((row, index) => (
+            <li key={row.repo} className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 text-sm">
+              <span
+                className="h-3 w-3 rounded-sm"
+                style={{ backgroundColor: row.repo === "Other" ? "#94a3b8" : repositoryRuntimeColors[index % repositoryRuntimeColors.length] }}
+                aria-hidden
+              />
+              <span className="truncate font-mono text-xs" title={row.repo}>
+                {row.repo === "Other" ? `Other (${row.repositories.length})` : row.repo}
+              </span>
+              <span className="font-semibold tabular-nums">{formatRuntimePercentage(row.percentage)}</span>
+            </li>
+          ))}
+        </ul>
       </div>}
     </div>
   );
+}
+
+function runtimeRepositoryPieData(usage: RuntimeUsageRepository[]): RuntimeRepositoryPieDatum[] {
+  const rows = usage.filter((row) => row.seconds > 0).sort((left, right) => right.seconds - left.seconds);
+  const totalSeconds = rows.reduce((total, row) => total + row.seconds, 0);
+  if (totalSeconds <= 0) return [];
+
+  const visible: RuntimeRepositoryPieDatum[] = [];
+  const other: RuntimeUsageRepository[] = [];
+  for (const row of rows) {
+    const percentage = row.seconds / totalSeconds * 100;
+    if (percentage < repositoryRuntimeOtherThresholdPercent) {
+      other.push(row);
+    } else {
+      visible.push({ ...row, percentage, repositories: [row] });
+    }
+  }
+  if (other.length > 0) {
+    const aggregate = other.reduce<RuntimeUsageRepository>((total, row) => ({
+      repo: "Other",
+      seconds: total.seconds + row.seconds,
+      minutes: total.minutes + row.minutes,
+      runs: total.runs + row.runs,
+      work_seconds: total.work_seconds + row.work_seconds,
+      review_seconds: total.review_seconds + row.review_seconds,
+      work_runs: total.work_runs + row.work_runs,
+      review_runs: total.review_runs + row.review_runs,
+    }), { repo: "Other", seconds: 0, minutes: 0, runs: 0, work_seconds: 0, review_seconds: 0, work_runs: 0, review_runs: 0 });
+    visible.push({ ...aggregate, percentage: aggregate.seconds / totalSeconds * 100, repositories: other });
+  }
+  return visible;
+}
+
+function RuntimeRepositoryTooltip({
+  active,
+  payload,
+  totalSeconds,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload?: RuntimeRepositoryPieDatum }>;
+  totalSeconds: number;
+}) {
+  const row = payload?.[0]?.payload;
+  if (!active || !row) return null;
+  return (
+    <div className="min-w-56 rounded-md border border-border bg-white p-3 text-xs shadow-lg">
+      <div className="font-mono font-semibold text-foreground">
+        {row.repo === "Other" ? `Other (${row.repositories.length} repositor${row.repositories.length === 1 ? "y" : "ies"})` : row.repo}
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-muted">
+        <span>Total</span><span className="text-right font-semibold text-foreground">{formatRuntimeUsageSeconds(row.seconds)} · {formatRuntimePercentage(row.seconds / totalSeconds * 100)}</span>
+        <span>Work</span><span className="text-right text-foreground">{formatRuntimeUsageSeconds(row.work_seconds)}</span>
+        <span>Review</span><span className="text-right text-foreground">{formatRuntimeUsageSeconds(row.review_seconds)}</span>
+        <span>Runs</span><span className="text-right text-foreground">{row.runs}</span>
+      </div>
+      {row.repo === "Other" ? (
+        <div className="mt-2 max-h-40 overflow-auto border-t border-border pt-2">
+          {row.repositories.map((repository) => (
+            <div key={repository.repo} className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 py-0.5">
+              <span className="truncate font-mono" title={repository.repo}>{repository.repo}</span>
+              <span className="tabular-nums text-muted">{formatRuntimePercentage(repository.seconds / totalSeconds * 100)} · {formatRuntimeUsageSeconds(repository.seconds)}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function formatRuntimePercentage(value: number) {
+  return `${value.toFixed(1)}%`;
 }
 
 type RuntimeActorAvatarTickProps = {
@@ -5253,6 +5356,7 @@ export {
   ProductMeta,
   RuntimeByUserChart,
   RuntimeByRepositoryChart,
+  RuntimeRepositoryTooltip,
   RuntimeActorAvatarTick,
   SectionNav,
   SloDashboard,
@@ -5282,6 +5386,7 @@ export {
   groupTranscriptEntries,
   formatRuntimeUsageSeconds,
   metricsSummaryPath,
+  runtimeRepositoryPieData,
   runtimeUsageChartData,
   runtimeBucketLabel,
   selectedJobIdFromPath,
