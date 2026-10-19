@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v0.82.1 (2026-10-19)
+
+### Bug Fixes
+
+- Compact repository runtime chart
+  ([`c077043`](https://github.com/gisce/github-agent-bridge/commit/c0770438173dd2c1b60563b152a7bd12d00e2c40))
+
+- Show single repository in Other tooltip
+  ([`042476a`](https://github.com/gisce/github-agent-bridge/commit/042476a0a0b410ee9e59fbdb2453005d804e5681))
+
+
 ## v0.82.0 (2026-10-19)
 
 ### Features
