@@ -4834,7 +4834,7 @@ function RuntimeRepositoryTooltip({
   return (
     <div className="min-w-56 rounded-md border border-border bg-white p-3 text-xs shadow-lg">
       <div className="font-mono font-semibold text-foreground">
-        {row.repo === "Other" ? `Other (${row.repositories.length} repositories)` : row.repo}
+        {row.repo === "Other" ? `Other (${row.repositories.length} repositor${row.repositories.length === 1 ? "y" : "ies"})` : row.repo}
       </div>
       <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-muted">
         <span>Total</span><span className="text-right font-semibold text-foreground">{formatRuntimeUsageSeconds(row.seconds)} · {formatRuntimePercentage(row.seconds / totalSeconds * 100)}</span>
@@ -4842,7 +4842,7 @@ function RuntimeRepositoryTooltip({
         <span>Review</span><span className="text-right text-foreground">{formatRuntimeUsageSeconds(row.review_seconds)}</span>
         <span>Runs</span><span className="text-right text-foreground">{row.runs}</span>
       </div>
-      {row.repositories.length > 1 ? (
+      {row.repo === "Other" ? (
         <div className="mt-2 max-h-40 overflow-auto border-t border-border pt-2">
           {row.repositories.map((repository) => (
             <div key={repository.repo} className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 py-0.5">

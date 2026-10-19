@@ -612,6 +612,20 @@ describe("dashboard routing and API query helpers", () => {
     expect(screen.getByText("Review")).toBeInTheDocument();
   });
 
+  it("shows the repository detail when Other contains a single repository", () => {
+    const data = runtimeRepositoryPieData([
+      { repo: "gisce/erp", seconds: 9900, minutes: 165, runs: 2, work_seconds: 8400, review_seconds: 1500, work_runs: 1, review_runs: 1 },
+      { repo: "gisce/small", seconds: 100, minutes: 5 / 3, runs: 1, work_seconds: 100, review_seconds: 0, work_runs: 1, review_runs: 0 },
+    ]);
+
+    expect(data.map((row) => row.repo)).toEqual(["gisce/erp", "Other"]);
+    expect(data[1].repositories.map((row) => row.repo)).toEqual(["gisce/small"]);
+
+    render(<RuntimeRepositoryTooltip active payload={[{ payload: data[1] }]} totalSeconds={10000} />);
+    expect(screen.getByText("Other (1 repository)")).toBeInTheDocument();
+    expect(screen.getByText("gisce/small")).toBeInTheDocument();
+  });
+
   it("renders the GitHub avatar and user name together as the runtime axis tick", () => {
     render(
       <svg>
