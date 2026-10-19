@@ -21,6 +21,7 @@ type MetricsSummary = {
   by_created_day: Record<string, number>;
   runtime_usage: RuntimeUsage;
   runtime_usage_by_actor: RuntimeUsageActor[];
+  runtime_usage_by_repo: RuntimeUsageRepository[];
   runtime_seconds: Percentiles;
   queue_wait_seconds: Percentiles;
   slo?: SloSummary;
@@ -113,6 +114,17 @@ type RuntimeUsageBucket = {
 type RuntimeUsageActor = {
   actor: string;
   avatar_url: string | null;
+  seconds: number;
+  minutes: number;
+  runs: number;
+  work_seconds: number;
+  review_seconds: number;
+  work_runs: number;
+  review_runs: number;
+};
+
+type RuntimeUsageRepository = {
+  repo: string;
   seconds: number;
   minutes: number;
   runs: number;
@@ -1672,6 +1684,15 @@ function App() {
               <Panel title="Runtime by user">
                 <RuntimeByUserChart
                   usage={metrics.data?.metrics.runtime_usage_by_actor}
+                  loading={metrics.isLoading}
+                  totalJobs={totalJobs(counts)}
+                  window={runtimeWindow}
+                  onWindowChange={setRuntimeWindow}
+                />
+              </Panel>
+              <Panel title="Runtime by repository">
+                <RuntimeByRepositoryChart
+                  usage={metrics.data?.metrics.runtime_usage_by_repo}
                   loading={metrics.isLoading}
                   totalJobs={totalJobs(counts)}
                   window={runtimeWindow}
@@ -4673,6 +4694,69 @@ function RuntimeByUserChart({
   );
 }
 
+function RuntimeByRepositoryChart({
+  usage,
+  loading,
+  totalJobs,
+  window,
+  onWindowChange,
+}: {
+  usage: RuntimeUsageRepository[] | undefined;
+  loading: boolean;
+  totalJobs: number;
+  window: RuntimeWindow;
+  onWindowChange: (window: RuntimeWindow) => void;
+}) {
+  const data = usage ?? [];
+  const totalSeconds = data.reduce((total, row) => total + row.seconds, 0);
+  return (
+    <div className="grid gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        {data.length > 0 ? (
+          <div className="flex items-center gap-2 text-sm text-muted">
+            <TimerReset className="h-4 w-4" aria-hidden />
+            <span>{formatRuntimeUsageSeconds(totalSeconds)} consumed across {data.length} repositor{data.length === 1 ? "y" : "ies"}</span>
+          </div>
+        ) : <span />}
+        <div className="inline-flex h-8 rounded-md border border-border bg-white p-0.5" role="group" aria-label="Runtime by repository window">
+          {runtimeWindows.map((item) => (
+            <button
+              key={item.value}
+              className={cn("rounded px-2.5 text-xs font-semibold", window === item.value ? "bg-primary text-white" : "text-muted hover:bg-slate-50")}
+              type="button"
+              aria-label={item.label}
+              aria-pressed={window === item.value}
+              onClick={() => onWindowChange(item.value)}
+            >
+              {item.value === "all" ? "All" : item.value}
+            </button>
+          ))}
+        </div>
+      </div>
+      {loading && data.length === 0 ? <EmptyState text="Loading runtime by repository..." /> : data.length === 0 ? (
+        <EmptyState text={totalJobs > 0 ? "No jobs have recorded repository runtime in this window." : "No job history available."} />
+      ) : <div className="overflow-x-auto" role="img" aria-label="Runtime usage by repository chart">
+        <div style={{ height: `${Math.max(260, data.length * 44)}px`, minWidth: "720px" }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={data} layout="vertical" margin={{ left: 8, right: 20 }}>
+              <CartesianGrid strokeDasharray="3 3" />
+              <XAxis type="number" tickFormatter={(value) => formatRuntimeUsageSeconds(Number(value))} />
+              <YAxis type="category" dataKey="repo" width={210} interval={0} tick={{ fontSize: 11 }} />
+              <Legend />
+              <Tooltip
+                formatter={(value, name) => [formatRuntimeUsageSeconds(Number(value)), String(name).toLowerCase()]}
+                labelFormatter={(repo) => String(repo)}
+              />
+              <Bar dataKey="work_seconds" name="Work" stackId="runtime" fill="#0969da" isAnimationActive={false} />
+              <Bar dataKey="review_seconds" name="Review" stackId="runtime" fill="#8250df" radius={[0, 4, 4, 0]} isAnimationActive={false} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>}
+    </div>
+  );
+}
+
 type RuntimeActorAvatarTickProps = {
   x?: number;
   y?: number;
@@ -5168,6 +5252,7 @@ export {
   JobsList,
   ProductMeta,
   RuntimeByUserChart,
+  RuntimeByRepositoryChart,
   RuntimeActorAvatarTick,
   SectionNav,
   SloDashboard,

@@ -870,7 +870,7 @@ def metrics_summary(
             rows = con.execute("SELECT status, repo, action, work_intent, created_at, started_at, finished_at FROM jobs").fetchall()
             run_rows = con.execute(
                 """SELECT job_runs.started_at, job_runs.finished_at,
-                          jobs.work_intent, jobs.trigger_actor,
+                          jobs.repo, jobs.work_intent, jobs.trigger_actor,
                           jobs.trigger_actor_avatar_url
                 FROM job_runs
                 JOIN jobs ON jobs.id=job_runs.job_id
@@ -922,6 +922,7 @@ def metrics_summary(
         "by_created_day": dict(sorted(by_created_day.items())),
         "runtime_usage": runtime_usage(run_rows, timezone),
         "runtime_usage_by_actor": runtime_usage_by_actor(actor_run_rows),
+        "runtime_usage_by_repo": runtime_usage_by_repo(actor_run_rows),
         "runtime_seconds": percentiles(runtimes),
         "queue_wait_seconds": percentiles(waits),
         "slo": slo_summary(
@@ -952,6 +953,7 @@ def empty_metrics_summary(
         "by_created_day": {},
         "runtime_usage": {"day": [], "month": []},
         "runtime_usage_by_actor": [],
+        "runtime_usage_by_repo": [],
         "runtime_seconds": percentiles([]),
         "queue_wait_seconds": percentiles([]),
         "slo": slo_summary(
@@ -1744,6 +1746,42 @@ def runtime_usage_by_actor(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
         for values in sorted(
             users.values(),
             key=lambda item: (-item["seconds"], item["actor"].casefold()),
+        )
+    ]
+
+
+def runtime_usage_by_repo(rows: list[sqlite3.Row]) -> list[dict[str, Any]]:
+    repositories: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        seconds = completed_duration_seconds(row["started_at"], row["finished_at"])
+        if seconds is None:
+            continue
+        repo = str(row["repo"] or "").strip().lower() or "unknown"
+        mode = runtime_usage_mode(row["work_intent"])
+        current = repositories.setdefault(
+            repo,
+            {
+                "repo": repo,
+                "seconds": 0,
+                "runs": 0,
+                "work_seconds": 0,
+                "review_seconds": 0,
+                "work_runs": 0,
+                "review_runs": 0,
+            },
+        )
+        current["seconds"] += seconds
+        current["runs"] += 1
+        current[f"{mode}_seconds"] += seconds
+        current[f"{mode}_runs"] += 1
+    return [
+        {
+            **values,
+            "minutes": round(values["seconds"] / 60, 2),
+        }
+        for values in sorted(
+            repositories.values(),
+            key=lambda item: (-item["seconds"], item["repo"]),
         )
     ]
 
