@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.82.0 (2026-10-19)
+
+### Features
+
+- Chart runtime by repository
+  ([`384e38e`](https://github.com/gisce/github-agent-bridge/commit/384e38ee25589f802cc8f258f58feec8450c2ceb))
+
+
 ## v0.81.0 (2026-10-16)
 
 ### Bug Fixes
