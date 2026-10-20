@@ -24,6 +24,22 @@ def _coverage_predicate(column: str) -> str:
     ) + ")"
 
 
+def _email_coverage_predicate(event_key: str, job_alias: str) -> str:
+    """Include comparable keys plus actionable email events lacking one.
+
+    A source-specific event key is evidence of a parity gap when IMAP created
+    executable work. Passive subscription mail remains outside the promotion
+    gate so routine archive traffic cannot make webhook coverage look worse.
+    """
+    if job_alias != "j":
+        raise ValueError("unsupported email coverage job alias")
+    return (
+        f"({_coverage_predicate(event_key)} OR "
+        f"({job_alias}.decision='auto_trusted' "
+        f"AND {job_alias}.action<>'archive_notification'))"
+    )
+
+
 @dataclass(frozen=True)
 class WebhookReceipt:
     delivery_id: str
@@ -163,9 +179,10 @@ class WebhookRepository:
             ).fetchone()
             coverage = con.execute(
                 "WITH email_events AS ("
-                " SELECT event_key,MIN(created_at) created_at FROM ingest_receipts"
-                f" WHERE source='email' AND julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_coverage_predicate('event_key')}"
-                " GROUP BY event_key"
+                " SELECT i.event_key,MIN(i.created_at) created_at FROM ingest_receipts i"
+                " LEFT JOIN jobs j ON j.id=i.job_id"
+                f" WHERE i.source='email' AND julianday(i.created_at)>=julianday(?) AND julianday(i.created_at)<=julianday(?) AND {_email_coverage_predicate('i.event_key', 'j')}"
+                " GROUP BY i.event_key"
                 "), webhook_events AS ("
                 " SELECT event_key,MIN(created_at) created_at FROM webhook_shadow_receipts INDEXED BY idx_webhook_shadow_coverage"
                 f" WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_coverage_predicate('event_key')}"
@@ -209,17 +226,18 @@ class WebhookRepository:
         with self.database.read("webhooks.exceptions") as con:
             rows = con.execute(
                 "WITH email_events AS MATERIALIZED ("
-                " SELECT event_key,MIN(source_key) reference,MIN(created_at) created_at"
-                " FROM ingest_receipts"
-                f" WHERE source='email' AND julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_coverage_predicate('event_key')}"
-                " GROUP BY event_key"
+                " SELECT i.event_key,MIN(i.source_key) reference,MIN(i.created_at) created_at,"
+                " MIN(j.repo) repository FROM ingest_receipts i"
+                " LEFT JOIN jobs j ON j.id=i.job_id"
+                f" WHERE i.source='email' AND julianday(i.created_at)>=julianday(?) AND julianday(i.created_at)<=julianday(?) AND {_email_coverage_predicate('i.event_key', 'j')}"
+                " GROUP BY i.event_key"
                 "), webhook_events AS MATERIALIZED ("
                 " SELECT event_key,MIN(delivery_id) reference,MIN(created_at) created_at,"
                 " MIN(repository) repository FROM webhook_shadow_receipts INDEXED BY idx_webhook_shadow_coverage"
                 f" WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_coverage_predicate('event_key')}"
                 " GROUP BY event_key"
                 "), candidates AS ("
-                " SELECT 'imap_only' kind,i.event_key,i.reference,i.created_at,NULL repository "
+                " SELECT 'imap_only' kind,i.event_key,i.reference,i.created_at,i.repository "
                 " FROM email_events i LEFT JOIN webhook_events w USING(event_key)"
                 " WHERE w.event_key IS NULL UNION ALL "
                 " SELECT 'webhook_only',w.event_key,w.reference,w.created_at,w.repository "
