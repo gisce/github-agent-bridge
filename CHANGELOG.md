@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.82.2 (2026-10-20)
+
+### Bug Fixes
+
+- Count uncorrelated IMAP work in coverage
+  ([`8ba480c`](https://github.com/gisce/github-agent-bridge/commit/8ba480c8036bbd9482a843586b2137e272c8afd1))
+
+
 ## v0.82.1 (2026-10-19)
 
 ### Bug Fixes
