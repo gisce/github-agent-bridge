@@ -33,6 +33,7 @@ def canonical_event_identity(
     event_type: str | None,
     event_action: str | None,
     object_id: int | str | None = None,
+    occurrence_id: int | str | None = None,
     occurred_at: str | None = None,
     actor: str | None = None,
     target: str | None = None,
@@ -58,14 +59,11 @@ def canonical_event_identity(
     if (event_type, action) in OCCURRENCE_ACTIONS and thread:
         normalized_actor = (actor or "").lower()
         normalized_target = (target or "").lower()
-        if not occurred_at or not normalized_actor:
+        if not occurrence_id or not occurred_at or not normalized_actor:
             return None
         if action in {"assigned", "unassigned", "review_requested", "review_request_removed"} and not normalized_target:
             return None
-        return (
-            f"{event_type}:{action}:{repo}:{thread}:{occurred_at}:"
-            f"{normalized_actor}:{normalized_target or '-'}"
-        )
+        return f"{event_type}:{action}:{repo}:{thread}:event:{occurrence_id}"
     return None
 
 
@@ -220,8 +218,17 @@ def normalize_event_envelope(
         event_type=event_type,
         event_action=event_action,
         object_id=object_id,
+        occurrence_id=(
+            resolved_event.event_id if resolved_event is not None else None
+        ),
         occurred_at=occurred_at,
-        actor=trigger_actor.login if trigger_actor else None,
+        actor=(
+            resolved_event.actor.login
+            if resolved_event is not None and resolved_event.actor is not None
+            else trigger_actor.login
+            if resolved_event is None and trigger_actor is not None
+            else None
+        ),
         target=target,
     ) or f"{source}:{source_key}"
     return NormalizedEventEnvelope(

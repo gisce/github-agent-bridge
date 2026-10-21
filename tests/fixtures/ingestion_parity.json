@@ -7,7 +7,7 @@
     "event_action": "assigned",
     "subject_type": "issue",
     "thread": 104,
-    "canonical_identity": "issues:assigned:gisce/example:104:2026-10-20T08:00:00Z:ecarreras:giscebot",
+    "canonical_identity": "issues:assigned:gisce/example:104:event:800104",
     "webhook": {
       "event_name": "issues",
       "delivery_id": "delivery-assigned",
@@ -42,7 +42,7 @@
     "event_action": "closed",
     "subject_type": "issue",
     "thread": 105,
-    "canonical_identity": "issues:closed:gisce/example:105:2026-10-20T09:00:00Z:ecarreras:-",
+    "canonical_identity": "issues:closed:gisce/example:105:event:800105",
     "webhook": {
       "event_name": "issues",
       "delivery_id": "delivery-closed",
@@ -110,7 +110,7 @@
     "event_action": "review_requested",
     "subject_type": "pull_request",
     "thread": 107,
-    "canonical_identity": "pull_request:review_requested:gisce/example:107:2026-10-20T10:30:00Z:ecarreras:giscebot",
+    "canonical_identity": "pull_request:review_requested:gisce/example:107:event:800107",
     "webhook": {
       "event_name": "pull_request",
       "delivery_id": "delivery-review-requested",

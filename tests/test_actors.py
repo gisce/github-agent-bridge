@@ -13,6 +13,7 @@ from github_agent_bridge.actors import (
     default_gh_bin,
     github_actor_details_for_context,
     normalize_github_login,
+    resolve_github_event_occurrence,
     resolve_github_event_for_notification,
     trigger_actor_from_notification,
 )
@@ -161,6 +162,96 @@ def test_resolve_github_event_for_notification_uses_message_id_occurrence(monkey
             "timeout": 3,
         }
     ]
+
+
+def test_resolve_github_event_occurrence_uses_unique_timeline_event(monkeypatch):
+    calls = []
+
+    def fake_run(args, check=False, stdout=None, stderr=None, text=False, timeout=None):
+        calls.append({"args": args, "timeout": timeout})
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            json.dumps(
+                [
+                    [
+                        {
+                            "id": 800103,
+                            "event": "unassigned",
+                            "created_at": "2026-10-20T08:00:00Z",
+                            "assigner": {"login": "ecarreras"},
+                            "assignee": {"login": "giscebot"},
+                        },
+                        {
+                            "id": 800104,
+                            "event": "assigned",
+                            "created_at": "2026-10-20T08:00:00Z",
+                            "assigner": {"login": "ecarreras"},
+                            "assignee": {"login": "giscebot"},
+                        },
+                    ]
+                ]
+            ),
+            "",
+        )
+
+    monkeypatch.setattr("github_agent_bridge.actors.subprocess.run", fake_run)
+
+    event = resolve_github_event_occurrence(
+        repository="gisce/example",
+        thread=104,
+        event="assigned",
+        occurred_at="2026-10-20T08:00:00Z",
+        actor_login="ecarreras",
+        target_login="giscebot",
+        timeout=3,
+    )
+
+    assert event is not None
+    assert event.event_id == 800104
+    assert event.actor is not None and event.actor.login == "ecarreras"
+    assert event.target_login == "giscebot"
+    assert calls == [
+        {
+            "args": [
+                "gh",
+                "api",
+                "--paginate",
+                "--slurp",
+                "repos/gisce/example/issues/104/events?per_page=100",
+            ],
+            "timeout": 3,
+        }
+    ]
+
+
+def test_resolve_github_event_occurrence_rejects_same_second_ambiguity(
+    monkeypatch,
+):
+    events = [
+        {
+            "id": event_id,
+            "event": "assigned",
+            "created_at": "2026-10-20T08:00:00Z",
+            "assigner": {"login": "ecarreras"},
+            "assignee": {"login": "giscebot"},
+        }
+        for event_id in (800104, 800106)
+    ]
+
+    def fake_run(args, check=False, stdout=None, stderr=None, text=False, timeout=None):
+        return subprocess.CompletedProcess(args, 0, json.dumps([events]), "")
+
+    monkeypatch.setattr("github_agent_bridge.actors.subprocess.run", fake_run)
+
+    assert resolve_github_event_occurrence(
+        repository="gisce/example",
+        thread=104,
+        event="assigned",
+        occurred_at="2026-10-20T08:00:00Z",
+        actor_login="ecarreras",
+        target_login="giscebot",
+    ) is None
 
 
 def test_resolve_github_event_for_notification_rejects_mismatched_context(

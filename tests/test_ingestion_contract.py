@@ -70,6 +70,7 @@ def test_redacted_transport_fixtures_share_the_event_contract(case):
         case["webhook"]["event_name"],
         case["webhook"]["payload"],
         source_key=case["webhook"]["delivery_id"],
+        resolved_event=_resolved_event(case),
     ) == webhook_identity
     envelopes = []
     for source, source_key, notification in (
@@ -97,9 +98,7 @@ def test_redacted_transport_fixtures_share_the_event_contract(case):
             source_key=source_key,
             trigger_actor=TriggerActor(login="ecarreras"),
             bot_logins=BOT_LOGINS,
-            resolved_event=(
-                _resolved_event(case) if source == "email" else None
-            ),
+            resolved_event=_resolved_event(case),
         )
         envelopes.append(envelope)
 
@@ -186,11 +185,17 @@ def test_transport_neutral_events_deduplicate_in_both_arrival_orders(
     first, first_state = queue.ingest(
         notifications[first_source][0],
         policy,
+        resolved_event=(
+            _resolved_event(case) if first_source == "webhook" else None
+        ),
         **notifications[first_source][1],
     )
     second, second_state = queue.ingest(
         notifications[second_source][0],
         policy,
+        resolved_event=(
+            _resolved_event(case) if second_source == "webhook" else None
+        ),
         **notifications[second_source][1],
     )
 
@@ -225,7 +230,7 @@ def test_transport_neutral_events_deduplicate_in_both_arrival_orders(
 @pytest.mark.parametrize(
     "case_name", ["issue_assignment", "review_requested", "issue_closed"]
 )
-def test_repeated_state_event_after_completion_creates_a_new_job(
+def test_same_second_repeated_state_event_after_completion_creates_a_new_job(
     tmp_path, case_name
 ):
     case = next(item for item in FIXTURES if item["name"] == case_name)
@@ -236,7 +241,9 @@ def test_repeated_state_event_after_completion_creates_a_new_job(
         "issue" if case["webhook"]["event_name"] == "issues" else "pull_request"
     )
     timestamp_name = "closed_at" if case_name == "issue_closed" else "updated_at"
-    second_payload[target_name][timestamp_name] = "2026-10-21T08:00:00Z"
+    assert second_payload[target_name][timestamp_name] == (
+        case["webhook"]["payload"][target_name][timestamp_name]
+    )
     second_notification = webhook_notification(
         case["webhook"]["event_name"],
         second_delivery,

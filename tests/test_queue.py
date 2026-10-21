@@ -1397,10 +1397,62 @@ def test_resolved_lifecycle_event_overrides_assignment_footer(
     assert job.work_intent == "review_only"
     assert job.status == "done"
     assert job.metadata["event_envelope"]["canonical_identity"] == (
-        "issues:closed:gisce/github-agent-bridge:292:"
-        "2026-10-20T09:00:00Z:ecarreras:-"
+        "issues:closed:gisce/github-agent-bridge:292:event:32668850071"
     )
     assert job.metadata["github_event_resolution"]["event_id"] == 32668850071
+
+
+def test_resolved_event_without_actor_keeps_receipt_scoped_identity(
+    tmp_path, monkeypatch
+):
+    resolved = ResolvedGitHubEvent(
+        event_id=32660065630,
+        event="assigned",
+        created_at="2026-10-20T08:00:00Z",
+        actor=None,
+        target_login="giscebot",
+        endpoint=(
+            "repos/gisce/github-agent-bridge/issues/events/32660065630"
+        ),
+    )
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.resolve_github_event_for_notification",
+        lambda notification, ctx: resolved,
+    )
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.trigger_actor_details_for_enqueue",
+        lambda notification, ctx: TriggerActor(login="issue-author"),
+    )
+    notification = Notification(
+        uid=10420,
+        message_id=(
+            "<gisce/github-agent-bridge/issue/190/"
+            "issue_event/32660065630@github.com>"
+        ),
+        subject="Re: [gisce/github-agent-bridge] Example (Issue #190)",
+        from_addr="notifications@github.com",
+        body=(
+            "Assigned @giscebot to this issue.\n\n"
+            "https://github.com/gisce/github-agent-bridge/issues/190"
+            "#event-32660065630"
+        ),
+        auth={"spf": True, "dkim": True, "dmarc": True},
+    )
+    queue = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = queue.enqueue(
+        notification,
+        Policy(trusted_orgs={"gisce"}, bot_logins={"giscebot"}),
+    )
+
+    assert state == "enqueued"
+    assert job is not None
+    assert job.trigger_actor == "issue-author"
+    assert job.metadata["event_envelope"]["actor"] == "issue-author"
+    assert job.metadata["event_envelope"]["canonical_identity"] == (
+        "email:<gisce/github-agent-bridge/issue/190/"
+        "issue_event/32660065630@github.com>"
+    )
 
 
 def test_enqueue_workflow_run_failed_notification(tmp_path):

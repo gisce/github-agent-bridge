@@ -50,7 +50,12 @@ from .queue import JobQueue
 from .policy import Policy
 from .systemd_status import allowed_unit_names, stream_journal_lines, systemd_status
 from .web_push import delete_subscription, save_subscription, subscription_status
-from .webhook import persist_shadow_delivery, verify_signature, webhook_notification
+from .webhook import (
+    persist_shadow_delivery,
+    resolve_github_event_for_webhook,
+    verify_signature,
+    webhook_notification,
+)
 
 
 DEFAULT_HOST = os.getenv("GITHUB_AGENT_BRIDGE_DASHBOARD_HOST", "127.0.0.1")
@@ -804,6 +809,11 @@ async def _receive_github_webhook(
     if not verify_signature(raw_payload, signature, webhook_secrets):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid_signature")
     ensure_webhook_schema()
+    resolved_event = await asyncio.to_thread(
+        resolve_github_event_for_webhook,
+        event_name,
+        payload,
+    )
     enqueue_status = None
     job_id = None
     if config.webhook_mode in {"canary", "primary"}:
@@ -827,7 +837,11 @@ async def _receive_github_webhook(
                 enqueue_status = "ignored"
             else:
                 job, enqueue_status = JobQueue(config.db).ingest(
-                    notification, policy, source="webhook", source_key=delivery_id,
+                    notification,
+                    policy,
+                    source="webhook",
+                    source_key=delivery_id,
+                    resolved_event=resolved_event,
                 )
                 job_id = job.id if job else None
     receipt = persist_shadow_delivery(
@@ -839,6 +853,7 @@ async def _receive_github_webhook(
         retention_days=config.webhook_retention_days,
         enqueue_status=enqueue_status,
         job_id=job_id,
+        resolved_event=resolved_event,
     )
     response = {
         "mode": config.webhook_mode,

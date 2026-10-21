@@ -4,7 +4,7 @@ import hashlib
 import sqlite3
 from pathlib import Path
 
-from .models import GitHubContext, Job, Notification
+from .models import GitHubContext, Job, Notification, ResolvedGitHubEvent
 from .ingestion_contract import (
     bridge_action_for_resolved_event,
     canonical_event_identity,
@@ -144,11 +144,12 @@ class JobQueue:
         *,
         source: str = "email",
         source_key: str | None = None,
+        resolved_event: ResolvedGitHubEvent | None = None,
     ) -> tuple[Job | None, str]:
         self._ensure_initialized()
         source_key = source_key or n.message_id
         ctx = extract_github_context(n.body)
-        resolved_event = (
+        resolved_event = resolved_event or (
             resolve_github_event_for_notification(n, ctx)
             if source == "email"
             else None

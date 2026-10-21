@@ -11,8 +11,8 @@ The bridge separates three identities:
   `Message-ID`; webhook delivery uses `X-GitHub-Delivery`.
 - A **GitHub event** identifies the underlying action independently of its
   transport. Comment, review and workflow-run events use their immutable
-  object IDs. Repeated state transitions use a complete occurrence signature
-  (GitHub timestamp, actor and target where applicable).
+  object IDs. Repeated state transitions use the immutable GitHub timeline
+  event ID only after the occurrence has been resolved unambiguously.
 - A **work key** (`owner/repo#number`) serializes work in one thread. It must
   not deduplicate distinct events in that thread.
 
@@ -31,28 +31,29 @@ compatibility contract used by the parity matrix.
 
 Comment and review identities use immutable GitHub object IDs. A merged PR is
 also unique within its public PR number. For assignment, review-request, close
-and reopen events, webhook ingestion reads the occurrence fields from the
-signed payload. IMAP resolves GitHub `issue_event/<id>` and
+and reopen events, IMAP resolves GitHub `issue_event/<id>` and
 `review_requested/<id>` message IDs through the exact
-`repos/{owner}/{repo}/issues/events/{id}` API resource. Both transports then
-derive the same occurrence signature from the normalized timestamp, actor and
-target. The resolved timeline ID and endpoint are retained in job metadata for
-audit without persisting another copy of the GitHub response.
+`repos/{owner}/{repo}/issues/events/{id}` API resource. Webhook payloads do not
+carry that ID, so webhook ingestion matches the signed timestamp, actor and
+target against the issue event list and accepts the result only when exactly
+one timeline event matches. Both transports then use the immutable timeline ID
+as the canonical occurrence identity. The resolved ID and endpoint are
+retained in job metadata for audit without persisting another raw GitHub
+response.
 
-The occurrence signature deliberately includes more than thread state: a later
-reassignment or renewed review request has a later GitHub timestamp and remains
-a distinct event. If the IMAP lookup fails, or either transport lacks the
-fields needed to prove identity, ingestion keeps the receipt-scoped fallback.
-That fallback prevents loss of repeated events but does not guarantee
+If an API lookup fails, a required identity field is absent, or multiple
+timeline events match the same second/actor/target tuple, ingestion keeps the
+receipt-scoped fallback. Display-actor fallback never participates in event
+identity. These fallbacks prevent loss of repeated events but do not guarantee
 cross-transport deduplication after the first job has completed; the rollout
-mismatch gate must keep such receipts visible and block promotion until they
-are explained.
+mismatch gate must keep them visible and block promotion until they are
+explained.
 
 The redacted paired fixtures verify the shared semantic envelope for every
 supported action and both arrival orders for events with provable identity.
 Transport-local fallback events may still coalesce while work is active, but a
 later reassignment, renewed review request or lifecycle transition with a
-complete occurrence signature creates a new auditable job.
+resolved timeline ID creates a new auditable job.
 
 When a notification lacks enough stable data to prove event identity, the
 event key falls back to `<source>:<source-key>`. The bridge deliberately

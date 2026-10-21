@@ -33,14 +33,13 @@ deliveries must additionally be addressed to the bot, belong to a PR authored
 by the bot, or target a PR/issue assigned to the bot. Being a reviewer,
 subscriber, or email recipient is not authorization to work.
 
-Assignment, review-request, issue-close and issue-reopen deliveries use a
-transport-neutral occurrence signature when GitHub supplies a timestamp,
-actor and target where applicable. IMAP obtains those fields by resolving the
-timeline event ID embedded in the notification `Message-ID`; webhook ingestion
-uses the corresponding signed payload fields. This avoids collapsing repeated
-state transitions on one thread. A delivery missing any required occurrence
-field stays receipt-scoped, so it remains safe against dropping later events
-but must be treated as a possible split identity by rollout monitoring.
+Assignment, review-request, issue-close and issue-reopen deliveries use an
+immutable timeline event ID only after API resolution proves one unique match.
+IMAP reads the ID embedded in the notification `Message-ID`; webhook ingestion
+matches its signed timestamp, actor and target against the issue event list.
+Missing fields, failed lookups and ambiguous same-second matches remain
+receipt-scoped, so repeated transitions cannot be dropped but may appear as a
+split identity that rollout monitoring must detect.
 
 Issue close and reopen events normalize to `archive_notification + review_only`
 from either transport. IMAP timeline notifications are classified before
