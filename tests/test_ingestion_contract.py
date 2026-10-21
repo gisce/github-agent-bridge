@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from github_agent_bridge.ingestion_contract import normalize_event_envelope
-from github_agent_bridge.models import Notification, TriggerActor
+from github_agent_bridge.models import Notification, ResolvedGitHubEvent, TriggerActor
 from github_agent_bridge.parser import (
     classify_github_action,
     classify_work_intent,
@@ -40,6 +40,24 @@ def _pair(case):
         auth={"spf": True, "dkim": True, "dmarc": True},
     )
     return webhook, email
+
+
+def _resolved_event(case):
+    data = case.get("resolved_event")
+    if data is None:
+        return None
+    actor = TriggerActor(login=data["actor"]) if data["actor"] else None
+    return ResolvedGitHubEvent(
+        event_id=data["event_id"],
+        event=data["event"],
+        created_at=data["created_at"],
+        actor=actor,
+        target_login=data["target_login"],
+        endpoint=(
+            "repos/gisce/example/issues/events/"
+            f"{data['event_id']}"
+        ),
+    )
 
 
 @pytest.mark.parametrize("case", FIXTURES, ids=lambda case: case["name"])
@@ -79,6 +97,9 @@ def test_redacted_transport_fixtures_share_the_event_contract(case):
             source_key=source_key,
             trigger_actor=TriggerActor(login="ecarreras"),
             bot_logins=BOT_LOGINS,
+            resolved_event=(
+                _resolved_event(case) if source == "email" else None
+            ),
         )
         envelopes.append(envelope)
 
@@ -93,6 +114,11 @@ def test_redacted_transport_fixtures_share_the_event_contract(case):
         )
         assert envelope.repository == "gisce/example"
         assert envelope.actor == "ecarreras"
+        assert envelope.target == (
+            case.get("resolved_event", {}).get("target_login")
+            or notification.metadata.get("github_target_login")
+            or None
+        )
         assert envelope.provenance.transport == source
         assert envelope.provenance.receipt_id == source_key
 
@@ -139,6 +165,10 @@ def test_transport_neutral_events_deduplicate_in_both_arrival_orders(
         "github_agent_bridge.queue.trigger_actor_details_for_enqueue",
         lambda notification, ctx: TriggerActor(login="ecarreras"),
     )
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.resolve_github_event_for_notification",
+        lambda notification, ctx: _resolved_event(case),
+    )
     queue = JobQueue(tmp_path / "queue.sqlite3")
     policy = Policy(trusted_orgs={"gisce"}, bot_logins=BOT_LOGINS)
     notifications = {
@@ -174,6 +204,18 @@ def test_transport_neutral_events_deduplicate_in_both_arrival_orders(
     assert first.metadata["event_envelope"]["canonical_identity"] == case[
         "canonical_identity"
     ]
+    if first_source == "email" and case.get("resolved_event"):
+        assert first.metadata["github_event_resolution"] == {
+            "status": "resolved",
+            "event_id": case["resolved_event"]["event_id"],
+            "event": case["resolved_event"]["event"],
+            "created_at": case["resolved_event"]["created_at"],
+            "target_login": case["resolved_event"]["target_login"],
+            "endpoint": (
+                "repos/gisce/example/issues/events/"
+                f"{case['resolved_event']['event_id']}"
+            ),
+        }
     with queue.connect() as con:
         assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
         assert con.execute("SELECT COUNT(*) FROM ingest_receipts").fetchone()[0] == 2
@@ -189,10 +231,16 @@ def test_repeated_state_event_after_completion_creates_a_new_job(
     case = next(item for item in FIXTURES if item["name"] == case_name)
     first_notification, _ = _pair(case)
     second_delivery = f"{case['webhook']['delivery_id']}-again"
+    second_payload = json.loads(json.dumps(case["webhook"]["payload"]))
+    target_name = (
+        "issue" if case["webhook"]["event_name"] == "issues" else "pull_request"
+    )
+    timestamp_name = "closed_at" if case_name == "issue_closed" else "updated_at"
+    second_payload[target_name][timestamp_name] = "2026-10-21T08:00:00Z"
     second_notification = webhook_notification(
         case["webhook"]["event_name"],
         second_delivery,
-        case["webhook"]["payload"],
+        second_payload,
         bot_logins=BOT_LOGINS,
     )
     assert second_notification is not None
@@ -223,11 +271,9 @@ def test_repeated_state_event_after_completion_creates_a_new_job(
 
     assert second_state == "enqueued"
     assert second is not None and second.id != first.id
-    assert first.metadata["event_envelope"]["canonical_identity"] == (
-        f"webhook:{case['webhook']['delivery_id']}"
-    )
-    assert second.metadata["event_envelope"]["canonical_identity"] == (
-        f"webhook:{second_delivery}"
+    assert (
+        first.metadata["event_envelope"]["canonical_identity"]
+        != second.metadata["event_envelope"]["canonical_identity"]
     )
     with queue.connect() as con:
         assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 2

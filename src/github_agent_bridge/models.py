@@ -18,6 +18,16 @@ class TriggerActor:
 
 
 @dataclass(frozen=True)
+class ResolvedGitHubEvent:
+    event_id: int
+    event: str
+    created_at: str | None
+    actor: TriggerActor | None
+    target_login: str | None
+    endpoint: str
+
+
+@dataclass(frozen=True)
 class GitHubContext:
     urls: list[str]
     repo: str | None = None
@@ -102,6 +112,7 @@ class NormalizedEventEnvelope:
     event_type: str | None
     event_action: str | None
     actor: str | None
+    target: str | None
     occurred_at: str | None
     canonical_identity: str
     bridge_action: str

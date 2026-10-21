@@ -5,7 +5,12 @@ from threading import Barrier
 import pytest
 
 import github_agent_bridge.queue as queue_module
-from github_agent_bridge.models import GitHubContext, Notification
+from github_agent_bridge.models import (
+    GitHubContext,
+    Notification,
+    ResolvedGitHubEvent,
+    TriggerActor,
+)
 from github_agent_bridge.queue import canonical_event_key
 from github_agent_bridge.intent_classifier import IntentClassification
 from github_agent_bridge.policy import FeedbackLearning, IntentClassifier, Policy
@@ -455,6 +460,10 @@ def test_enqueue_rolls_back_job_when_acknowledgement_cannot_be_persisted(tmp_pat
 
 def test_equivalent_open_issue_notification_coalesces_after_claim(tmp_path, monkeypatch):
     monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.resolve_github_event_for_notification",
+        lambda notification, ctx: None,
+    )
     q = JobQueue(tmp_path / "q.sqlite3")
     first = Notification(
         uid=1,
@@ -1341,6 +1350,57 @@ def test_enqueue_lifecycle_issue_event_is_non_executable(
     assert job.terminal_outcome == "no_op"
     assert job.outcome_reason == "policy_auto_handled"
     assert q.stats().get("pending", 0) == 0
+
+
+def test_resolved_lifecycle_event_overrides_assignment_footer(
+    tmp_path, monkeypatch
+):
+    resolved = ResolvedGitHubEvent(
+        event_id=32668850071,
+        event="closed",
+        created_at="2026-10-20T09:00:00Z",
+        actor=TriggerActor(login="ecarreras"),
+        target_login=None,
+        endpoint=(
+            "repos/gisce/github-agent-bridge/issues/events/32668850071"
+        ),
+    )
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.resolve_github_event_for_notification",
+        lambda notification, ctx: resolved,
+    )
+    notification = Notification(
+        uid=10419,
+        message_id=(
+            "<gisce/github-agent-bridge/issue/292/"
+            "issue_event/32668850071@github.com>"
+        ),
+        subject="Re: [gisce/github-agent-bridge] Example issue (Issue #292)",
+        from_addr="ecarreras <notifications@github.com>",
+        body=(
+            "You are receiving this because you were assigned.\n\n"
+            "https://github.com/gisce/github-agent-bridge/issues/292"
+            "#event-32668850071"
+        ),
+        auth={"spf": True, "dkim": True, "dmarc": True},
+    )
+    queue = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = queue.enqueue(
+        notification,
+        Policy(trusted_orgs={"gisce"}, bot_logins={"giscebot"}),
+    )
+
+    assert state == "enqueued"
+    assert job is not None
+    assert job.action == "archive_notification"
+    assert job.work_intent == "review_only"
+    assert job.status == "done"
+    assert job.metadata["event_envelope"]["canonical_identity"] == (
+        "issues:closed:gisce/github-agent-bridge:292:"
+        "2026-10-20T09:00:00Z:ecarreras:-"
+    )
+    assert job.metadata["github_event_resolution"]["event_id"] == 32668850071
 
 
 def test_enqueue_workflow_run_failed_notification(tmp_path):

@@ -219,7 +219,15 @@ def enqueue_sync_after_merge(queue: JobQueue):
     return job
 
 
-def enqueue_pr_root_open_issue(queue: JobQueue):
+def enqueue_pr_root_open_issue(queue: JobQueue, monkeypatch):
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.resolve_github_event_for_notification",
+        lambda notification, ctx: None,
+    )
+    monkeypatch.setattr(
+        "github_agent_bridge.actors.github_actor_details_for_context",
+        lambda ctx, *, gh_bin="gh": None,
+    )
     notification = Notification(
         uid=5,
         message_id="<gisce/github-agent-bridge/pull/268/issue_event/32668850070@github.com>",
@@ -242,9 +250,11 @@ def enqueue_pr_root_open_issue(queue: JobQueue):
     return job
 
 
-def test_pr_root_work_event_is_skipped_when_pr_is_already_merged(tmp_path):
+def test_pr_root_work_event_is_skipped_when_pr_is_already_merged(
+    tmp_path, monkeypatch
+):
     queue = JobQueue(tmp_path / "bridge.sqlite3")
-    job = enqueue_pr_root_open_issue(queue)
+    job = enqueue_pr_root_open_issue(queue, monkeypatch)
     dispatcher = RecordingDispatcher()
     github = FakeGitHub(assigned=True, merged=True)
 
@@ -268,9 +278,11 @@ def test_pr_root_work_event_is_skipped_when_pr_is_already_merged(tmp_path):
     assert any(event["event_type"] == "stale_pr_event" for event in events)
 
 
-def test_pr_root_work_event_blocks_when_pr_state_cannot_be_revalidated(tmp_path):
+def test_pr_root_work_event_blocks_when_pr_state_cannot_be_revalidated(
+    tmp_path, monkeypatch
+):
     queue = JobQueue(tmp_path / "bridge.sqlite3")
-    job = enqueue_pr_root_open_issue(queue)
+    job = enqueue_pr_root_open_issue(queue, monkeypatch)
     dispatcher = RecordingDispatcher()
     github = FakeGitHub(assigned=True, merged=None)
 
@@ -290,9 +302,9 @@ def test_pr_root_work_event_blocks_when_pr_state_cannot_be_revalidated(tmp_path)
     assert "could not revalidate pull request state" in stored.last_error
 
 
-def test_pr_root_work_event_dispatches_when_pr_is_still_open(tmp_path):
+def test_pr_root_work_event_dispatches_when_pr_is_still_open(tmp_path, monkeypatch):
     queue = JobQueue(tmp_path / "bridge.sqlite3")
-    job = enqueue_pr_root_open_issue(queue)
+    job = enqueue_pr_root_open_issue(queue, monkeypatch)
     dispatcher = RecordingDispatcher()
     github = FakeGitHub(assigned=True, merged=False)
 

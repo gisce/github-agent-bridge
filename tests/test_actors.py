@@ -13,6 +13,7 @@ from github_agent_bridge.actors import (
     default_gh_bin,
     github_actor_details_for_context,
     normalize_github_login,
+    resolve_github_event_for_notification,
     trigger_actor_from_notification,
 )
 from github_agent_bridge.models import GitHubContext, Notification
@@ -94,6 +95,141 @@ def test_actor_endpoint_prefers_exact_trigger_resource():
         == "repos/gisce/erp/issues/events/28540136634"
     )
     assert actor_endpoint(GitHubContext(urls=[], repo="gisce/erp", issue_number=1)) == "repos/gisce/erp/issues/1"
+
+
+def test_resolve_github_event_for_notification_uses_message_id_occurrence(monkeypatch):
+    calls = []
+
+    def fake_run(args, check=False, stdout=None, stderr=None, text=False, timeout=None):
+        calls.append({"args": args, "timeout": timeout})
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            json.dumps(
+                {
+                    "id": 32660065630,
+                    "event": "assigned",
+                    "created_at": "2026-10-07T04:59:06Z",
+                    "actor": {"login": "giscebot", "id": 286264155},
+                    "assigner": {
+                        "login": "ecarreras",
+                        "id": 294235,
+                        "avatar_url": "https://avatars.githubusercontent.com/u/294235?v=4",
+                    },
+                    "assignee": {"login": "giscebot", "id": 286264155},
+                }
+            ),
+            "",
+        )
+
+    monkeypatch.setattr("github_agent_bridge.actors.subprocess.run", fake_run)
+    notification = Notification(
+        uid=1,
+        message_id=(
+            "<gisce/github-agent-bridge/issue/190/"
+            "issue_event/32660065630@github.com>"
+        ),
+        subject="Re: [gisce/github-agent-bridge] Example (Issue #190)",
+        from_addr="notifications@github.com",
+        body="https://github.com/gisce/github-agent-bridge/issues/190",
+    )
+    ctx = GitHubContext(
+        urls=["https://github.com/gisce/github-agent-bridge/issues/190"],
+        repo="gisce/github-agent-bridge",
+        issue_number=190,
+        target_kind="issue",
+    )
+
+    event = resolve_github_event_for_notification(notification, ctx, timeout=3)
+
+    assert event is not None
+    assert event.event_id == 32660065630
+    assert event.event == "assigned"
+    assert event.created_at == "2026-10-07T04:59:06Z"
+    assert event.target_login == "giscebot"
+    assert event.actor is not None and event.actor.login == "ecarreras"
+    assert event.endpoint == (
+        "repos/gisce/github-agent-bridge/issues/events/32660065630"
+    )
+    assert calls == [
+        {
+            "args": [
+                "gh",
+                "api",
+                "repos/gisce/github-agent-bridge/issues/events/32660065630",
+            ],
+            "timeout": 3,
+        }
+    ]
+
+
+def test_resolve_github_event_for_notification_rejects_mismatched_context(
+    monkeypatch,
+):
+    def fail_run(*args, **kwargs):
+        raise AssertionError("mismatched message IDs must not reach GitHub")
+
+    monkeypatch.setattr("github_agent_bridge.actors.subprocess.run", fail_run)
+    notification = Notification(
+        uid=1,
+        message_id="<gisce/other/issue/190/issue_event/123@github.com>",
+        subject="Re: issue",
+        from_addr="notifications@github.com",
+        body="https://github.com/gisce/github-agent-bridge/issues/190",
+    )
+    ctx = GitHubContext(
+        urls=["https://github.com/gisce/github-agent-bridge/issues/190"],
+        repo="gisce/github-agent-bridge",
+        issue_number=190,
+        target_kind="issue",
+    )
+
+    assert resolve_github_event_for_notification(notification, ctx) is None
+
+
+def test_resolve_review_request_message_id_preserves_requester_and_target(
+    monkeypatch,
+):
+    def fake_run(args, check=False, stdout=None, stderr=None, text=False, timeout=None):
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            json.dumps(
+                {
+                    "id": 800107,
+                    "event": "review_requested",
+                    "created_at": "2026-10-20T10:30:00Z",
+                    "actor": {"login": "giscebot"},
+                    "review_requester": {"login": "ecarreras", "id": 294235},
+                    "requested_reviewer": {"login": "GISCEBOT"},
+                }
+            ),
+            "",
+        )
+
+    monkeypatch.setattr("github_agent_bridge.actors.subprocess.run", fake_run)
+    notification = Notification(
+        uid=1,
+        message_id=(
+            "<gisce/example/pull/107/review_requested/800107@github.com>"
+        ),
+        subject="Re: [gisce/example] Example (PR #107)",
+        from_addr="notifications@github.com",
+        body="https://github.com/gisce/example/pull/107",
+    )
+    ctx = GitHubContext(
+        urls=["https://github.com/gisce/example/pull/107"],
+        repo="gisce/example",
+        issue_number=107,
+        target_kind="issue",
+    )
+
+    event = resolve_github_event_for_notification(notification, ctx)
+
+    assert event is not None
+    assert event.event == "review_requested"
+    assert event.target_login == "giscebot"
+    assert event.actor is not None and event.actor.login == "ecarreras"
 
 
 def test_github_actor_lookup_is_bounded_by_timeout(monkeypatch):

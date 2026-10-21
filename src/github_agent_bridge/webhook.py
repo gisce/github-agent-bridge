@@ -58,6 +58,8 @@ def canonical_webhook_event_key(
     repo = str(repository.get("full_name") or "").lower()
     if not repo:
         return None
+    sender = payload.get("sender") if isinstance(payload.get("sender"), dict) else {}
+    actor = str(sender.get("login") or "").lower() or None
     objects = {
         "issue_comment": "comment",
         "pull_request_review_comment": "comment",
@@ -81,13 +83,29 @@ def canonical_webhook_event_key(
         number = assignment_target.get("number") if isinstance(assignment_target, dict) else None
         assignee = payload.get("assignee") or {}
         assignee_login = str(assignee.get("login") or "").lower() if isinstance(assignee, dict) else ""
-        return fallback if number and assignee_login else None
+        return canonical_event_identity(
+            repository=repo,
+            thread=number,
+            event_type=event_name,
+            event_action=action,
+            occurred_at=_webhook_event_timestamp(event_name, action, assignment_target),
+            actor=actor,
+            target=assignee_login,
+        ) or (fallback if number and assignee_login else None)
     if event_name == "pull_request" and action == "review_requested":
         pull_request = payload.get("pull_request") or {}
         number = pull_request.get("number") if isinstance(pull_request, dict) else None
         reviewer = payload.get("requested_reviewer") or {}
         requested_login = str(reviewer.get("login") or "").lower() if isinstance(reviewer, dict) else ""
-        return fallback if number and requested_login else None
+        return canonical_event_identity(
+            repository=repo,
+            thread=number,
+            event_type=event_name,
+            event_action=action,
+            occurred_at=_webhook_event_timestamp(event_name, action, pull_request),
+            actor=actor,
+            target=requested_login,
+        ) or (fallback if number and requested_login else None)
     if event_name == "pull_request" and action == "closed":
         pull_request = payload.get("pull_request") or {}
         merged = pull_request.get("merged") if isinstance(pull_request, dict) else False
@@ -102,7 +120,14 @@ def canonical_webhook_event_key(
     if event_name == "issues" and action in {"closed", "reopened"}:
         issue = payload.get("issue") or {}
         number = issue.get("number") if isinstance(issue, dict) else None
-        return fallback if number else None
+        return canonical_event_identity(
+            repository=repo,
+            thread=number,
+            event_type=event_name,
+            event_action=action,
+            occurred_at=_webhook_event_timestamp(event_name, action, issue),
+            actor=actor,
+        ) or (fallback if number else None)
     if event_name == "workflow_run":
         run = payload.get("workflow_run") or {}
         run_id = run.get("id")
@@ -120,6 +145,24 @@ def canonical_webhook_event_key(
                 object_id=run_id,
             )
     return None
+
+
+def _webhook_event_timestamp(
+    event_name: str,
+    action: str,
+    source: dict[str, Any],
+) -> str | None:
+    if event_name == "pull_request" and action == "closed":
+        value = source.get("merged_at")
+    elif event_name == "issues" and action == "closed":
+        value = source.get("closed_at")
+    elif action in {"assigned", "review_requested", "reopened"}:
+        value = source.get("updated_at")
+    elif event_name == "pull_request_review":
+        value = source.get("submitted_at")
+    else:
+        value = source.get("created_at") or source.get("updated_at")
+    return str(value) if value else None
 
 
 COMMENT_EVENT_NAMES = {
@@ -222,7 +265,7 @@ def webhook_notification(
         or payload.get("review")
         or payload.get("workflow_run")
         or (payload.get("pull_request") if event_name == "pull_request" else None)
-        or (subject if action == "assigned" else None)
+        or subject
         or {}
     )
     if not isinstance(source, dict):
@@ -320,13 +363,11 @@ def webhook_notification(
                 else {}
             ),
             **(
-                {"github_event_timestamp": str(event_timestamp)}
+                {"github_event_timestamp": event_timestamp}
                 if (
-                    event_timestamp := source.get("created_at")
-                    or source.get("submitted_at")
-                    or source.get("merged_at")
-                    or source.get("closed_at")
-                    or source.get("updated_at")
+                    event_timestamp := _webhook_event_timestamp(
+                        event_name, action, source
+                    )
                 )
                 else {}
             ),
