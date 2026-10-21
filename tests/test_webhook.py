@@ -363,7 +363,7 @@ def test_webhook_shadow_records_pull_request_review_requested_as_supported(tmp_p
     assert response.status_code == 200
     assert response.json()["status"] == "observed"
     assert response.json()["event_key"] == (
-        "pull_request:review_requested:gisce/github-agent-bridge:1829195123:giscebot"
+        "pull_request:review_requested:gisce/github-agent-bridge:233:giscebot"
     )
 
 
@@ -384,7 +384,7 @@ def test_webhook_shadow_records_assignment_as_supported(tmp_path):
     assert response.status_code == 200
     assert response.json()["status"] == "observed"
     assert response.json()["event_key"] == (
-        "issues:assigned:gisce/github-agent-bridge:1829195190:giscebot"
+        "issues:assigned:gisce/github-agent-bridge:190:giscebot"
     )
 
 
@@ -433,7 +433,7 @@ def test_webhook_canary_enqueues_pull_request_assigned_to_configured_bot(tmp_pat
     )
 
     assert response.json()["event_key"] == (
-        "pull_request:assigned:gisce/github-agent-bridge:1829195190:giscebot"
+        "pull_request:assigned:gisce/github-agent-bridge:258:giscebot"
     )
     assert response.json()["enqueue_status"] == "enqueued"
     with sqlite3.connect(config.db) as con:
@@ -538,14 +538,14 @@ def test_assignment_webhook_and_email_coalesce_into_one_active_job(tmp_path, mon
     )
 
     assert webhook.json()["enqueue_status"] == "enqueued"
-    assert email_status == "coalesced"
+    assert email_status == "duplicate"
     assert email_job is not None
     assert email_job.id == webhook.json()["job_id"]
     with sqlite3.connect(config.db) as con:
         assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
         assert con.execute("SELECT status,coalesced_count FROM jobs").fetchone() == (
             "running",
-            1,
+            0,
         )
 
 

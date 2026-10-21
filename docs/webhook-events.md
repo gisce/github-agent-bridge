@@ -33,11 +33,12 @@ deliveries must additionally be addressed to the bot, belong to a PR authored
 by the bot, or target a PR/issue assigned to the bot. Being a reviewer,
 subscriber, or email recipient is not authorization to work.
 
-IMAP close and reopen timeline notifications are archived before delivery-reason
-footers are evaluated. In particular, an assignment footer on an
+Issue close and reopen events normalize to `archive_notification + review_only`
+from either transport. IMAP timeline notifications are classified before
+delivery-reason footers are evaluated, so an assignment footer on an
 `issue_event/<id>` email cannot turn a lifecycle event into `open_issue` work.
 Webhook `pull_request:closed` remains actionable only for `merged=true`; an
-unmerged close is ignored.
+unmerged pull-request close is ignored.
 
 ## Commit status feedback
 

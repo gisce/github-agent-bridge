@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from .models import GitHubContext, Job, Notification
+from .ingestion_contract import canonical_event_identity, normalize_event_envelope
 from .parser import classify_github_action, classify_work_intent, extract_github_context
 from .persistence import (
     AcknowledgementRepository,
@@ -38,7 +39,6 @@ def canonical_event_key(
     enough immutable GitHub data. False negatives are safer than merging distinct
     user actions.
     """
-    repo = (ctx.repo or "").lower()
     identities = (
         ("issue_comment", ctx.comment_id),
         ("pull_request_review_comment", ctx.review_comment_id),
@@ -46,12 +46,34 @@ def canonical_event_key(
         ("commit_comment", ctx.commit_comment_id),
     )
     for event_type, target_id in identities:
-        if repo and target_id:
-            return f"{event_type}:created:{repo}:{target_id}"
-    if action == "sync_after_merge" and repo and ctx.issue_number:
-        return f"pull_request:merged:{repo}:{ctx.issue_number}"
-    if repo and ctx.workflow_run_id:
-        return f"workflow_run:{action}:{repo}:{ctx.workflow_run_id}"
+        identity = canonical_event_identity(
+            repository=ctx.repo,
+            thread=ctx.issue_number,
+            event_type=event_type,
+            event_action="created",
+            object_id=target_id,
+        )
+        if identity:
+            return identity
+    if action == "sync_after_merge":
+        identity = canonical_event_identity(
+            repository=ctx.repo,
+            thread=ctx.issue_number,
+            event_type="pull_request",
+            event_action="merged",
+        )
+        if identity:
+            return identity
+    if ctx.workflow_run_id:
+        identity = canonical_event_identity(
+            repository=ctx.repo,
+            thread=ctx.issue_number,
+            event_type="workflow_run",
+            event_action=action,
+            object_id=ctx.workflow_run_id,
+        )
+        if identity:
+            return identity
     return f"{source}:{source_key}"
 
 
@@ -209,6 +231,9 @@ class JobQueue:
         elif action == "sync_after_merge":
             intent = "review_only"
             metadata["intent_guardrail"] = "sync_after_merge_read_only"
+        elif action == "archive_notification":
+            intent = "review_only"
+            metadata["intent_guardrail"] = "archive_notification_read_only"
         decision = policy.decision(n, ctx, action)
         status = {"auto": "done", "ask": "waiting_approval", "deny": "denied"}.get(decision, "pending")
         trigger_actor = (
@@ -216,7 +241,18 @@ class JobQueue:
             if source == "webhook"
             else trigger_actor_details_for_enqueue(n, ctx)
         )
-        event_key = canonical_event_key(action, ctx, source, source_key)
+        envelope = normalize_event_envelope(
+            n,
+            ctx,
+            bridge_action=action,
+            work_intent=intent,
+            source=source,
+            source_key=source_key,
+            trigger_actor=trigger_actor,
+            bot_logins=policy.bot_logins,
+        )
+        event_key = envelope.canonical_identity
+        metadata["event_envelope"] = envelope.to_dict()
         payload_hash = hashlib.sha256(n.body.encode("utf-8")).hexdigest()
         if trigger_actor and trigger_actor.user_id:
             metadata["trigger_actor_id"] = trigger_actor.user_id

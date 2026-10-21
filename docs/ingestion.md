@@ -20,7 +20,22 @@ implements first-writer-wins across transports and points every duplicate
 receipt at the winning job. Both records and the job are written in one SQLite
 transaction, before the IMAP high-water mark advances.
 
-When a notification lacks enough immutable data to prove event identity, the
+Before persistence, both transports produce the same normalized event envelope
+in job metadata. The envelope records the repository, public thread number,
+subject type, normalized event type/action, triggering actor, event timestamp
+when GitHub exposes one, canonical identity, bridge action, work intent, and
+receipt provenance. Provenance and available timing data remain
+transport-specific; the semantic fields are the compatibility contract used by
+the parity matrix.
+
+Comment and review identities use immutable GitHub object IDs. Assignment,
+review-request, merge, close, and reopen identities use the public issue/PR
+number plus the normalized action and target bot where relevant, because that
+is the stable identity exposed by both webhook and notification email. The
+redacted paired fixtures cover both arrival orders so a second receipt links to
+the first job rather than depending on active-job coalescing.
+
+When a notification lacks enough stable data to prove event identity, the
 event key falls back to `<source>:<source-key>`. The bridge deliberately
 accepts a possible duplicate rather than risk dropping a legitimate action.
 
