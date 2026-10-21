@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.84.0 (2026-10-21)
+
+### Bug Fixes
+
+- Use immutable timeline occurrence ids
+  ([`cda8d96`](https://github.com/gisce/github-agent-bridge/commit/cda8d96b7c18119a75beedc0891d269ee701f3dc))
+
+### Features
+
+- Resolve IMAP timeline event identities
+  ([`ae56cf8`](https://github.com/gisce/github-agent-bridge/commit/ae56cf8791ac4da53177097d6de12758a434dcf3))
+
+
 ## v0.83.0 (2026-10-21)
 
 ### Bug Fixes
