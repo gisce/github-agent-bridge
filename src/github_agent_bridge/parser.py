@@ -27,6 +27,10 @@ MERGE_EVENT_RE = re.compile(
     r"(?:\b[\w.-]+\s+merged\s+(?:commit(?:\s+[0-9a-f]{7,40})?|[0-9a-f]{7,40}|#\d+)|\bmerged\s+#\d+)"
     r"\s+(?:into|to)\s+[\w./-]+\b"
 )
+LIFECYCLE_EVENT_RE = re.compile(
+    r"\b(?:closed|reopened) this"
+    r"(?: as (?:completed|not planned)| issue| pull request)?\b"
+)
 
 
 def decode_header_value(value: str | None) -> str:
@@ -119,6 +123,23 @@ def _is_merge_notification(text: str, ctx: GitHubContext, message_id: str | None
     return any("#event-" in url for url in ctx.urls) and bool(MERGE_EVENT_RE.search(text))
 
 
+def _is_non_actionable_lifecycle_notification(
+    text: str, ctx: GitHubContext, message_id: str | None
+) -> bool:
+    """Recognize GitHub close/reopen timeline emails before footer heuristics.
+
+    GitHub includes assignment/subscription reasons in the footer of timeline
+    event emails. Those reasons describe why the notification was delivered;
+    they must not turn a close or reopen event into new executable work.
+    """
+    normalized_message_id = (message_id or "").lower()
+    if "/issue_event/" not in normalized_message_id:
+        return False
+    if ctx.target_kind != "issue" or not any("#event-" in url for url in ctx.urls):
+        return False
+    return bool(LIFECYCLE_EVENT_RE.search(text))
+
+
 def classify_github_action(
     subject: str,
     body: str,
@@ -133,6 +154,8 @@ def classify_github_action(
         return "workflow_run_failed"
     if _is_merge_notification(text, ctx, message_id):
         return "sync_after_merge"
+    if _is_non_actionable_lifecycle_notification(text, ctx, message_id):
+        return "archive_notification"
     # PR reviews/comments should be handled as replies even when GitHub's footer
     # also says the bot was assigned to the thread.
     if flags["review_requested"]:
