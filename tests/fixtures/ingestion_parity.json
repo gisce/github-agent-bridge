@@ -1,0 +1,196 @@
+[
+  {
+    "name": "issue_assignment",
+    "bridge_action": "open_issue",
+    "work_intent": "work_allowed",
+    "event_type": "issues",
+    "event_action": "assigned",
+    "subject_type": "issue",
+    "thread": 104,
+    "canonical_identity": null,
+    "webhook": {
+      "event_name": "issues",
+      "delivery_id": "delivery-assigned",
+      "payload": {
+        "action": "assigned",
+        "repository": {"full_name": "gisce/example"},
+        "issue": {"id": 900104, "number": 104, "title": "Redacted assignment", "html_url": "https://github.com/gisce/example/issues/104"},
+        "assignee": {"login": "giscebot"},
+        "sender": {"login": "ecarreras"}
+      }
+    },
+    "email": {
+      "uid": 1,
+      "message_id": "<gisce/example/issue/104/issue_event/800104@github.com>",
+      "subject": "Re: [gisce/example] Redacted assignment (Issue #104)",
+      "from_addr": "ecarreras <notifications@github.com>",
+      "body": "ecarreras assigned @giscebot to this issue.\n\nhttps://github.com/gisce/example/issues/104#event-800104"
+    }
+  },
+  {
+    "name": "issue_closed",
+    "bridge_action": "archive_notification",
+    "work_intent": "review_only",
+    "event_type": "issues",
+    "event_action": "closed",
+    "subject_type": "issue",
+    "thread": 105,
+    "canonical_identity": null,
+    "webhook": {
+      "event_name": "issues",
+      "delivery_id": "delivery-closed",
+      "payload": {
+        "action": "closed",
+        "repository": {"full_name": "gisce/example"},
+        "issue": {"id": 900105, "number": 105, "title": "Redacted close", "html_url": "https://github.com/gisce/example/issues/105", "closed_at": "2026-10-20T09:00:00Z"},
+        "sender": {"login": "ecarreras"}
+      }
+    },
+    "email": {
+      "uid": 2,
+      "message_id": "<gisce/example/issue/105/issue_event/800105@github.com>",
+      "subject": "Re: [gisce/example] Redacted close (Issue #105)",
+      "from_addr": "ecarreras <notifications@github.com>",
+      "body": "ecarreras closed this as completed.\n\nhttps://github.com/gisce/example/issues/105#event-800105\nYou are receiving this because you were assigned."
+    }
+  },
+  {
+    "name": "pull_request_merged",
+    "bridge_action": "sync_after_merge",
+    "work_intent": "review_only",
+    "event_type": "pull_request",
+    "event_action": "merged",
+    "subject_type": "pull_request",
+    "thread": 106,
+    "canonical_identity": "pull_request:merged:gisce/example:106",
+    "webhook": {
+      "event_name": "pull_request",
+      "delivery_id": "delivery-merged",
+      "payload": {
+        "action": "closed",
+        "repository": {"full_name": "gisce/example"},
+        "pull_request": {"id": 900106, "number": 106, "title": "Redacted merge", "html_url": "https://github.com/gisce/example/pull/106", "merged": true, "merged_at": "2026-10-20T10:00:00Z", "base": {"ref": "main"}},
+        "sender": {"login": "ecarreras"}
+      }
+    },
+    "email": {
+      "uid": 3,
+      "message_id": "<gisce/example/pull/106/issue_event/800106@github.com>",
+      "subject": "Re: [gisce/example] Redacted merge (PR #106)",
+      "from_addr": "ecarreras <notifications@github.com>",
+      "body": "Merged #106 into main.\n\nhttps://github.com/gisce/example/pull/106#event-800106"
+    }
+  },
+  {
+    "name": "review_requested",
+    "bridge_action": "submit_review",
+    "work_intent": "review_only",
+    "event_type": "pull_request",
+    "event_action": "review_requested",
+    "subject_type": "pull_request",
+    "thread": 107,
+    "canonical_identity": null,
+    "webhook": {
+      "event_name": "pull_request",
+      "delivery_id": "delivery-review-requested",
+      "payload": {
+        "action": "review_requested",
+        "repository": {"full_name": "gisce/example"},
+        "pull_request": {"id": 900107, "number": 107, "title": "Redacted review request", "html_url": "https://github.com/gisce/example/pull/107"},
+        "requested_reviewer": {"login": "giscebot"},
+        "sender": {"login": "ecarreras"}
+      }
+    },
+    "email": {
+      "uid": 4,
+      "message_id": "<gisce/example/pull/107/review_requested/800107@github.com>",
+      "subject": "Re: [gisce/example] Redacted review request (PR #107)",
+      "from_addr": "ecarreras <notifications@github.com>",
+      "body": "ecarreras requested review from @giscebot on this pull request.\n\nhttps://github.com/gisce/example/pull/107"
+    }
+  },
+  {
+    "name": "issue_comment",
+    "bridge_action": "reply_comment",
+    "work_intent": "review_only",
+    "event_type": "issue_comment",
+    "event_action": "created",
+    "subject_type": "issue",
+    "thread": 108,
+    "canonical_identity": "issue_comment:created:gisce/example:7001",
+    "webhook": {
+      "event_name": "issue_comment",
+      "delivery_id": "delivery-issue-comment",
+      "payload": {
+        "action": "created",
+        "repository": {"full_name": "gisce/example"},
+        "issue": {"number": 108, "title": "Redacted issue comment", "html_url": "https://github.com/gisce/example/issues/108"},
+        "comment": {"id": 7001, "body": "@giscebot please review this issue", "html_url": "https://github.com/gisce/example/issues/108#issuecomment-7001", "created_at": "2026-10-20T11:00:00Z"},
+        "sender": {"login": "ecarreras"}
+      }
+    },
+    "email": {
+      "uid": 5,
+      "message_id": "<gisce/example/issues/108/c7001@github.com>",
+      "subject": "Re: [gisce/example] Redacted issue comment (Issue #108)",
+      "from_addr": "ecarreras <notifications@github.com>",
+      "body": "@giscebot please review this issue\n\nhttps://github.com/gisce/example/issues/108#issuecomment-7001"
+    }
+  },
+  {
+    "name": "review_comment",
+    "bridge_action": "reply_comment",
+    "work_intent": "review_only",
+    "event_type": "pull_request_review_comment",
+    "event_action": "created",
+    "subject_type": "pull_request",
+    "thread": 109,
+    "canonical_identity": "pull_request_review_comment:created:gisce/example:7002",
+    "webhook": {
+      "event_name": "pull_request_review_comment",
+      "delivery_id": "delivery-review-comment",
+      "payload": {
+        "action": "created",
+        "repository": {"full_name": "gisce/example"},
+        "pull_request": {"number": 109, "title": "Redacted review comment", "html_url": "https://github.com/gisce/example/pull/109"},
+        "comment": {"id": 7002, "body": "@giscebot please review this change", "html_url": "https://github.com/gisce/example/pull/109#discussion_r7002", "created_at": "2026-10-20T12:00:00Z"},
+        "sender": {"login": "ecarreras"}
+      }
+    },
+    "email": {
+      "uid": 6,
+      "message_id": "<gisce/example/pull/109/review_comment/7002@github.com>",
+      "subject": "Re: [gisce/example] Redacted review comment (PR #109)",
+      "from_addr": "ecarreras <notifications@github.com>",
+      "body": "@giscebot please review this change\n\nhttps://github.com/gisce/example/pull/109#discussion_r7002"
+    }
+  },
+  {
+    "name": "pull_request_review",
+    "bridge_action": "reply_comment",
+    "work_intent": "review_only",
+    "event_type": "pull_request_review",
+    "event_action": "created",
+    "subject_type": "pull_request",
+    "thread": 110,
+    "canonical_identity": "pull_request_review:created:gisce/example:7003",
+    "webhook": {
+      "event_name": "pull_request_review",
+      "delivery_id": "delivery-review",
+      "payload": {
+        "action": "submitted",
+        "repository": {"full_name": "gisce/example"},
+        "pull_request": {"number": 110, "title": "Redacted formal review", "html_url": "https://github.com/gisce/example/pull/110", "user": {"login": "someone"}},
+        "review": {"id": 7003, "state": "commented", "body": "@giscebot please review this feedback", "html_url": "https://github.com/gisce/example/pull/110#pullrequestreview-7003", "submitted_at": "2026-10-20T13:00:00Z"},
+        "sender": {"login": "ecarreras"}
+      }
+    },
+    "email": {
+      "uid": 7,
+      "message_id": "<gisce/example/pull/110/review/7003@github.com>",
+      "subject": "Re: [gisce/example] Redacted formal review (PR #110)",
+      "from_addr": "ecarreras <notifications@github.com>",
+      "body": "@giscebot please review this feedback\n\nhttps://github.com/gisce/example/pull/110#pullrequestreview-7003"
+    }
+  }
+]

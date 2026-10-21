@@ -349,7 +349,7 @@ def test_webhook_shadow_accepts_previous_rotation_secret(tmp_path):
     assert client.post("/api/webhooks/github", content=payload, headers=signed_headers(payload)).status_code == 200
 
 
-def test_webhook_shadow_records_pull_request_review_requested_as_supported(tmp_path):
+def test_webhook_shadow_uses_delivery_key_for_pull_request_review_requested(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     payload = pull_request_review_requested_payload()
     client = TestClient(create_app(DashboardConfig(db=db, require_auth=False, webhook_secrets=(SECRET,))))
@@ -362,12 +362,10 @@ def test_webhook_shadow_records_pull_request_review_requested_as_supported(tmp_p
 
     assert response.status_code == 200
     assert response.json()["status"] == "observed"
-    assert response.json()["event_key"] == (
-        "pull_request:review_requested:gisce/github-agent-bridge:1829195123:giscebot"
-    )
+    assert response.json()["event_key"] == "webhook:review-requested"
 
 
-def test_webhook_shadow_records_assignment_as_supported(tmp_path):
+def test_webhook_shadow_uses_delivery_key_for_assignment(tmp_path):
     payload = assignment_payload()
     client = TestClient(create_app(DashboardConfig(
         db=tmp_path / "bridge.sqlite3",
@@ -383,9 +381,7 @@ def test_webhook_shadow_records_assignment_as_supported(tmp_path):
 
     assert response.status_code == 200
     assert response.json()["status"] == "observed"
-    assert response.json()["event_key"] == (
-        "issues:assigned:gisce/github-agent-bridge:1829195190:giscebot"
-    )
+    assert response.json()["event_key"] == "webhook:issue-assigned"
 
 
 def test_webhook_canary_enqueues_issue_assigned_to_configured_bot(tmp_path):
@@ -432,9 +428,7 @@ def test_webhook_canary_enqueues_pull_request_assigned_to_configured_bot(tmp_pat
         headers=signed_headers(payload, delivery="pr-assigned", event="pull_request"),
     )
 
-    assert response.json()["event_key"] == (
-        "pull_request:assigned:gisce/github-agent-bridge:1829195190:giscebot"
-    )
+    assert response.json()["event_key"] == "webhook:pr-assigned"
     assert response.json()["enqueue_status"] == "enqueued"
     with sqlite3.connect(config.db) as con:
         assert con.execute(

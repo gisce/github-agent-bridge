@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, UTC
 import json
 from typing import Any
@@ -85,6 +85,31 @@ class Notification:
     source_received_at: str | None = None
     auth: dict[str, bool] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class EventProvenance:
+    transport: str
+    receipt_id: str
+    received_at: str | None
+
+
+@dataclass(frozen=True)
+class NormalizedEventEnvelope:
+    repository: str | None
+    thread: int | None
+    subject_type: str
+    event_type: str | None
+    event_action: str | None
+    actor: str | None
+    occurred_at: str | None
+    canonical_identity: str
+    bridge_action: str
+    work_intent: str
+    provenance: EventProvenance
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(frozen=True)
