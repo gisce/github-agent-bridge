@@ -1,3 +1,5 @@
+import pytest
+
 from github_agent_bridge.parser import classify_github_action, classify_work_intent, extract_github_context
 
 
@@ -122,6 +124,62 @@ def test_merge_issue_event_without_actor_is_sync_after_merge_despite_assignment_
             message_id="<gisce/github-agent-bridge/pull/268/issue_event/32668850070@github.com>",
         )
         == "sync_after_merge"
+    )
+
+
+@pytest.mark.parametrize(
+    ("target", "event_text"),
+    [
+        ("issues/292", "ecarreras closed this as completed."),
+        ("issues/292", "ecarreras reopened this issue."),
+        ("pull/284", "ecarreras closed this pull request."),
+    ],
+)
+def test_lifecycle_issue_event_is_archived_despite_assignment_footer(
+    target, event_text
+):
+    subject = "Re: [gisce/github-agent-bridge] Lifecycle event"
+    body = (
+        f"{event_text}\n\n"
+        "-- \n"
+        "Reply to this email directly or view it on GitHub:\n"
+        f"https://github.com/gisce/github-agent-bridge/{target}#event-32668850071\n"
+        "You are receiving this because you were assigned."
+    )
+
+    assert (
+        classify_github_action(
+            subject,
+            body,
+            {"giscebot"},
+            message_id=(
+                "<gisce/github-agent-bridge/issue/292/"
+                "issue_event/32668850071@github.com>"
+            ),
+        )
+        == "archive_notification"
+    )
+
+
+def test_comment_that_mentions_closed_state_is_not_treated_as_lifecycle_event():
+    subject = "Re: [gisce/github-agent-bridge] Lifecycle event (Issue #292)"
+    body = (
+        "@giscebot explain why this was closed this as completed.\n\n"
+        "https://github.com/gisce/github-agent-bridge/issues/292"
+        "#issuecomment-6309577748"
+    )
+
+    assert (
+        classify_github_action(
+            subject,
+            body,
+            {"giscebot"},
+            message_id=(
+                "<gisce/github-agent-bridge/issues/292/"
+                "issuecomment/6309577748@github.com>"
+            ),
+        )
+        == "reply_comment"
     )
 
 

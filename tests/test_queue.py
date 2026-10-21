@@ -1297,6 +1297,52 @@ def test_enqueue_merge_issue_event_forces_review_only(tmp_path, monkeypatch):
     assert job.metadata["intent_guardrail"] == "sync_after_merge_read_only"
 
 
+@pytest.mark.parametrize(
+    "event_text",
+    [
+        "ecarreras closed this as completed.",
+        "ecarreras reopened this issue.",
+    ],
+)
+def test_enqueue_lifecycle_issue_event_is_non_executable(
+    tmp_path, monkeypatch, event_text
+):
+    monkeypatch.setattr(
+        "github_agent_bridge.actors.github_actor_details_for_context",
+        lambda ctx, *, gh_bin="gh": None,
+    )
+    notification = Notification(
+        uid=10418,
+        message_id=(
+            "<gisce/github-agent-bridge/issue/292/"
+            "issue_event/32668850071@github.com>"
+        ),
+        subject="Re: [gisce/github-agent-bridge] Example issue (Issue #292)",
+        from_addr="ecarreras <notifications@github.com>",
+        body=(
+            f"{event_text}\n\n"
+            "https://github.com/gisce/github-agent-bridge/issues/292"
+            "#event-32668850071\n"
+            "You are receiving this because you were assigned."
+        ),
+        auth={"spf": True, "dkim": True, "dmarc": True},
+    )
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = q.enqueue(
+        notification,
+        Policy(trusted_orgs={"gisce"}, bot_logins={"giscebot"}),
+    )
+
+    assert state == "enqueued"
+    assert job is not None
+    assert job.action == "archive_notification"
+    assert job.status == "done"
+    assert job.terminal_outcome == "no_op"
+    assert job.outcome_reason == "policy_auto_handled"
+    assert q.stats().get("pending", 0) == 0
+
+
 def test_enqueue_workflow_run_failed_notification(tmp_path):
     body = "Run failed: https://github.com/gisce/erp/actions/runs/26325244472"
     n = Notification(uid=1, message_id="<run@github.com>", subject="[gisce/erp] Run failed: tests - main", from_addr="Edu <notifications@github.com>", body=body, auth={"spf": True, "dkim": True, "dmarc": True})
