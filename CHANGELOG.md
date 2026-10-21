@@ -2,6 +2,24 @@
 
 <!-- version list -->
 
+## v0.83.0 (2026-10-21)
+
+### Bug Fixes
+
+- Preserve repeated ingestion events
+  ([`da01473`](https://github.com/gisce/github-agent-bridge/commit/da01473940e3dc0aaa415b2eca3ee98ebad488d1))
+
+### Chores
+
+- **deps-dev**: Bump vite from 6.4.3 to 6.4.5 in /dashboard
+  ([`32e3c43`](https://github.com/gisce/github-agent-bridge/commit/32e3c43c83a6dda722bff1892abd72b53b526282))
+
+### Features
+
+- Add transport-neutral ingestion contract
+  ([`498e820`](https://github.com/gisce/github-agent-bridge/commit/498e820833d72ecf1c56902b14cdfa2e034aa6e1))
+
+
 ## v0.82.3 (2026-10-21)
 
 ### Bug Fixes
