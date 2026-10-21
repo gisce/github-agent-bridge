@@ -28,12 +28,17 @@ receipt provenance. Provenance and available timing data remain
 transport-specific; the semantic fields are the compatibility contract used by
 the parity matrix.
 
-Comment and review identities use immutable GitHub object IDs. Assignment,
-review-request, merge, close, and reopen identities use the public issue/PR
-number plus the normalized action and target bot where relevant, because that
-is the stable identity exposed by both webhook and notification email. The
-redacted paired fixtures cover both arrival orders so a second receipt links to
-the first job rather than depending on active-job coalescing.
+Comment and review identities use immutable GitHub object IDs. A merged PR is
+also unique within its public PR number. Assignment, review-request, close and
+reopen payloads do not expose a shared immutable occurrence ID: the same state
+can happen repeatedly on one thread. They therefore use the receipt fallback
+instead of treating the thread number and action as an event identity.
+
+The redacted paired fixtures verify the shared semantic envelope for every
+supported action and both arrival orders for events with provable identity.
+Transport-local events may still coalesce while work is active, but a later
+reassignment, renewed review request or lifecycle transition creates a new
+auditable job.
 
 When a notification lacks enough stable data to prove event identity, the
 event key falls back to `<source>:<source-key>`. The bridge deliberately
@@ -57,7 +62,8 @@ accepts a possible duplicate rather than risk dropping a legitimate action.
    receipts, but do not create jobs or claim canonical events. Compare coverage
    and canonical keys with IMAP.
 3. **Canary dual ingest (implemented):** allow webhook enqueue only for `webhookCanaryRepos`.
-   The unique event key guarantees that the first source wins.
+   For events with a shared immutable identity, the first source wins. Other
+   events remain receipt-idempotent and may coalesce only while work is active.
 4. **Webhook primary (implemented, operator-gated):** keep IMAP as a fallback
    until a complete operational cycle has no unexplained IMAP-only actionable
    events, then retire the reader separately.

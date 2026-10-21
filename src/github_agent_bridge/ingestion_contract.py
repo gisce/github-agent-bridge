@@ -22,14 +22,8 @@ def canonical_event_identity(
     event_type: str | None,
     event_action: str | None,
     object_id: int | str | None = None,
-    target_login: str | None = None,
 ) -> str | None:
-    """Return a transport-neutral identity only when semantics are stable.
-
-    Thread-scoped lifecycle, assignment and review-request events intentionally
-    use the public issue/PR number. Both webhook payloads and notification mail
-    expose it, unlike GitHub's transport-specific database/timeline ids.
-    """
+    """Return a transport-neutral identity only for one immutable occurrence."""
     repo = (repository or "").lower()
     if not repo or not event_type or not event_action:
         return None
@@ -43,21 +37,8 @@ def canonical_event_identity(
         if object_id:
             return f"{event_type}:{action}:{repo}:{object_id}"
         return None
-    if event_type in {"issues", "pull_request"} and action == "assigned":
-        if thread and target_login:
-            return f"{event_type}:assigned:{repo}:{thread}:{target_login.lower()}"
-        return None
-    if event_type == "pull_request" and action == "review_requested":
-        if thread and target_login:
-            return (
-                f"pull_request:review_requested:{repo}:{thread}:"
-                f"{target_login.lower()}"
-            )
-        return None
     if event_type == "pull_request" and action == "merged" and thread:
         return f"pull_request:merged:{repo}:{thread}"
-    if event_type == "issues" and action in {"closed", "reopened"} and thread:
-        return f"issues:{action}:{repo}:{thread}"
     if event_type == "workflow_run" and object_id:
         return f"workflow_run:{action}:{repo}:{object_id}"
     return None
@@ -75,30 +56,12 @@ def _subject_type(ctx: GitHubContext) -> str:
     return "unknown"
 
 
-def _target_login(
-    notification: Notification,
-    event_action: str | None,
-    bot_logins: set[str],
-) -> str | None:
-    structured = str(notification.metadata.get("github_target_login") or "")
-    if structured:
-        return structured.lower().lstrip("@")
-    if event_action not in {"assigned", "review_requested"}:
-        return None
-    text = f"{notification.subject}\n{notification.body}".lower()
-    configured = sorted(login.lower().lstrip("@") for login in bot_logins)
-    for login in configured:
-        if f"@{login}" in text or re.search(rf"\b{re.escape(login)}\b", text):
-            return login
-    return configured[0] if len(configured) == 1 else None
-
-
 def _descriptor(
     notification: Notification,
     ctx: GitHubContext,
     bridge_action: str,
     bot_logins: set[str],
-) -> tuple[str | None, str | None, int | str | None, str | None]:
+) -> tuple[str | None, str | None, int | str | None]:
     event_type = str(notification.metadata.get("github_event") or "") or None
     event_action = str(notification.metadata.get("github_action") or "") or None
     object_id: int | str | None = None
@@ -145,8 +108,7 @@ def _descriptor(
             event_type = "pull_request" if ctx.is_pull_request else "issues"
             event_action = lifecycle.group("action")
 
-    target_login = _target_login(notification, event_action, bot_logins)
-    return event_type, event_action, object_id, target_login
+    return event_type, event_action, object_id
 
 
 def normalize_event_envelope(
@@ -160,7 +122,7 @@ def normalize_event_envelope(
     trigger_actor: TriggerActor | None,
     bot_logins: set[str],
 ) -> NormalizedEventEnvelope:
-    event_type, event_action, object_id, target_login = _descriptor(
+    event_type, event_action, object_id = _descriptor(
         notification, ctx, bridge_action, bot_logins
     )
     identity = canonical_event_identity(
@@ -169,7 +131,6 @@ def normalize_event_envelope(
         event_type=event_type,
         event_action=event_action,
         object_id=object_id,
-        target_login=target_login,
     ) or f"{source}:{source_key}"
     occurred_at = str(notification.metadata.get("github_event_timestamp") or "") or None
     return NormalizedEventEnvelope(

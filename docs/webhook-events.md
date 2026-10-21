@@ -33,6 +33,12 @@ deliveries must additionally be addressed to the bot, belong to a PR authored
 by the bot, or target a PR/issue assigned to the bot. Being a reviewer,
 subscriber, or email recipient is not authorization to work.
 
+Assignment, review-request, issue-close and issue-reopen deliveries use their
+transport receipt as the event key. GitHub does not expose a shared immutable
+occurrence ID for these actions, and thread state is not unique when an action
+is repeated. This keeps delivery retries idempotent without suppressing a later
+reassignment or renewed review request.
+
 Issue close and reopen events normalize to `archive_notification + review_only`
 from either transport. IMAP timeline notifications are classified before
 delivery-reason footers are evaluated, so an assignment footer on an

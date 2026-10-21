@@ -45,9 +45,14 @@ def _pair(case):
 @pytest.mark.parametrize("case", FIXTURES, ids=lambda case: case["name"])
 def test_redacted_transport_fixtures_share_the_event_contract(case):
     webhook, email = _pair(case)
+    webhook_identity = case["canonical_identity"] or (
+        f"webhook:{case['webhook']['delivery_id']}"
+    )
     assert canonical_webhook_event_key(
-        case["webhook"]["event_name"], case["webhook"]["payload"]
-    ) == case["canonical_identity"]
+        case["webhook"]["event_name"],
+        case["webhook"]["payload"],
+        source_key=case["webhook"]["delivery_id"],
+    ) == webhook_identity
     envelopes = []
     for source, source_key, notification in (
         ("webhook", case["webhook"]["delivery_id"], webhook),
@@ -83,7 +88,9 @@ def test_redacted_transport_fixtures_share_the_event_contract(case):
         assert envelope.event_action == case["event_action"]
         assert envelope.subject_type == case["subject_type"]
         assert envelope.thread == case["thread"]
-        assert envelope.canonical_identity == case["canonical_identity"]
+        assert envelope.canonical_identity == (
+            case["canonical_identity"] or f"{source}:{source_key}"
+        )
         assert envelope.repository == "gisce/example"
         assert envelope.actor == "ecarreras"
         assert envelope.provenance.transport == source
@@ -97,7 +104,6 @@ def test_redacted_transport_fixtures_share_the_event_contract(case):
         webhook_envelope.event_type,
         webhook_envelope.event_action,
         webhook_envelope.actor,
-        webhook_envelope.canonical_identity,
         webhook_envelope.bridge_action,
         webhook_envelope.work_intent,
     ) == (
@@ -107,14 +113,21 @@ def test_redacted_transport_fixtures_share_the_event_contract(case):
         email_envelope.event_type,
         email_envelope.event_action,
         email_envelope.actor,
-        email_envelope.canonical_identity,
         email_envelope.bridge_action,
         email_envelope.work_intent,
     )
+    if case["canonical_identity"]:
+        assert (
+            webhook_envelope.canonical_identity
+            == email_envelope.canonical_identity
+        )
+    else:
+        assert webhook_envelope.canonical_identity != email_envelope.canonical_identity
 
 
 @pytest.mark.parametrize(
-    "case_name", [case["name"] for case in FIXTURES]
+    "case_name",
+    [case["name"] for case in FIXTURES if case["canonical_identity"]],
 )
 @pytest.mark.parametrize("first_source", ["webhook", "email"])
 def test_transport_neutral_events_deduplicate_in_both_arrival_orders(
@@ -165,3 +178,57 @@ def test_transport_neutral_events_deduplicate_in_both_arrival_orders(
         assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
         assert con.execute("SELECT COUNT(*) FROM ingest_receipts").fetchone()[0] == 2
         assert con.execute("SELECT COUNT(*) FROM github_events").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    "case_name", ["issue_assignment", "review_requested", "issue_closed"]
+)
+def test_repeated_state_event_after_completion_creates_a_new_job(
+    tmp_path, case_name
+):
+    case = next(item for item in FIXTURES if item["name"] == case_name)
+    first_notification, _ = _pair(case)
+    second_delivery = f"{case['webhook']['delivery_id']}-again"
+    second_notification = webhook_notification(
+        case["webhook"]["event_name"],
+        second_delivery,
+        case["webhook"]["payload"],
+        bot_logins=BOT_LOGINS,
+    )
+    assert second_notification is not None
+    queue = JobQueue(tmp_path / "queue.sqlite3")
+    policy = Policy(trusted_orgs={"gisce"}, bot_logins=BOT_LOGINS)
+
+    first, first_state = queue.ingest(
+        first_notification,
+        policy,
+        source="webhook",
+        source_key=case["webhook"]["delivery_id"],
+    )
+    assert first_state == "enqueued"
+    assert first is not None
+    if first.status == "pending":
+        claimed = queue.claim_next("worker")
+        assert claimed is not None and claimed.id == first.id
+        queue.finish(first.id, "done", "completed")
+    else:
+        assert first.status == "done"
+
+    second, second_state = queue.ingest(
+        second_notification,
+        policy,
+        source="webhook",
+        source_key=second_delivery,
+    )
+
+    assert second_state == "enqueued"
+    assert second is not None and second.id != first.id
+    assert first.metadata["event_envelope"]["canonical_identity"] == (
+        f"webhook:{case['webhook']['delivery_id']}"
+    )
+    assert second.metadata["event_envelope"]["canonical_identity"] == (
+        f"webhook:{second_delivery}"
+    )
+    with queue.connect() as con:
+        assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 2
+        assert con.execute("SELECT COUNT(*) FROM github_events").fetchone()[0] == 2

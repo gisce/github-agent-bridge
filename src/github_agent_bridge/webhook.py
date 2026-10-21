@@ -39,7 +39,20 @@ def verify_signature(payload: bytes, signature: str, secrets: tuple[str, ...]) -
     )
 
 
-def canonical_webhook_event_key(event_name: str, payload: dict[str, Any]) -> str | None:
+def canonical_webhook_event_key(
+    event_name: str,
+    payload: dict[str, Any],
+    *,
+    source_key: str | None = None,
+) -> str | None:
+    """Return an immutable event key, or a webhook receipt fallback when known.
+
+    Assignment, review-request and issue lifecycle payloads do not expose a
+    unique occurrence ID. Reusing their thread state as an identity would drop
+    later reassignments or renewed review requests, so those actions remain
+    idempotent only per GitHub delivery.
+    """
+    fallback = f"webhook:{source_key}" if source_key else None
     action = str(payload.get("action") or "")
     repository = payload.get("repository") or {}
     repo = str(repository.get("full_name") or "").lower()
@@ -68,25 +81,13 @@ def canonical_webhook_event_key(event_name: str, payload: dict[str, Any]) -> str
         number = assignment_target.get("number") if isinstance(assignment_target, dict) else None
         assignee = payload.get("assignee") or {}
         assignee_login = str(assignee.get("login") or "").lower() if isinstance(assignee, dict) else ""
-        return canonical_event_identity(
-            repository=repo,
-            thread=number,
-            event_type=event_name,
-            event_action="assigned",
-            target_login=assignee_login,
-        )
+        return fallback if number and assignee_login else None
     if event_name == "pull_request" and action == "review_requested":
         pull_request = payload.get("pull_request") or {}
         number = pull_request.get("number") if isinstance(pull_request, dict) else None
         reviewer = payload.get("requested_reviewer") or {}
         requested_login = str(reviewer.get("login") or "").lower() if isinstance(reviewer, dict) else ""
-        return canonical_event_identity(
-            repository=repo,
-            thread=number,
-            event_type="pull_request",
-            event_action="review_requested",
-            target_login=requested_login,
-        )
+        return fallback if number and requested_login else None
     if event_name == "pull_request" and action == "closed":
         pull_request = payload.get("pull_request") or {}
         merged = pull_request.get("merged") if isinstance(pull_request, dict) else False
@@ -101,12 +102,7 @@ def canonical_webhook_event_key(event_name: str, payload: dict[str, Any]) -> str
     if event_name == "issues" and action in {"closed", "reopened"}:
         issue = payload.get("issue") or {}
         number = issue.get("number") if isinstance(issue, dict) else None
-        return canonical_event_identity(
-            repository=repo,
-            thread=number,
-            event_type="issues",
-            event_action=action,
-        )
+        return fallback if number else None
     if event_name == "workflow_run":
         run = payload.get("workflow_run") or {}
         run_id = run.get("id")
@@ -388,7 +384,9 @@ def persist_shadow_delivery(
     action = str(payload.get("action") or "") or None
     repository = payload.get("repository") or {}
     repo = str(repository.get("full_name") or "") or None
-    event_key = canonical_webhook_event_key(event_name, payload)
+    event_key = canonical_webhook_event_key(
+        event_name, payload, source_key=delivery_id
+    )
     status = "observed" if event_key else "unsupported"
     payload_hash = hashlib.sha256(raw_payload).hexdigest()
     now = utc_now()
