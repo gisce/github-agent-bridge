@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.82.3 (2026-10-21)
+
+### Bug Fixes
+
+- Archive IMAP lifecycle events
+  ([`6c3153f`](https://github.com/gisce/github-agent-bridge/commit/6c3153fd7cdd0007be6e6a0c7f9baa9ff523e62f))
+
+
 ## v0.82.2 (2026-10-20)
 
 ### Bug Fixes
