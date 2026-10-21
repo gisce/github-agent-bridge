@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .models import Notification, utc_now
+from .actors import resolve_github_event_occurrence
+from .models import Notification, ResolvedGitHubEvent, utc_now
 from .ingestion_contract import canonical_event_identity
 from .parser import classify_github_action
 from .persistence import Database, WebhookRepository
@@ -44,13 +45,13 @@ def canonical_webhook_event_key(
     payload: dict[str, Any],
     *,
     source_key: str | None = None,
+    resolved_event: ResolvedGitHubEvent | None = None,
 ) -> str | None:
     """Return an immutable event key, or a webhook receipt fallback when known.
 
-    Assignment, review-request and issue lifecycle payloads do not expose a
-    unique occurrence ID. Reusing their thread state as an identity would drop
-    later reassignments or renewed review requests, so those actions remain
-    idempotent only per GitHub delivery.
+    State-change payloads use a timeline event ID only after unique API
+    resolution. Reusing thread state as identity would drop later assignments
+    or review requests, so unresolved actions remain receipt-scoped.
     """
     fallback = f"webhook:{source_key}" if source_key else None
     action = str(payload.get("action") or "")
@@ -81,13 +82,51 @@ def canonical_webhook_event_key(
         number = assignment_target.get("number") if isinstance(assignment_target, dict) else None
         assignee = payload.get("assignee") or {}
         assignee_login = str(assignee.get("login") or "").lower() if isinstance(assignee, dict) else ""
-        return fallback if number and assignee_login else None
+        return canonical_event_identity(
+            repository=repo,
+            thread=number,
+            event_type=event_name,
+            event_action=action,
+            occurrence_id=(
+                resolved_event.event_id if resolved_event is not None else None
+            ),
+            occurred_at=_webhook_event_timestamp(event_name, action, assignment_target),
+            actor=(
+                resolved_event.actor.login
+                if resolved_event is not None and resolved_event.actor is not None
+                else None
+            ),
+            target=(
+                resolved_event.target_login
+                if resolved_event is not None
+                else assignee_login
+            ),
+        ) or (fallback if number and assignee_login else None)
     if event_name == "pull_request" and action == "review_requested":
         pull_request = payload.get("pull_request") or {}
         number = pull_request.get("number") if isinstance(pull_request, dict) else None
         reviewer = payload.get("requested_reviewer") or {}
         requested_login = str(reviewer.get("login") or "").lower() if isinstance(reviewer, dict) else ""
-        return fallback if number and requested_login else None
+        return canonical_event_identity(
+            repository=repo,
+            thread=number,
+            event_type=event_name,
+            event_action=action,
+            occurrence_id=(
+                resolved_event.event_id if resolved_event is not None else None
+            ),
+            occurred_at=_webhook_event_timestamp(event_name, action, pull_request),
+            actor=(
+                resolved_event.actor.login
+                if resolved_event is not None and resolved_event.actor is not None
+                else None
+            ),
+            target=(
+                resolved_event.target_login
+                if resolved_event is not None
+                else requested_login
+            ),
+        ) or (fallback if number and requested_login else None)
     if event_name == "pull_request" and action == "closed":
         pull_request = payload.get("pull_request") or {}
         merged = pull_request.get("merged") if isinstance(pull_request, dict) else False
@@ -102,7 +141,21 @@ def canonical_webhook_event_key(
     if event_name == "issues" and action in {"closed", "reopened"}:
         issue = payload.get("issue") or {}
         number = issue.get("number") if isinstance(issue, dict) else None
-        return fallback if number else None
+        return canonical_event_identity(
+            repository=repo,
+            thread=number,
+            event_type=event_name,
+            event_action=action,
+            occurrence_id=(
+                resolved_event.event_id if resolved_event is not None else None
+            ),
+            occurred_at=_webhook_event_timestamp(event_name, action, issue),
+            actor=(
+                resolved_event.actor.login
+                if resolved_event is not None and resolved_event.actor is not None
+                else None
+            ),
+        ) or (fallback if number else None)
     if event_name == "workflow_run":
         run = payload.get("workflow_run") or {}
         run_id = run.get("id")
@@ -120,6 +173,80 @@ def canonical_webhook_event_key(
                 object_id=run_id,
             )
     return None
+
+
+def _webhook_event_timestamp(
+    event_name: str,
+    action: str,
+    source: dict[str, Any],
+) -> str | None:
+    if event_name == "pull_request" and action == "closed":
+        value = source.get("merged_at")
+    elif event_name == "issues" and action == "closed":
+        value = source.get("closed_at")
+    elif action in {"assigned", "review_requested", "reopened"}:
+        value = source.get("updated_at")
+    elif event_name == "pull_request_review":
+        value = source.get("submitted_at")
+    else:
+        value = source.get("created_at") or source.get("updated_at")
+    return str(value) if value else None
+
+
+def resolve_github_event_for_webhook(
+    event_name: str,
+    payload: dict[str, Any],
+    *,
+    gh_bin: str | None = None,
+    timeout: int = 5,
+) -> ResolvedGitHubEvent | None:
+    """Resolve a webhook state transition only when one timeline event matches."""
+    action = str(payload.get("action") or "").lower()
+    if (event_name, action) not in {
+        ("issues", "assigned"),
+        ("issues", "closed"),
+        ("issues", "reopened"),
+        ("pull_request", "assigned"),
+        ("pull_request", "review_requested"),
+    }:
+        return None
+    repository = payload.get("repository")
+    repo = (
+        str(repository.get("full_name") or "").lower()
+        if isinstance(repository, dict)
+        else ""
+    )
+    target_name = "issue" if event_name == "issues" else "pull_request"
+    subject = payload.get(target_name)
+    if not isinstance(subject, dict):
+        return None
+    number = subject.get("number")
+    sender = payload.get("sender")
+    actor_login = (
+        str(sender.get("login") or "")
+        if isinstance(sender, dict)
+        else ""
+    )
+    target = None
+    if action == "assigned":
+        target = payload.get("assignee")
+    elif action == "review_requested":
+        target = payload.get("requested_reviewer")
+    target_login = (
+        str(target.get("login") or "")
+        if isinstance(target, dict)
+        else None
+    )
+    return resolve_github_event_occurrence(
+        repository=repo,
+        thread=number if isinstance(number, int) else None,
+        event=action,
+        occurred_at=_webhook_event_timestamp(event_name, action, subject),
+        actor_login=actor_login,
+        target_login=target_login,
+        gh_bin=gh_bin,
+        timeout=timeout,
+    )
 
 
 COMMENT_EVENT_NAMES = {
@@ -222,7 +349,7 @@ def webhook_notification(
         or payload.get("review")
         or payload.get("workflow_run")
         or (payload.get("pull_request") if event_name == "pull_request" else None)
-        or (subject if action == "assigned" else None)
+        or subject
         or {}
     )
     if not isinstance(source, dict):
@@ -320,13 +447,11 @@ def webhook_notification(
                 else {}
             ),
             **(
-                {"github_event_timestamp": str(event_timestamp)}
+                {"github_event_timestamp": event_timestamp}
                 if (
-                    event_timestamp := source.get("created_at")
-                    or source.get("submitted_at")
-                    or source.get("merged_at")
-                    or source.get("closed_at")
-                    or source.get("updated_at")
+                    event_timestamp := _webhook_event_timestamp(
+                        event_name, action, source
+                    )
                 )
                 else {}
             ),
@@ -379,13 +504,17 @@ def persist_shadow_delivery(
     retention_days: int = 30,
     enqueue_status: str | None = None,
     job_id: int | None = None,
+    resolved_event: ResolvedGitHubEvent | None = None,
 ) -> ShadowReceipt:
     payload = json.loads(raw_payload)
     action = str(payload.get("action") or "") or None
     repository = payload.get("repository") or {}
     repo = str(repository.get("full_name") or "") or None
     event_key = canonical_webhook_event_key(
-        event_name, payload, source_key=delivery_id
+        event_name,
+        payload,
+        source_key=delivery_id,
+        resolved_event=resolved_event,
     )
     status = "observed" if event_key else "unsupported"
     payload_hash = hashlib.sha256(raw_payload).hexdigest()

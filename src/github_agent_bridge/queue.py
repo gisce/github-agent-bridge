@@ -4,8 +4,12 @@ import hashlib
 import sqlite3
 from pathlib import Path
 
-from .models import GitHubContext, Job, Notification
-from .ingestion_contract import canonical_event_identity, normalize_event_envelope
+from .models import GitHubContext, Job, Notification, ResolvedGitHubEvent
+from .ingestion_contract import (
+    bridge_action_for_resolved_event,
+    canonical_event_identity,
+    normalize_event_envelope,
+)
 from .parser import classify_github_action, classify_work_intent, extract_github_context
 from .persistence import (
     AcknowledgementRepository,
@@ -22,7 +26,11 @@ from .persistence import (
 )
 from .policy import Policy
 from . import feedback
-from .actors import trigger_actor_details_for_enqueue, trigger_actor_details_from_notification
+from .actors import (
+    resolve_github_event_for_notification,
+    trigger_actor_details_for_enqueue,
+    trigger_actor_details_from_notification,
+)
 from .intent_classifier import COMMENT_TARGET_KINDS, ParserResult, classify_notification_with_llm, should_classify_with_llm
 from .sql.migrations import SCHEMA, initialize_database, validate_migrations
 
@@ -136,16 +144,27 @@ class JobQueue:
         *,
         source: str = "email",
         source_key: str | None = None,
+        resolved_event: ResolvedGitHubEvent | None = None,
     ) -> tuple[Job | None, str]:
         self._ensure_initialized()
         source_key = source_key or n.message_id
         ctx = extract_github_context(n.body)
-        action = classify_github_action(
+        resolved_event = resolved_event or (
+            resolve_github_event_for_notification(n, ctx)
+            if source == "email"
+            else None
+        )
+        parsed_action = classify_github_action(
             n.subject,
             n.body,
             policy.bot_logins,
             message_id=n.message_id,
         )
+        action = (
+            bridge_action_for_resolved_event(resolved_event, ctx, policy.bot_logins)
+            if resolved_event is not None
+            else None
+        ) or parsed_action
         intent = classify_work_intent(n.subject, n.body, policy.bot_logins)
         metadata: dict[str, object] = {
             "received_at": n.received_at,
@@ -165,6 +184,15 @@ class JobQueue:
         )
         if n.metadata:
             metadata.update(n.metadata)
+        if resolved_event is not None:
+            metadata["github_event_resolution"] = {
+                "status": "resolved",
+                "event_id": resolved_event.event_id,
+                "event": resolved_event.event,
+                "created_at": resolved_event.created_at,
+                "target_login": resolved_event.target_login,
+                "endpoint": resolved_event.endpoint,
+            }
         if structured_feedback:
             action = "reply_comment"
         if bot_authored_changes_requested:
@@ -236,11 +264,12 @@ class JobQueue:
             metadata["intent_guardrail"] = "archive_notification_read_only"
         decision = policy.decision(n, ctx, action)
         status = {"auto": "done", "ask": "waiting_approval", "deny": "denied"}.get(decision, "pending")
-        trigger_actor = (
-            trigger_actor_details_from_notification(n)
-            if source == "webhook"
-            else trigger_actor_details_for_enqueue(n, ctx)
-        )
+        if source == "webhook":
+            trigger_actor = trigger_actor_details_from_notification(n)
+        elif resolved_event is not None and resolved_event.actor is not None:
+            trigger_actor = resolved_event.actor
+        else:
+            trigger_actor = trigger_actor_details_for_enqueue(n, ctx)
         envelope = normalize_event_envelope(
             n,
             ctx,
@@ -250,6 +279,7 @@ class JobQueue:
             source_key=source_key,
             trigger_actor=trigger_actor,
             bot_logins=policy.bot_logins,
+            resolved_event=resolved_event,
         )
         event_key = envelope.canonical_identity
         metadata["event_envelope"] = envelope.to_dict()

@@ -11,11 +11,14 @@ from fastapi.testclient import TestClient
 from github_agent_bridge import backend
 from github_agent_bridge.actors import TriggerActor
 from github_agent_bridge.backend import DashboardConfig, _encode_session, _sign, create_app, create_webhook_app
-from github_agent_bridge.models import Notification
+from github_agent_bridge.models import Notification, ResolvedGitHubEvent
 from github_agent_bridge.parser import extract_github_context
 from github_agent_bridge.policy import Policy
 from github_agent_bridge.queue import JobQueue
-from github_agent_bridge.webhook import webhook_notification
+from github_agent_bridge.webhook import (
+    resolve_github_event_for_webhook,
+    webhook_notification,
+)
 
 
 SECRET = "test-secret"
@@ -235,6 +238,36 @@ def assignment_payload(
     }).encode()
 
 
+def test_resolve_webhook_event_uses_occurrence_fields(monkeypatch):
+    calls = []
+    marker = object()
+
+    def fake_resolve(**kwargs):
+        calls.append(kwargs)
+        return marker
+
+    monkeypatch.setattr(
+        "github_agent_bridge.webhook.resolve_github_event_occurrence",
+        fake_resolve,
+    )
+    payload = json.loads(assignment_payload())
+    payload["issue"]["updated_at"] = "2026-10-20T08:00:00Z"
+
+    assert resolve_github_event_for_webhook("issues", payload) is marker
+    assert calls == [
+        {
+            "repository": "gisce/github-agent-bridge",
+            "thread": 190,
+            "event": "assigned",
+            "occurred_at": "2026-10-20T08:00:00Z",
+            "actor_login": "ecarreras",
+            "target_login": "giscebot",
+            "gh_bin": None,
+            "timeout": 5,
+        }
+    ]
+
+
 def commit_comment_payload(*, comment_id: int = 778899) -> bytes:
     return json.dumps({
         "action": "created",
@@ -410,6 +443,58 @@ def test_webhook_canary_enqueues_issue_assigned_to_configured_bot(tmp_path):
             "gisce/github-agent-bridge#190",
             "ecarreras",
         )
+
+
+def test_webhook_canary_persists_resolved_timeline_identity(
+    tmp_path, monkeypatch
+):
+    payload_data = json.loads(assignment_payload())
+    payload_data["issue"]["updated_at"] = "2026-10-20T08:00:00Z"
+    payload = json.dumps(payload_data).encode()
+    resolved = ResolvedGitHubEvent(
+        event_id=800104,
+        event="assigned",
+        created_at="2026-10-20T08:00:00Z",
+        actor=TriggerActor(login="ecarreras"),
+        target_login="giscebot",
+        endpoint=(
+            "repos/gisce/github-agent-bridge/issues/events/800104"
+        ),
+    )
+    monkeypatch.setattr(
+        "github_agent_bridge.backend.resolve_github_event_for_webhook",
+        lambda event_name, payload: resolved,
+    )
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=assignment_policy(tmp_path),
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(
+            payload,
+            delivery="resolved-assignment",
+            event="issues",
+        ),
+    )
+
+    event_key = (
+        "issues:assigned:gisce/github-agent-bridge:190:event:800104"
+    )
+    assert response.json()["event_key"] == event_key
+    assert response.json()["enqueue_status"] == "enqueued"
+    with sqlite3.connect(config.db) as con:
+        assert con.execute(
+            "SELECT event_key FROM github_events"
+        ).fetchone()[0] == event_key
+        assert con.execute(
+            "SELECT event_key FROM webhook_shadow_receipts"
+        ).fetchone()[0] == event_key
 
 
 def test_webhook_canary_enqueues_pull_request_assigned_to_configured_bot(tmp_path):

@@ -33,11 +33,13 @@ deliveries must additionally be addressed to the bot, belong to a PR authored
 by the bot, or target a PR/issue assigned to the bot. Being a reviewer,
 subscriber, or email recipient is not authorization to work.
 
-Assignment, review-request, issue-close and issue-reopen deliveries use their
-transport receipt as the event key. GitHub does not expose a shared immutable
-occurrence ID for these actions, and thread state is not unique when an action
-is repeated. This keeps delivery retries idempotent without suppressing a later
-reassignment or renewed review request.
+Assignment, review-request, issue-close and issue-reopen deliveries use an
+immutable timeline event ID only after API resolution proves one unique match.
+IMAP reads the ID embedded in the notification `Message-ID`; webhook ingestion
+matches its signed timestamp, actor and target against the issue event list.
+Missing fields, failed lookups and ambiguous same-second matches remain
+receipt-scoped, so repeated transitions cannot be dropped but may appear as a
+split identity that rollout monitoring must detect.
 
 Issue close and reopen events normalize to `archive_notification + review_only`
 from either transport. IMAP timeline notifications are classified before

@@ -8,14 +8,34 @@ from email.utils import parseaddr
 from pathlib import Path
 from typing import Any
 
-from .models import GitHubContext, Notification, TriggerActor
+from .models import GitHubContext, Notification, ResolvedGitHubEvent, TriggerActor
 from .persistence import ActorBackfillRepository, ActorBackfillUpdate, Database
 
 LOGIN_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?(?:\[bot\])?$")
 ISSUE_EVENT_URL_RE = re.compile(
     r"https://github\.com/([^/]+/[^/]+)/(?:issues|pull)/(\d+)#event-(\d+)"
 )
+ISSUE_EVENT_MESSAGE_ID_RE = re.compile(
+    r"<?(?P<repo>[^/<>\s]+/[^/<>\s]+)/(?:issues?|pull)/"
+    r"(?P<thread>\d+)/(?:issue_event|review_requested)/"
+    r"(?P<event_id>\d+)@github\.com>?$",
+    re.IGNORECASE,
+)
 RESERVED_SENDERS = {"github", "notifications"}
+OCCURRENCE_EVENTS = {
+    "assigned",
+    "unassigned",
+    "closed",
+    "reopened",
+    "review_requested",
+    "review_request_removed",
+}
+TARGETED_OCCURRENCE_EVENTS = {
+    "assigned",
+    "unassigned",
+    "review_requested",
+    "review_request_removed",
+}
 
 
 def default_gh_bin() -> str:
@@ -55,11 +75,13 @@ def trigger_actor_from_notification(notification: Notification) -> str | None:
 
 
 def actor_details_from_github_payload(payload: dict[str, Any]) -> TriggerActor | None:
-    actor_keys = (
-        ("assigner", "actor", "user", "sender")
-        if payload.get("event") in {"assigned", "unassigned"}
-        else ("user", "actor", "sender")
-    )
+    event = payload.get("event")
+    if event in {"assigned", "unassigned"}:
+        actor_keys = ("assigner", "actor", "user", "sender")
+    elif event in {"review_requested", "review_request_removed"}:
+        actor_keys = ("review_requester", "actor", "user", "sender")
+    else:
+        actor_keys = ("user", "actor", "sender")
     for key in actor_keys:
         value = payload.get(key)
         if isinstance(value, dict):
@@ -78,6 +100,122 @@ def actor_details_from_github_payload(payload: dict[str, Any]) -> TriggerActor |
 def actor_from_github_payload(payload: dict[str, Any]) -> str | None:
     actor = actor_details_from_github_payload(payload)
     return actor.login if actor else None
+
+
+def _resolved_event_from_payload(
+    payload: dict[str, Any],
+    endpoint: str,
+) -> ResolvedGitHubEvent | None:
+    event_id = payload.get("id")
+    event = str(payload.get("event") or "").lower()
+    if not isinstance(event_id, int) or event_id <= 0 or not event:
+        return None
+    target_key = (
+        "assignee"
+        if event in {"assigned", "unassigned"}
+        else "requested_reviewer"
+        if event in {"review_requested", "review_request_removed"}
+        else None
+    )
+    target = payload.get(target_key) if target_key else None
+    target_login = (
+        normalize_github_login(target.get("login"))
+        if isinstance(target, dict)
+        else None
+    )
+    target_login = target_login.lower() if target_login else None
+    created_at = payload.get("created_at")
+    return ResolvedGitHubEvent(
+        event_id=event_id,
+        event=event,
+        created_at=created_at if isinstance(created_at, str) and created_at else None,
+        actor=actor_details_from_github_payload(payload),
+        target_login=target_login,
+        endpoint=endpoint,
+    )
+
+
+def resolve_github_event_occurrence(
+    *,
+    repository: str | None,
+    thread: int | None,
+    event: str | None,
+    occurred_at: str | None,
+    actor_login: str | None,
+    target_login: str | None = None,
+    gh_bin: str | None = None,
+    timeout: int = 5,
+) -> ResolvedGitHubEvent | None:
+    """Resolve one webhook occurrence to its immutable issue timeline event."""
+    repo = (repository or "").lower()
+    normalized_event = (event or "").lower()
+    actor = normalize_github_login(actor_login)
+    target = normalize_github_login(target_login)
+    if (
+        not repo
+        or not thread
+        or normalized_event not in OCCURRENCE_EVENTS
+        or not occurred_at
+        or actor is None
+        or (
+            normalized_event in TARGETED_OCCURRENCE_EVENTS
+            and target is None
+        )
+    ):
+        return None
+    actor = actor.lower()
+    target = target.lower() if target else None
+    events_endpoint = f"repos/{repo}/issues/{thread}/events?per_page=100"
+    try:
+        proc = subprocess.run(
+            [
+                gh_bin or default_gh_bin(),
+                "api",
+                "--paginate",
+                "--slurp",
+                events_endpoint,
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        pages = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(pages, list):
+        return None
+    payloads = []
+    for page in pages:
+        if isinstance(page, list):
+            payloads.extend(item for item in page if isinstance(item, dict))
+        elif isinstance(page, dict):
+            payloads.append(page)
+    matches = []
+    for payload in payloads:
+        event_id = payload.get("id")
+        if not isinstance(event_id, int) or event_id <= 0:
+            continue
+        endpoint = f"repos/{repo}/issues/events/{event_id}"
+        candidate = _resolved_event_from_payload(payload, endpoint)
+        if candidate is None or candidate.event != normalized_event:
+            continue
+        candidate_actor = candidate.actor.login.lower() if candidate.actor else None
+        if candidate.created_at != occurred_at or candidate_actor != actor:
+            continue
+        if (
+            normalized_event in TARGETED_OCCURRENCE_EVENTS
+            and candidate.target_login != target
+        ):
+            continue
+        matches.append(candidate)
+    return matches[0] if len(matches) == 1 else None
 
 
 def actor_endpoint(ctx: GitHubContext) -> str | None:
@@ -130,6 +268,45 @@ def github_actor_details_for_context(
     except json.JSONDecodeError:
         return None
     return actor_details_from_github_payload(payload if isinstance(payload, dict) else {})
+
+
+def resolve_github_event_for_notification(
+    notification: Notification,
+    ctx: GitHubContext,
+    *,
+    gh_bin: str | None = None,
+    timeout: int = 5,
+) -> ResolvedGitHubEvent | None:
+    """Resolve an IMAP timeline receipt to the immutable GitHub issue event."""
+    match = ISSUE_EVENT_MESSAGE_ID_RE.search(notification.message_id.strip())
+    if match is None or not ctx.repo or not ctx.issue_number:
+        return None
+    repo = match.group("repo").lower()
+    thread = int(match.group("thread"))
+    event_id = int(match.group("event_id"))
+    if repo != ctx.repo.lower() or thread != ctx.issue_number:
+        return None
+    endpoint = f"repos/{repo}/issues/events/{event_id}"
+    try:
+        proc = subprocess.run(
+            [gh_bin or default_gh_bin(), "api", endpoint],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict) or payload.get("id") != event_id:
+        return None
+    return _resolved_event_from_payload(payload, endpoint)
 
 
 def github_actor_for_context(ctx: GitHubContext, *, gh_bin: str | None = None) -> str | None:
