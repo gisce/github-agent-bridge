@@ -90,6 +90,9 @@ recorded as a duplicate of it.
 Inspect webhook summary, exceptions and deliveries in the administrator
 dashboard. Do not widen the canary while there are unexplained actionable
 IMAP-only events, split jobs, or action/intent mismatches.
+The **Promotion gate** card is only `ready` when coverage has no unmatched
+events, no receipt-scoped decision mismatches and no potential split identities.
+It is an observation gate, not an automatic cutover switch.
 
 ## 5. Primary webhook with IMAP fallback
 

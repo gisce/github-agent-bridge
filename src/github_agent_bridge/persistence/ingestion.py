@@ -89,13 +89,26 @@ class IngestionRepository:
                 operation="ingestion.ingest",
             ) as con:
                 try:
+                    envelope = request.metadata.get("event_envelope")
+                    envelope = envelope if isinstance(envelope, dict) else {}
                     cursor = con.execute(
-                        "INSERT INTO ingest_receipts(source,source_key,payload_hash,event_key,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
+                        "INSERT INTO ingest_receipts("
+                        "source,source_key,payload_hash,event_key,repository,work_key,"
+                        "event_type,event_action,bridge_action,decision,work_intent,"
+                        "status,created_at,updated_at"
+                        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             request.source,
                             request.source_key,
                             request.payload_hash,
                             request.event_key,
+                            ctx.repo,
+                            ctx.work_key,
+                            envelope.get("event_type"),
+                            envelope.get("event_action"),
+                            request.action,
+                            request.decision,
+                            request.work_intent,
                             "received",
                             now,
                             now,

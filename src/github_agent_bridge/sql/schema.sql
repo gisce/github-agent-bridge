@@ -105,6 +105,13 @@ CREATE TABLE IF NOT EXISTS ingest_receipts (
   source_key TEXT NOT NULL,
   payload_hash TEXT NOT NULL,
   event_key TEXT,
+  repository TEXT,
+  work_key TEXT,
+  event_type TEXT,
+  event_action TEXT,
+  bridge_action TEXT,
+  decision TEXT,
+  work_intent TEXT,
   job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
   status TEXT NOT NULL CHECK(status IN ('received','accepted','duplicate')),
   created_at TEXT NOT NULL,
@@ -114,6 +121,7 @@ CREATE TABLE IF NOT EXISTS ingest_receipts (
 CREATE INDEX IF NOT EXISTS idx_ingest_receipts_event_key ON ingest_receipts(event_key);
 CREATE INDEX IF NOT EXISTS idx_ingest_receipts_job_id ON ingest_receipts(job_id);
 CREATE INDEX IF NOT EXISTS idx_ingest_receipts_coverage ON ingest_receipts(source, julianday(created_at), event_key);
+CREATE INDEX IF NOT EXISTS idx_ingest_receipts_decision_trace ON ingest_receipts(event_key, source, bridge_action, work_intent, work_key);
 CREATE TABLE IF NOT EXISTS github_events (
   event_key TEXT PRIMARY KEY,
   job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,

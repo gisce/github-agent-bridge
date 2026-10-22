@@ -233,6 +233,15 @@ remain excluded. Set
 `GITHUB_AGENT_BRIDGE_WEBHOOK_COVERAGE_GRACE_SECONDS` to change the default
 ten-minute grace period.
 
+Every durable ingestion receipt also records the normalized repository, work
+key, event descriptor, bridge action, policy decision and work intent. The
+dashboard compares those receipt-scoped decisions when both transports share a
+canonical identity. It reports action/intent/work-key mismatches and potential
+split identities separately; a potential split is observational evidence only
+and never causes two occurrences to be deduplicated. The promotion gate remains
+blocked while either transport has unmatched events or either mismatch count is
+non-zero. Run `gab migrate-db` before deploying this read model.
+
 ## Primary webhook with stable IMAP fallback
 
 After the dashboard gate has no unexplained IMAP-only actionable events, set

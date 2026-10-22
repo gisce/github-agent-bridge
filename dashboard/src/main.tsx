@@ -189,6 +189,9 @@ type WebhookSummary = {
     both: number;
     imap_only: number;
     webhook_only: number;
+    decision_mismatches?: number;
+    split_identities?: number;
+    promotion_ready?: boolean;
     imap_eligible: number;
     ratio?: number | null;
     mean_match_delay_ms?: number | null;
@@ -199,7 +202,7 @@ type WebhookSummary = {
 };
 
 type WebhookException = {
-  kind: "imap_only" | "webhook_only" | "unmatchable";
+  kind: "imap_only" | "webhook_only" | "unmatchable" | "decision_mismatch" | "split_identity";
   event_key?: string | null;
   reference: string;
   created_at: string;
@@ -2065,6 +2068,9 @@ function WebhookPage({
             <MiniStat label="IMAP only" value={summary?.coverage?.imap_only ?? 0} />
             <MiniStat label="Webhook only" value={summary?.coverage?.webhook_only ?? 0} />
             <MiniStat label="Coverage" value={summary?.coverage?.ratio == null ? "not measurable" : `${Math.round(summary.coverage.ratio * 100)}%`} />
+            <MiniStat label="Decision mismatches" value={summary?.coverage?.decision_mismatches ?? 0} />
+            <MiniStat label="Split identities" value={summary?.coverage?.split_identities ?? 0} />
+            <MiniStat label="Promotion gate" value={summary?.coverage?.promotion_ready ? "ready" : "blocked"} />
           </div>
           {summary?.coverage?.window_start && summary.coverage.window_end ? <p className="mt-3 font-mono text-xs text-muted">Actionable IMAP events and comparable webhook events from <TimeText value={summary.coverage.window_start} /> to <TimeText value={summary.coverage.window_end} />; newest {summary.coverage.grace_seconds ?? 0}s excluded.</p> : null}
         </Panel>

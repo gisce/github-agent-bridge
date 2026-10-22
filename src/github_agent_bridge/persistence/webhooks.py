@@ -179,21 +179,52 @@ class WebhookRepository:
             ).fetchone()
             coverage = con.execute(
                 "WITH email_events AS ("
-                " SELECT i.event_key,MIN(i.created_at) created_at FROM ingest_receipts i"
+                " SELECT i.event_key,MIN(i.created_at) created_at,MIN(i.work_key) work_key,"
+                " MIN(i.event_type) event_type,MIN(i.event_action) event_action FROM ingest_receipts i"
                 " LEFT JOIN jobs j ON j.id=i.job_id"
                 f" WHERE i.source='email' AND julianday(i.created_at)>=julianday(?) AND julianday(i.created_at)<=julianday(?) AND {_email_coverage_predicate('i.event_key', 'j')}"
                 " GROUP BY i.event_key"
                 "), webhook_events AS ("
-                " SELECT event_key,MIN(created_at) created_at FROM webhook_shadow_receipts INDEXED BY idx_webhook_shadow_coverage"
-                f" WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_coverage_predicate('event_key')}"
-                " GROUP BY event_key"
+                " SELECT w.event_key,MIN(w.created_at) created_at,"
+                " MIN(COALESCE(j.work_key,w.repository || '#' || COALESCE("
+                " json_extract(w.payload_json,'$.issue.number'),"
+                " json_extract(w.payload_json,'$.pull_request.number')))) work_key,"
+                " MIN(w.event_name) event_type,MIN(CASE WHEN w.action='submitted' THEN 'created' ELSE w.action END) event_action"
+                " FROM webhook_shadow_receipts w INDEXED BY idx_webhook_shadow_coverage"
+                " LEFT JOIN jobs j ON j.id=w.job_id"
+                f" WHERE julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?) AND {_coverage_predicate('w.event_key')}"
+                " GROUP BY w.event_key"
+                "), paired_decisions AS ("
+                " SELECT e.event_key FROM ingest_receipts e JOIN ingest_receipts w USING(event_key)"
+                " WHERE e.source='email' AND w.source='webhook'"
+                " AND julianday(e.created_at)>=julianday(?) AND julianday(e.created_at)<=julianday(?)"
+                " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
+                " AND (e.bridge_action<>w.bridge_action OR e.work_intent<>w.work_intent OR e.work_key<>w.work_key)"
+                " GROUP BY e.event_key"
+                "), split_identities AS ("
+                " SELECT i.event_key FROM email_events i JOIN webhook_events w"
+                " ON i.work_key=w.work_key AND i.event_type=w.event_type AND i.event_action=w.event_action"
+                " AND i.event_key<>w.event_key"
+                " WHERE i.work_key IS NOT NULL AND i.event_type IS NOT NULL AND i.event_action IS NOT NULL"
+                " GROUP BY i.event_key"
                 ") SELECT"
                 " (SELECT COUNT(*) FROM email_events) imap_events,"
                 " (SELECT COUNT(*) FROM webhook_events) webhook_events,"
                 " (SELECT COUNT(*) FROM email_events JOIN webhook_events USING(event_key)) both_events,"
+                " (SELECT COUNT(*) FROM paired_decisions) decision_mismatches,"
+                " (SELECT COUNT(*) FROM split_identities) split_identities,"
                 " (SELECT AVG(ABS((julianday(w.created_at)-julianday(i.created_at))*86400000.0))"
                 "  FROM email_events i JOIN webhook_events w USING(event_key)) match_delay_ms",
-                (window_start, window_end, window_start, window_end),
+                (
+                    window_start,
+                    window_end,
+                    window_start,
+                    window_end,
+                    window_start,
+                    window_end,
+                    window_start,
+                    window_end,
+                ),
             ).fetchone()
             inventory = con.execute(
                 "SELECT (SELECT COUNT(*) FROM webhook_hooks) hooks,"
@@ -214,6 +245,8 @@ class WebhookRepository:
             "imap_events": int(coverage["imap_events"]),
             "webhook_events": int(coverage["webhook_events"]),
             "both_events": int(coverage["both_events"]),
+            "decision_mismatches": int(coverage["decision_mismatches"]),
+            "split_identities": int(coverage["split_identities"]),
             "match_delay_ms": coverage["match_delay_ms"],
             "hooks": int(inventory["hooks"]),
             "deliveries": int(inventory["deliveries"]),
