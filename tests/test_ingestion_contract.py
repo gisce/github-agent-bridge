@@ -225,6 +225,27 @@ def test_transport_neutral_events_deduplicate_in_both_arrival_orders(
         assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
         assert con.execute("SELECT COUNT(*) FROM ingest_receipts").fetchone()[0] == 2
         assert con.execute("SELECT COUNT(*) FROM github_events").fetchone()[0] == 1
+        traces = con.execute(
+            "SELECT source,repository,work_key,event_type,event_action,"
+            "bridge_action,decision,work_intent FROM ingest_receipts ORDER BY source"
+        ).fetchall()
+    assert {row[0] for row in traces} == {"email", "webhook"}
+    expected_decision = (
+        "auto" if case["bridge_action"] == "archive_notification" else "auto_trusted"
+    )
+    assert {
+        tuple(row[1:]) for row in traces
+    } == {
+        (
+            "gisce/example",
+            f"gisce/example#{case['thread']}",
+            case["event_type"],
+            case["event_action"],
+            case["bridge_action"],
+            expected_decision,
+            case["work_intent"],
+        )
+    }
 
 
 @pytest.mark.parametrize(

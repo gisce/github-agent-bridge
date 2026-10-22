@@ -1701,6 +1701,67 @@ def test_webhook_coverage_includes_actionable_uncorrelated_email_keys(
     assert fallback_exception["repository"] == "gisce/repo"
 
 
+def test_webhook_promotion_gate_reports_decision_and_identity_mismatches(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    now = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    with sqlite3.connect(db) as con:
+        con.executemany(
+            "INSERT INTO ingest_receipts("
+            "source,source_key,payload_hash,event_key,repository,work_key,"
+            "event_type,event_action,bridge_action,decision,work_intent,"
+            "status,created_at,updated_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    "email", "email-match", "h1", "issue_comment:created:gisce/repo:1",
+                    "gisce/repo", "gisce/repo#1", "issue_comment", "created",
+                    "reply_comment", "auto_trusted", "work_allowed", "accepted", now, now,
+                ),
+                (
+                    "webhook", "webhook-match", "h2", "issue_comment:created:gisce/repo:1",
+                    "gisce/repo", "gisce/repo#1", "issue_comment", "created",
+                    "reply_comment", "auto_trusted", "review_only", "duplicate", now, now,
+                ),
+                (
+                    "email", "email-split", "h3", "issue_comment:created:gisce/repo:20",
+                    "gisce/repo", "gisce/repo#2", "issue_comment", "created",
+                    "reply_comment", "auto_trusted", "review_only", "accepted", now, now,
+                ),
+            ],
+        )
+        con.executemany(
+            "INSERT INTO webhook_shadow_receipts("
+            "delivery_id,event_name,action,event_key,repository,payload_hash,"
+            "payload_json,status,created_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    "delivery-match", "issue_comment", "created",
+                    "issue_comment:created:gisce/repo:1", "gisce/repo", "w1",
+                    json.dumps({"issue": {"number": 1}}), "observed", now,
+                ),
+                (
+                    "delivery-split", "issue_comment", "created",
+                    "issue_comment:created:gisce/repo:21", "gisce/repo", "w2",
+                    json.dumps({"issue": {"number": 2}}), "observed", now,
+                ),
+            ],
+        )
+    client = TestClient(create_app(DashboardConfig(
+        db=db,
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_coverage_grace_seconds=0,
+    )))
+
+    coverage = client.get("/api/webhooks/github/summary").json()["coverage"]
+
+    assert coverage["decision_mismatches"] == 1
+    assert coverage["split_identities"] == 1
+    assert coverage["promotion_ready"] is False
+
+
 def test_admin_can_request_hook_ping_and_action_is_audited(tmp_path, monkeypatch):
     db = tmp_path / "bridge.sqlite3"
     client = TestClient(create_app(DashboardConfig(db=db, require_auth=False, webhook_secrets=(SECRET,))))

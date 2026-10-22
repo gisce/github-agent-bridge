@@ -1006,6 +1006,14 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
                 "both": summary["both_events"],
                 "imap_only": max(summary["imap_events"] - summary["both_events"], 0),
                 "webhook_only": max(summary["webhook_events"] - summary["both_events"], 0),
+                "decision_mismatches": summary["decision_mismatches"],
+                "split_identities": summary["split_identities"],
+                "promotion_ready": (
+                    summary["imap_events"] == summary["both_events"]
+                    and summary["webhook_events"] == summary["both_events"]
+                    and summary["decision_mismatches"] == 0
+                    and summary["split_identities"] == 0
+                ),
                 "imap_eligible": summary["imap_events"],
                 "ratio": (
                     summary["both_events"] / summary["imap_events"]
