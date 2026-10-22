@@ -143,6 +143,7 @@ def enqueue_unaddressed_pr_review(queue: JobQueue):
             "https://github.com/gisce/ab-modules/pull/247#pullrequestreview-5439481624\n"
             "You are receiving this because your review was requested."
         ),
+        metadata={"feedback_actionability": "defer_to_executor"},
     )
     job, state = queue.enqueue(
         notification,

@@ -3,12 +3,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .actors import resolve_github_event_occurrence
+from .actionability import feedback_authorization_from_webhook
 from .models import Notification, ResolvedGitHubEvent, utc_now
 from .ingestion_contract import canonical_event_identity
 from .parser import classify_github_action
@@ -257,62 +257,6 @@ COMMENT_EVENT_NAMES = {
 }
 
 
-def _first_mentioned_login(body: str) -> str | None:
-    match = re.search(r"@([A-Za-z0-9-]+)", body or "")
-    return match.group(1).lower() if match else None
-
-
-def _feedback_actionability(
-    event_name: str,
-    payload: dict[str, Any],
-    source: dict[str, Any],
-    configured_logins: set[str],
-) -> str:
-    """Authorize feedback from structured GitHub fields, never delivery reason."""
-    if event_name not in COMMENT_EVENT_NAMES:
-        return "not_applicable"
-    if not configured_logins:
-        return "ignored"
-    first_mention = _first_mentioned_login(str(source.get("body") or ""))
-    if first_mention in configured_logins:
-        return "mentioned"
-    pull_request = payload.get("pull_request") if isinstance(payload.get("pull_request"), dict) else None
-    issue = payload.get("issue") if isinstance(payload.get("issue"), dict) else None
-    subject = pull_request or issue or {}
-    if not isinstance(subject, dict):
-        return "ignored"
-    pr_issue_comment = bool(
-        event_name == "issue_comment"
-        and issue
-        and isinstance(issue.get("pull_request"), dict)
-    )
-    author: dict[str, Any] = {}
-    if pull_request:
-        author = pull_request.get("user") if isinstance(pull_request.get("user"), dict) else {}
-    elif pr_issue_comment and issue:
-        # GitHub represents PR conversation comments as issue_comment payloads.
-        # In that shape issue.user is the PR author.
-        author = issue.get("user") if isinstance(issue.get("user"), dict) else {}
-    author_login = str(author.get("login") or "").lower()
-    if author_login in configured_logins:
-        return "pr_authored_by_bot"
-    assignees = subject.get("assignees") if isinstance(subject.get("assignees"), list) else []
-    assignee = subject.get("assignee") if isinstance(subject.get("assignee"), dict) else None
-    if assignee:
-        assignees = [*assignees, assignee]
-    if any(
-        isinstance(item, dict)
-        and str(item.get("login") or "").lower() in configured_logins
-        for item in assignees
-    ):
-        return "assigned"
-    if pr_issue_comment and not author_login:
-        # Partial payloads must reach the executor, which resolves PR authorship
-        # live before allowing work.
-        return "defer_to_executor"
-    return "ignored"
-
-
 def webhook_notification(
     event_name: str,
     delivery_id: str,
@@ -376,7 +320,7 @@ def webhook_notification(
         review_state = str(source.get("state") or "").lower()
         if review_state not in {"changes_requested", "commented"}:
             return None
-    feedback_actionability = _feedback_actionability(
+    feedback_actionability = feedback_authorization_from_webhook(
         event_name,
         payload,
         source,

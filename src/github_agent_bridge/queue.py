@@ -31,6 +31,7 @@ from .actors import (
     trigger_actor_details_for_enqueue,
     trigger_actor_details_from_notification,
 )
+from .actionability import FEEDBACK_TARGET_KINDS, resolve_feedback_authorization
 from .intent_classifier import COMMENT_TARGET_KINDS, ParserResult, classify_notification_with_llm, should_classify_with_llm
 from .sql.migrations import SCHEMA, initialize_database, validate_migrations
 
@@ -171,12 +172,23 @@ class JobQueue:
             "source_received_at": n.source_received_at,
         }
         feedback_actionability = str(n.metadata.get("feedback_actionability") or "")
+        feedback_target = ctx.target_kind in FEEDBACK_TARGET_KINDS
+        if source == "email" and feedback_target and not feedback_actionability:
+            feedback_actionability = resolve_feedback_authorization(
+                ctx,
+                policy.bot_logins,
+                notification_body=n.body,
+            )
+            metadata["feedback_actionability"] = feedback_actionability
+        if feedback_target and feedback_actionability == "ignored":
+            return None, "ignored"
         structured_feedback = feedback_actionability in {
             "mentioned",
             "assigned",
             "pr_authored_by_bot",
             "defer_to_executor",
         }
+        unresolved_feedback = feedback_actionability == "defer_to_executor"
         bot_authored_changes_requested = bool(
             n.metadata.get("github_event") == "pull_request_review"
             and n.metadata.get("review_state") == "changes_requested"
@@ -204,7 +216,9 @@ class JobQueue:
             and policy.trusted_source(n, ctx)
         )
         classifier_applied = False
-        if should_classify_with_llm(n, ctx, parser_result, policy):
+        if not unresolved_feedback and should_classify_with_llm(
+            n, ctx, parser_result, policy
+        ):
             metadata["intent_classifier"] = {
                 "parser": {"action": action, "work_intent": intent},
                 "enabled": True,
@@ -240,6 +254,11 @@ class JobQueue:
         if structured_feedback:
             action = "reply_comment"
             metadata["action_guardrail"] = "structured_feedback_actionable"
+        if unresolved_feedback:
+            intent = "review_only"
+            metadata["intent_guardrail"] = (
+                "feedback_authorization_unresolved_read_only"
+            )
         if bot_authored_changes_requested:
             intent = "work_allowed"
             metadata["intent_guardrail"] = (
