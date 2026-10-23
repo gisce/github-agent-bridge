@@ -283,7 +283,17 @@ def job_dict(job):
 
 def cmd_status(args: argparse.Namespace) -> int:
     metrics = DashboardQueries(args.db).status()
-    print(json.dumps({"stats": metrics.get("counts", {}), "oldest_pending_age_seconds": metrics.get("oldest_pending_age_seconds"), "executor_pause": metrics.get("executor_pause", {"paused": False})}, ensure_ascii=False, indent=2))
+    print(json.dumps({
+        "stats": metrics.get("counts", {}),
+        "oldest_pending_age_seconds": metrics.get("oldest_pending_age_seconds"),
+        "executor_pause": metrics.get("executor_pause", {"paused": False}),
+        "executor_capacity": {
+            "desired": metrics.get("executor_worker_count", 0),
+            "live": metrics.get("executor_worker_live_count", 0),
+            "busy": metrics.get("executor_worker_busy_count", 0),
+            "draining": metrics.get("executor_worker_draining_count", 0),
+        },
+    }, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -298,6 +308,21 @@ def cmd_resume_executor(args: argparse.Namespace) -> int:
     queue = JobQueue(args.db)
     queue.resume_executor()
     print(json.dumps({"executor_pause": queue.executor_pause_state()}, ensure_ascii=False))
+    return 0
+
+
+def cmd_resize_executor(args: argparse.Namespace) -> int:
+    queue = JobQueue(args.db)
+    desired = queue.resize_executor(args.workers)
+    metrics = DashboardQueries(args.db).status()
+    print(json.dumps({
+        "executor_capacity": {
+            "desired": desired,
+            "live": metrics.get("executor_worker_live_count", 0),
+            "busy": metrics.get("executor_worker_busy_count", 0),
+            "draining": metrics.get("executor_worker_draining_count", 0),
+        }
+    }, ensure_ascii=False))
     return 0
 
 
@@ -581,6 +606,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_pause_executor)
     s = sub.add_parser("resume-executor", help="resume claiming pending jobs")
     s.set_defaults(func=cmd_resume_executor)
+    s = sub.add_parser("resize-executor", help="change live executor capacity without restarting")
+    s.add_argument("--workers", type=int, required=True, help="desired worker count (at least 1)")
+    s.set_defaults(func=cmd_resize_executor)
     s = sub.add_parser("jobs"); s.add_argument("--status"); s.add_argument("--limit", type=int, default=20); s.set_defaults(func=cmd_jobs)
     s = sub.add_parser("retry"); s.add_argument("job_id", type=int); s.set_defaults(func=cmd_retry)
     s = sub.add_parser("dismiss"); s.add_argument("job_id", type=int); s.add_argument("--reason", required=True); s.set_defaults(func=cmd_dismiss)

@@ -106,6 +106,18 @@ class RuntimeRepository:
             )
             return cursor.rowcount
 
+    def delete_worker_heartbeat(self, worker_id: str, executor_id: str) -> bool:
+        """Remove one worker after it has completed a graceful drain."""
+        with self.database.transaction(
+            TransactionMode.DEFERRED,
+            operation="runtime.delete_worker_heartbeat",
+        ) as con:
+            cursor = con.execute(
+                "DELETE FROM worker_heartbeats WHERE worker_id=? AND executor_id=?",
+                (worker_id, executor_id),
+            )
+            return cursor.rowcount == 1
+
     def register_process(self, job_id: int, process: RuntimeProcess) -> bool:
         """Persist the exact process that owns a running job."""
         now = utc_now()

@@ -132,7 +132,9 @@ class MonitorReport:
             f"pending={metrics.get('pending', 0)}",
             f"blocked={metrics.get('blocked', 0)}",
             f"running={metrics.get('running', 0)}",
-            f"workers_live={metrics.get('worker_heartbeats_live', 0)}/{metrics.get('executor_worker_count', 0)}",
+            f"workers={metrics.get('worker_heartbeats_live', 0)}/{metrics.get('executor_worker_count', 0)}",
+            f"workers_busy={metrics.get('executor_worker_busy_count', 0)}",
+            f"workers_draining={metrics.get('executor_worker_draining_count', 0)}",
             f"quarantined={metrics.get('quarantined_notifications', 0)}",
             f"oldest_pending={metrics.get('oldest_pending_age_seconds') if metrics.get('oldest_pending_age_seconds') is not None else '-'}",
             f"last_uid={metrics.get('last_uid', '-')}",
@@ -392,10 +394,26 @@ def monitor(
             if int(heartbeat.get("age_seconds") or 0) <= thresholds.worker_heartbeat_warn_seconds
         ]
         metrics["worker_heartbeats_live"] = len(live_heartbeats)
-        if executor_state == "active" and expected_workers and len(current_heartbeats) < expected_workers:
+        draining_heartbeats = [
+            heartbeat
+            for heartbeat in live_heartbeats
+            if heartbeat.get("loop_state") == "draining"
+        ]
+        active_heartbeats = [
+            heartbeat
+            for heartbeat in live_heartbeats
+            if heartbeat.get("loop_state") != "draining"
+        ]
+        metrics["executor_worker_live_count"] = len(live_heartbeats)
+        metrics["executor_worker_busy_count"] = sum(
+            heartbeat.get("active_job_id") is not None
+            for heartbeat in live_heartbeats
+        )
+        metrics["executor_worker_draining_count"] = len(draining_heartbeats)
+        if executor_state == "active" and expected_workers and len(active_heartbeats) < expected_workers:
             _add_alert(
                 metrics, alerts, ALERT_WORKER_HEARTBEAT_MISSING,
-                f"executor has {len(current_heartbeats)}/{expected_workers} worker heartbeats",
+                f"executor has {len(active_heartbeats)}/{expected_workers} active worker heartbeats",
             )
         stale_heartbeats = [
             heartbeat for heartbeat in current_heartbeats

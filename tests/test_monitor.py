@@ -646,6 +646,30 @@ def test_monitor_alerts_on_missing_worker_heartbeat(tmp_path, monkeypatch):
     assert report.metrics["worker_heartbeats_live"] == 1
 
 
+def test_monitor_distinguishes_desired_live_busy_and_draining_workers(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    q = JobQueue(db)
+    job, _ = q.enqueue(notif(), Policy(trusted_orgs={"gisce"}))
+    q.set_state("executor_process_tracking_id", "executor-1")
+    q.resize_executor(2)
+    q.record_worker_heartbeat("executor-1/worker-0", "executor-1", 123, "idle")
+    q.record_worker_heartbeat("executor-1/worker-1", "executor-1", 123, "running", job.id)
+    q.record_worker_heartbeat("executor-1/worker-2", "executor-1", 123, "draining", job.id)
+    monkeypatch.setattr(monitor_module, "_is_active", lambda unit: "active")
+    monkeypatch.setattr(monitor_module, "_main_pid", lambda unit: 123)
+    monkeypatch.setattr(monitor_module, "_direct_children", lambda pid: [])
+    monkeypatch.setattr(monitor_module, "_last_service_result", lambda unit: ("success", "0", 1))
+
+    report = monitor(db)
+
+    assert report.metrics["executor_worker_count"] == 2
+    assert report.metrics["executor_worker_live_count"] == 3
+    assert report.metrics["executor_worker_busy_count"] == 2
+    assert report.metrics["executor_worker_draining_count"] == 1
+    assert "monitor.worker_heartbeat_missing" not in report.metrics.get("alert_codes", [])
+    assert "workers=3/2 workers_busy=2 workers_draining=1" in report.text()
+
+
 def test_monitor_alerts_on_stale_worker_heartbeat(tmp_path, monkeypatch):
     db = tmp_path / "bridge.sqlite3"
     q = JobQueue(db)
