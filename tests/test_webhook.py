@@ -680,6 +680,10 @@ def test_webhook_canary_does_not_claim_non_actionable_comment_before_email(tmp_p
         "github_agent_bridge.queue.trigger_actor_details_for_enqueue",
         lambda notification, ctx: None,
     )
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.resolve_feedback_authorization",
+        lambda ctx, bot_logins, **kwargs: "ignored",
+    )
     comment_id = 5948901951
     payload = non_actionable_issue_comment_payload(comment_id=comment_id)
     config = DashboardConfig(
@@ -712,14 +716,11 @@ def test_webhook_canary_does_not_claim_non_actionable_comment_before_email(tmp_p
     )
 
     assert webhook.json()["enqueue_status"] == "ignored"
-    assert email_status == "enqueued"
-    assert email_job is not None
+    assert email_status == "ignored"
+    assert email_job is None
     with sqlite3.connect(config.db) as con:
-        assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
-        assert con.execute(
-            "SELECT first_source FROM github_events WHERE event_key=?",
-            (f"issue_comment:created:gisce/github-agent-bridge:{comment_id}",),
-        ).fetchone()[0] == "email"
+        assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        assert con.execute("SELECT COUNT(*) FROM github_events").fetchone()[0] == 0
 
 
 def test_webhook_canary_enqueues_issue_comment_on_bot_authored_pull_request(

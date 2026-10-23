@@ -26,6 +26,10 @@ from github_agent_bridge.queue import JobQueue
 @pytest.fixture(autouse=True)
 def no_context_actor_lookup(monkeypatch):
     monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.resolve_feedback_authorization",
+        lambda *args, **kwargs: "mentioned",
+    )
 
 
 def notif(uid=1, mid="<1@github.com>", body="@pilipilisbot https://github.com/gisce/erp/pull/1#issuecomment-10", from_addr="GitHub <notifications@github.com>"):

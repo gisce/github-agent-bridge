@@ -38,6 +38,15 @@ def intent_policy(**kwargs):
     )
 
 
+@pytest.fixture(autouse=True)
+def verified_feedback_authorization(monkeypatch):
+    monkeypatch.setattr(
+        queue_module,
+        "resolve_feedback_authorization",
+        lambda *args, **kwargs: "mentioned",
+    )
+
+
 @pytest.mark.parametrize("decision,status", [("deny", "denied"), ("ask", "waiting_approval")])
 def test_retry_cannot_override_policy_decision(tmp_path, decision, status):
     q = JobQueue(tmp_path / "q.sqlite3")

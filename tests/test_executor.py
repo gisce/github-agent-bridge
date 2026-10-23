@@ -11,6 +11,14 @@ from github_agent_bridge.policy import ModelRoute, ModelRoutes, Policy
 from github_agent_bridge.queue import JobQueue
 
 
+@pytest.fixture(autouse=True)
+def verified_feedback_authorization(monkeypatch):
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.resolve_feedback_authorization",
+        lambda *args, **kwargs: "mentioned",
+    )
+
+
 class FakeGitHub:
     def __init__(self, assigned: bool, mentioned: bool = True, non_actionable_review: bool = False, authored: bool = False, answered_url: str | None = None, merged: bool | None = False):
         self.assigned = assigned
@@ -143,6 +151,7 @@ def enqueue_unaddressed_pr_review(queue: JobQueue):
             "https://github.com/gisce/ab-modules/pull/247#pullrequestreview-5439481624\n"
             "You are receiving this because your review was requested."
         ),
+        metadata={"feedback_actionability": "defer_to_executor"},
     )
     job, state = queue.enqueue(
         notification,
