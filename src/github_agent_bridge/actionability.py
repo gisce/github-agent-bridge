@@ -45,6 +45,8 @@ def evaluate_feedback_authorization(
     configured = {login.lower().lstrip("@") for login in bot_logins}
     if not configured:
         return "ignored"
+    if not facts.complete:
+        return "defer_to_executor"
     if first_mentioned_login(facts.body) in configured:
         return "mentioned"
     if configured.intersection(login.lower() for login in facts.assignees):
@@ -52,7 +54,7 @@ def evaluate_feedback_authorization(
     author = (facts.subject_author or "").lower()
     if facts.is_pull_request and author in configured:
         return "pr_authored_by_bot"
-    return "ignored" if facts.complete else "defer_to_executor"
+    return "ignored"
 
 
 def feedback_authorization_from_webhook(
@@ -137,12 +139,10 @@ def resolve_feedback_authorization(
 ) -> str:
     """Resolve transport-neutral feedback facts for an email receipt.
 
-    A first explicit mention is already a positive signal. Other cases require
-    live GitHub facts; the email footer and ``X-GitHub-Reason`` are never used.
+    Positive signals come only from live GitHub facts. ``notification_body``
+    remains accepted for call compatibility, but email content, footers and
+    ``X-GitHub-Reason`` are never authoritative.
     """
-    configured = {login.lower().lstrip("@") for login in bot_logins}
-    if first_mentioned_login(notification_body) in configured:
-        return "mentioned"
     if ctx.target_kind not in FEEDBACK_TARGET_KINDS or not ctx.repo:
         return "not_applicable"
 

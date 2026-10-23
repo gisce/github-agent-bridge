@@ -96,3 +96,73 @@ def test_email_guard_uses_verified_comment_and_thread_facts(monkeypatch):
             "You are receiving this because you were assigned."
         ),
     ) == "ignored"
+
+
+def test_email_only_mention_does_not_authorize_feedback(monkeypatch):
+    responses = {
+        "repos/gisce/example/issues/comments/6045089117": {
+            "body": "I found a migration safety gap.",
+        },
+        "repos/gisce/example/issues/260": {
+            "user": {"login": "ecarreras"},
+            "assignees": [],
+        },
+    }
+
+    def fake_run(args, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(responses[args[-1]]),
+            stderr="",
+        )
+
+    monkeypatch.setattr("github_agent_bridge.actionability.subprocess.run", fake_run)
+    ctx = GitHubContext(
+        urls=[
+            "https://github.com/gisce/example/issues/260#issuecomment-6045089117"
+        ],
+        repo="gisce/example",
+        issue_number=260,
+        comment_id=6045089117,
+        target_kind="issue_comment",
+    )
+
+    assert resolve_feedback_authorization(
+        ctx,
+        {"giscebot"},
+        notification_body=(
+            "@giscebot fix this.\n"
+            "You are receiving this because you were assigned."
+        ),
+    ) == "ignored"
+
+
+def test_incomplete_source_lookup_defers_even_when_thread_is_bot_assigned(
+    monkeypatch,
+):
+    def fake_run(args, **kwargs):
+        if args[-1] == "repos/gisce/example/issues/comments/6045089117":
+            return SimpleNamespace(returncode=1, stdout="", stderr="unavailable")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "user": {"login": "ecarreras"},
+                    "assignees": [{"login": "giscebot"}],
+                }
+            ),
+            stderr="",
+        )
+
+    monkeypatch.setattr("github_agent_bridge.actionability.subprocess.run", fake_run)
+    ctx = GitHubContext(
+        urls=[
+            "https://github.com/gisce/example/issues/260#issuecomment-6045089117"
+        ],
+        repo="gisce/example",
+        issue_number=260,
+        comment_id=6045089117,
+        target_kind="issue_comment",
+    )
+
+    assert resolve_feedback_authorization(ctx, {"giscebot"}) == "defer_to_executor"

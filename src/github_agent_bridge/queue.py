@@ -177,7 +177,6 @@ class JobQueue:
             feedback_actionability = resolve_feedback_authorization(
                 ctx,
                 policy.bot_logins,
-                notification_body=n.body,
             )
             metadata["feedback_actionability"] = feedback_actionability
         if feedback_target and feedback_actionability == "ignored":
