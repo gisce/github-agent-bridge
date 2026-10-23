@@ -202,12 +202,15 @@ type WebhookSummary = {
     webhook_only: number;
     decision_mismatches?: number;
     split_identities?: number;
+    observation_complete?: boolean;
+    promotion_state?: "insufficient_data" | "blocked" | "ready";
     promotion_ready?: boolean;
     imap_eligible: number;
     ratio?: number | null;
     mean_match_delay_ms?: number | null;
     window_start?: string;
     window_end?: string;
+    observation_days?: number;
     grace_seconds?: number;
   };
 };
@@ -215,9 +218,13 @@ type WebhookSummary = {
 type WebhookException = {
   kind: "imap_only" | "webhook_only" | "unmatchable" | "decision_mismatch" | "split_identity";
   event_key?: string | null;
+  related_event_key?: string | null;
   reference: string;
+  related_reference?: string | null;
   created_at: string;
   repository?: string | null;
+  event_type?: string | null;
+  event_action?: string | null;
 };
 
 type WebhookExceptionsResponse = { exceptions: WebhookException[] };
@@ -2083,6 +2090,9 @@ function WebhookPage({
   onRefresh,
 }: WebhookPageProps) {
   const observed = Object.values(summary?.receipts ?? {}).reduce((total, count) => total + count, 0);
+  const promotionState = summary?.coverage?.promotion_state
+    ?? (summary?.coverage?.promotion_ready ? "ready" : "blocked");
+  const promotionLabel = promotionState === "insufficient_data" ? "insufficient data" : promotionState;
   const sections = [
     { id: "overview" as const, label: "Overview" },
     { id: "hooks" as const, label: "Hooks", count: summary?.totals?.hooks },
@@ -2116,13 +2126,13 @@ function WebhookPage({
             <MiniStat label="Coverage" value={summary?.coverage?.ratio == null ? "not measurable" : `${Math.round(summary.coverage.ratio * 100)}%`} />
             <MiniStat label="Decision mismatches" value={summary?.coverage?.decision_mismatches ?? 0} />
             <MiniStat label="Split identities" value={summary?.coverage?.split_identities ?? 0} />
-            <MiniStat label="Promotion gate" value={summary?.coverage?.promotion_ready ? "ready" : "blocked"} />
+            <MiniStat label="Promotion gate" value={promotionLabel} />
           </div>
-          {summary?.coverage?.window_start && summary.coverage.window_end ? <p className="mt-3 font-mono text-xs text-muted">Actionable IMAP events and comparable webhook events from <TimeText value={summary.coverage.window_start} /> to <TimeText value={summary.coverage.window_end} />; newest {summary.coverage.grace_seconds ?? 0}s excluded.</p> : null}
+          {summary?.coverage?.window_start && summary.coverage.window_end ? <p className="mt-3 font-mono text-xs text-muted">Actionable IMAP events and comparable webhook events from <TimeText value={summary.coverage.window_start} /> to <TimeText value={summary.coverage.window_end} />; {summary.coverage.observation_days ?? 7} observation days required and newest {summary.coverage.grace_seconds ?? 0}s excluded.</p> : null}
         </Panel>
         {Object.keys(summary?.enqueue ?? {}).length ? <Panel title="Canary ingestion decisions"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{Object.entries(summary?.enqueue ?? {}).sort(([left], [right]) => left.localeCompare(right)).map(([state, count]) => <MiniStat key={state} label={state} value={count} />)}</div></Panel> : null}
         <Panel title="Exceptions requiring review">
-          {exceptions?.length ? <div className="overflow-x-auto"><table className="w-full min-w-[720px] text-left text-sm"><thead className="border-b border-border text-xs text-muted"><tr><th className="px-3 py-2">Type</th><th className="px-3 py-2">Repository</th><th className="px-3 py-2">Reference</th><th className="px-3 py-2">Observed</th></tr></thead><tbody>{exceptions.map((item) => <tr key={`${item.kind}:${item.reference}`} className="border-b border-border/70 last:border-0"><td className="px-3 py-2 font-semibold">{item.kind}</td><td className="px-3 py-2 font-mono text-xs">{item.repository ?? "unknown"}</td><td className="px-3 py-2 font-mono text-xs">{item.event_key ?? item.reference}</td><td className="px-3 py-2 font-mono text-xs text-muted"><TimeText value={item.created_at} compact /></td></tr>)}</tbody></table></div> : <EmptyState text="No cross-source exceptions in retained data." />}
+          {exceptions?.length ? <div className="overflow-x-auto"><table className="w-full min-w-[840px] text-left text-sm"><thead className="border-b border-border text-xs text-muted"><tr><th className="px-3 py-2">Type</th><th className="px-3 py-2">Repository</th><th className="px-3 py-2">Event</th><th className="px-3 py-2">References</th><th className="px-3 py-2">Observed</th></tr></thead><tbody>{exceptions.map((item) => <tr key={`${item.kind}:${item.reference}:${item.related_reference ?? ""}`} className="border-b border-border/70 last:border-0"><td className="px-3 py-2 font-semibold">{item.kind}</td><td className="px-3 py-2 font-mono text-xs">{item.repository ?? "unknown"}</td><td className="px-3 py-2 font-mono text-xs">{item.event_type ? `${item.event_type}${item.event_action ? `:${item.event_action}` : ""}` : "unknown"}</td><td className="px-3 py-2 font-mono text-xs"><div>{item.reference}</div>{item.related_reference ? <div>{item.related_reference}</div> : null}{item.event_key ? <div className="text-muted">{item.event_key}{item.related_event_key ? ` ↔ ${item.related_event_key}` : ""}</div> : null}</td><td className="px-3 py-2 font-mono text-xs text-muted"><TimeText value={item.created_at} compact /></td></tr>)}</tbody></table></div> : <EmptyState text="No cross-source exceptions in retained data." />}
         </Panel>
       </> : null}
       {section === "hooks" ? <Panel title="Hook inventory">

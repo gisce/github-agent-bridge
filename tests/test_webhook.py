@@ -1701,9 +1701,155 @@ def test_webhook_coverage_includes_actionable_uncorrelated_email_keys(
     assert fallback_exception["repository"] == "gisce/repo"
 
 
-def test_webhook_promotion_gate_reports_decision_and_identity_mismatches(tmp_path):
+def test_webhook_promotion_gate_requires_a_complete_nonempty_observation(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     JobQueue(db)
+    client = TestClient(create_app(DashboardConfig(
+        db=db,
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_retention_days=1,
+        webhook_promotion_observation_days=1,
+        webhook_coverage_grace_seconds=0,
+    )))
+
+    fresh = client.get("/api/webhooks/github/summary").json()["coverage"]
+
+    assert fresh["observation_complete"] is False
+    assert fresh["promotion_state"] == "insufficient_data"
+    assert fresh["promotion_ready"] is False
+
+    old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    with sqlite3.connect(db) as con:
+        con.execute(
+            "INSERT INTO webhook_shadow_receipts("
+            "delivery_id,event_name,repository,payload_hash,status,created_at"
+            ") VALUES(?,?,?,?,?,?)",
+            ("observation-start", "ping", "gisce/repo", "old", "unsupported", old),
+        )
+
+    empty_cohort = client.get("/api/webhooks/github/summary").json()["coverage"]
+
+    assert empty_cohort["observation_complete"] is True
+    assert empty_cohort["both"] == 0
+    assert empty_cohort["promotion_state"] == "insufficient_data"
+    assert empty_cohort["promotion_ready"] is False
+
+
+def test_webhook_promotion_gate_waits_for_a_complete_window_with_matches(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    now = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    event_key = "issue_comment:created:gisce/repo:10"
+    with sqlite3.connect(db) as con:
+        con.executemany(
+            "INSERT INTO ingest_receipts("
+            "source,source_key,payload_hash,event_key,repository,work_key,"
+            "event_type,event_action,bridge_action,decision,work_intent,"
+            "status,created_at,updated_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    source, f"{source}-10", f"{source}-10", event_key,
+                    "gisce/repo", "gisce/repo#1", "issue_comment", "created",
+                    "reply_comment", "auto_trusted", "work_allowed", status, now, now,
+                )
+                for source, status in (("email", "accepted"), ("webhook", "duplicate"))
+            ],
+        )
+        con.execute(
+            "INSERT INTO webhook_shadow_receipts("
+            "delivery_id,event_name,action,event_key,repository,payload_hash,"
+            "payload_json,status,created_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?)",
+            (
+                "delivery-10", "issue_comment", "created", event_key,
+                "gisce/repo", "webhook-10", json.dumps({"issue": {"number": 1}}),
+                "observed", now,
+            ),
+        )
+    client = TestClient(create_app(DashboardConfig(
+        db=db,
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_retention_days=1,
+        webhook_promotion_observation_days=1,
+        webhook_coverage_grace_seconds=0,
+    )))
+
+    coverage = client.get("/api/webhooks/github/summary").json()["coverage"]
+
+    assert coverage["both"] == 1
+    assert coverage["observation_complete"] is False
+    assert coverage["promotion_state"] == "insufficient_data"
+    assert coverage["promotion_ready"] is False
+
+
+def test_webhook_promotion_gate_ignores_distinct_immutable_comment_ids(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    now = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    with sqlite3.connect(db) as con:
+        con.executemany(
+            "INSERT INTO ingest_receipts("
+            "source,source_key,payload_hash,event_key,repository,work_key,"
+            "event_type,event_action,bridge_action,decision,work_intent,"
+            "status,created_at,updated_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    source, f"{source}-{comment_id}", f"{source}-{comment_id}",
+                    f"issue_comment:created:gisce/repo:{comment_id}",
+                    "gisce/repo", "gisce/repo#1", "issue_comment", "created",
+                    "reply_comment", "auto_trusted", "work_allowed", status, now, now,
+                )
+                for comment_id in (10, 11)
+                for source, status in (("email", "accepted"), ("webhook", "duplicate"))
+            ],
+        )
+        con.executemany(
+            "INSERT INTO webhook_shadow_receipts("
+            "delivery_id,event_name,action,event_key,repository,payload_hash,"
+            "payload_json,status,created_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    "observation-start", "ping", None, None, "gisce/repo", "old",
+                    "{}", "unsupported", old,
+                ),
+                *(
+                    (
+                        f"delivery-{comment_id}", "issue_comment", "created",
+                        f"issue_comment:created:gisce/repo:{comment_id}",
+                        "gisce/repo", f"webhook-{comment_id}",
+                        json.dumps({"issue": {"number": 1}}), "observed", now,
+                    )
+                    for comment_id in (10, 11)
+                ),
+            ],
+        )
+    client = TestClient(create_app(DashboardConfig(
+        db=db,
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_retention_days=1,
+        webhook_promotion_observation_days=1,
+        webhook_coverage_grace_seconds=0,
+    )))
+
+    coverage = client.get("/api/webhooks/github/summary").json()["coverage"]
+
+    assert coverage["both"] == 2
+    assert coverage["split_identities"] == 0
+    assert coverage["promotion_state"] == "ready"
+    assert coverage["promotion_ready"] is True
+
+
+def test_webhook_promotion_gate_reports_decision_and_fallback_identity_mismatches(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
     now = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
     with sqlite3.connect(db) as con:
         con.executemany(
@@ -1724,8 +1870,13 @@ def test_webhook_promotion_gate_reports_decision_and_identity_mismatches(tmp_pat
                     "reply_comment", "auto_trusted", "review_only", "duplicate", now, now,
                 ),
                 (
-                    "email", "email-split", "h3", "issue_comment:created:gisce/repo:20",
-                    "gisce/repo", "gisce/repo#2", "issue_comment", "created",
+                    "email", "email-split", "h3", "email:<split@github.com>",
+                    "gisce/repo", "gisce/repo#2", "issues", "assigned",
+                    "reply_comment", "auto_trusted", "review_only", "accepted", now, now,
+                ),
+                (
+                    "webhook", "delivery-split", "h4", "webhook:delivery-split",
+                    "gisce/repo", "gisce/repo#2", "issues", "assigned",
                     "reply_comment", "auto_trusted", "review_only", "accepted", now, now,
                 ),
             ],
@@ -1737,13 +1888,17 @@ def test_webhook_promotion_gate_reports_decision_and_identity_mismatches(tmp_pat
             ") VALUES(?,?,?,?,?,?,?,?,?)",
             [
                 (
+                    "observation-start", "ping", None, None, "gisce/repo", "old",
+                    "{}", "unsupported", old,
+                ),
+                (
                     "delivery-match", "issue_comment", "created",
                     "issue_comment:created:gisce/repo:1", "gisce/repo", "w1",
                     json.dumps({"issue": {"number": 1}}), "observed", now,
                 ),
                 (
-                    "delivery-split", "issue_comment", "created",
-                    "issue_comment:created:gisce/repo:21", "gisce/repo", "w2",
+                    "delivery-split", "issues", "assigned",
+                    "webhook:delivery-split", "gisce/repo", "w2",
                     json.dumps({"issue": {"number": 2}}), "observed", now,
                 ),
             ],
@@ -1752,14 +1907,29 @@ def test_webhook_promotion_gate_reports_decision_and_identity_mismatches(tmp_pat
         db=db,
         require_auth=False,
         webhook_secrets=(SECRET,),
+        webhook_retention_days=1,
+        webhook_promotion_observation_days=1,
         webhook_coverage_grace_seconds=0,
     )))
 
     coverage = client.get("/api/webhooks/github/summary").json()["coverage"]
+    exceptions = client.get("/api/webhooks/github/exceptions").json()["exceptions"]
 
     assert coverage["decision_mismatches"] == 1
     assert coverage["split_identities"] == 1
+    assert coverage["promotion_state"] == "blocked"
     assert coverage["promotion_ready"] is False
+    assert {
+        (
+            item["kind"], item["event_type"], item["reference"],
+            item.get("related_reference"),
+        )
+        for item in exceptions
+        if item["kind"] in {"decision_mismatch", "split_identity"}
+    } == {
+        ("decision_mismatch", "issue_comment", "email-match", "webhook-match"),
+        ("split_identity", "issues", "email-split", "delivery-split"),
+    }
 
 
 def test_admin_can_request_hook_ping_and_action_is_audited(tmp_path, monkeypatch):
@@ -1919,11 +2089,18 @@ def test_webhook_receipt_retention_removes_expired_delivery_details(tmp_path):
     payload = issue_comment_payload()
     client.post("/api/webhooks/github", content=payload, headers=signed_headers(payload, delivery="old"))
     with sqlite3.connect(db) as con:
+        observation_started_at = con.execute(
+            "SELECT value FROM state WHERE key='webhook_observation_started_at'"
+        ).fetchone()[0]
         con.execute("UPDATE webhook_shadow_receipts SET created_at='2020-01-01T00:00:00+00:00'")
     client.post("/api/webhooks/github", content=payload, headers=signed_headers(payload, delivery="new"))
 
     deliveries = client.get("/api/webhooks/github/deliveries").json()["deliveries"]
     assert [item["delivery_id"] for item in deliveries] == ["new"]
+    with sqlite3.connect(db) as con:
+        assert con.execute(
+            "SELECT value FROM state WHERE key='webhook_observation_started_at'"
+        ).fetchone()[0] == observation_started_at
 
 
 def test_existing_webhook_receipt_schema_is_migrated_for_hook_inventory(tmp_path):
