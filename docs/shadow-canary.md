@@ -90,6 +90,13 @@ recorded as a duplicate of it.
 Inspect webhook summary, exceptions and deliveries in the administrator
 dashboard. Do not widen the canary while there are unexplained actionable
 IMAP-only events, split jobs, or action/intent mismatches.
+The **Promotion gate** card remains `insufficient data` until the complete
+configured observation window contains at least one comparable cross-source
+event. It is only `ready` when that window has no unmatched events, no
+receipt-scoped decision mismatches and no potential split identities. A split
+candidate requires receipt-scoped identities with the same thread and event
+descriptor arriving within ten minutes; it is an investigation hint, not
+deduplication proof. The gate is observational, not an automatic cutover switch.
 
 ## 5. Primary webhook with IMAP fallback
 
