@@ -9,6 +9,14 @@ from github_agent_bridge.policy import Policy
 from github_agent_bridge.queue import JobQueue
 
 
+@pytest.fixture(autouse=True)
+def verified_feedback_authorization(monkeypatch):
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.resolve_feedback_authorization",
+        lambda *args, **kwargs: "mentioned",
+    )
+
+
 class QueueStub:
     def get_state(self, key, default=None):
         return default
