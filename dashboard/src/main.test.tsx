@@ -236,7 +236,7 @@ describe("dashboard routing and API query helpers", () => {
   });
 
   it("renders the webhook status exported by the backend", () => {
-    render(<WebhookPage summary={{ mode: "shadow", configured: true, receipts: { observed: 7 }, duplicate_deliveries: 2, cross_source_matches: 3, totals: { hooks: 143, deliveries: 912 }, coverage: { both: 3, imap_only: 1, webhook_only: 2, imap_eligible: 4, ratio: 0.75, decision_mismatches: 1, split_identities: 1, promotion_state: "blocked", promotion_ready: false, observation_complete: true, window_start: "2026-10-01T00:00:00Z", window_end: "2026-10-08T00:00:00Z", grace_seconds: 600 } }} timeseries={[]} section="overview" summaryLoading={false} sectionLoading={false} loadingMore={false} hasMore={false} deliveryFilters={{ hook_id: "", event_name: "", repository: "", result: "", enqueue_status: "" }} error={null} onSectionChange={vi.fn()} onLoadMore={vi.fn()} onDeliveryFiltersChange={vi.fn()} onViewHook={vi.fn()} onRefresh={vi.fn()} />);
+    render(<WebhookPage summary={{ mode: "shadow", configured: true, receipts: { observed: 7 }, duplicate_deliveries: 2, cross_source_matches: 3, totals: { hooks: 143, deliveries: 912 }, coverage: { both: 3, imap_only: 1, webhook_only: 2, imap_eligible: 4, ratio: 0.75, decision_mismatches: 1, incomplete_decision_traces: 1, split_identities: 1, promotion_state: "blocked", promotion_ready: false, observation_complete: true, window_start: "2026-10-01T00:00:00Z", window_end: "2026-10-08T00:00:00Z", grace_seconds: 600 } }} timeseries={[]} section="overview" summaryLoading={false} sectionLoading={false} loadingMore={false} hasMore={false} deliveryFilters={{ hook_id: "", event_name: "", repository: "", result: "", enqueue_status: "" }} error={null} onSectionChange={vi.fn()} onLoadMore={vi.fn()} onDeliveryFiltersChange={vi.fn()} onViewHook={vi.fn()} onRefresh={vi.fn()} />);
 
     expect(screen.getByRole("heading", { name: "GitHub webhooks" })).toBeInTheDocument();
     expect(screen.getByText("shadow")).toBeInTheDocument();
@@ -248,6 +248,7 @@ describe("dashboard routing and API query helpers", () => {
       screen.getByText(/Actionable IMAP events and comparable webhook events/),
     ).toBeInTheDocument();
     expect(screen.getByText("Decision mismatches")).toBeInTheDocument();
+    expect(screen.getByText("Incomplete decision traces")).toBeInTheDocument();
     expect(screen.getByText("Split identities")).toBeInTheDocument();
     expect(screen.getByText("blocked")).toBeInTheDocument();
   });

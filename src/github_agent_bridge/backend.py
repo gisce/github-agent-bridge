@@ -1007,7 +1007,10 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             grace_seconds=config.webhook_coverage_grace_seconds,
         )
         summary = webhook_repository.summary(window_start, window_end)
-        has_comparable_events = summary["both_events"] > 0
+        has_comparable_events = (
+            summary["both_events"] > 0
+            and summary["incomplete_decision_traces"] == 0
+        )
         parity_clean = (
             summary["imap_events"] == summary["both_events"]
             and summary["webhook_events"] == summary["both_events"]
@@ -1045,6 +1048,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
                 "imap_only": max(summary["imap_events"] - summary["both_events"], 0),
                 "webhook_only": max(summary["webhook_events"] - summary["both_events"], 0),
                 "decision_mismatches": summary["decision_mismatches"],
+                "incomplete_decision_traces": summary["incomplete_decision_traces"],
                 "split_identities": summary["split_identities"],
                 "observation_complete": observation_complete,
                 "promotion_state": promotion_state,
