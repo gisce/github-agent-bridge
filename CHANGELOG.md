@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.85.0 (2026-10-24)
+
+### Features
+
+- Resize executor workers at runtime
+  ([`a04d477`](https://github.com/gisce/github-agent-bridge/commit/a04d4776167c134534c973697947c1901017bf0a))
+
+
 ## v0.84.0 (2026-10-21)
 
 ### Bug Fixes
