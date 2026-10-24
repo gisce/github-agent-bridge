@@ -190,6 +190,7 @@ type WebhookSummary = {
     imap_only: number;
     webhook_only: number;
     decision_mismatches?: number;
+    incomplete_decision_traces?: number;
     split_identities?: number;
     observation_complete?: boolean;
     promotion_state?: "insufficient_data" | "blocked" | "ready";
@@ -2079,6 +2080,7 @@ function WebhookPage({
             <MiniStat label="Webhook only" value={summary?.coverage?.webhook_only ?? 0} />
             <MiniStat label="Coverage" value={summary?.coverage?.ratio == null ? "not measurable" : `${Math.round(summary.coverage.ratio * 100)}%`} />
             <MiniStat label="Decision mismatches" value={summary?.coverage?.decision_mismatches ?? 0} />
+            <MiniStat label="Incomplete decision traces" value={summary?.coverage?.incomplete_decision_traces ?? 0} />
             <MiniStat label="Split identities" value={summary?.coverage?.split_identities ?? 0} />
             <MiniStat label="Promotion gate" value={promotionLabel} />
           </div>

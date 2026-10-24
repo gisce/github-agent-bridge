@@ -241,8 +241,11 @@ plus its grace period or the gate remains `insufficient_data`.
 Every durable ingestion receipt also records the normalized repository, work
 key, event descriptor, bridge action, policy decision and work intent. The
 dashboard compares those receipt-scoped decisions when both transports share a
-canonical identity. It reports action/intent/work-key mismatches and potential
-split identities separately. A potential split requires source-scoped
+canonical identity. It reports action/intent/work-key mismatches, incomplete
+decision traces and potential split identities separately. Receipts retained
+from before migration v7 have nullable trace columns: their event coverage
+remains visible, but they are not a comparable decision cohort and keep the
+gate at `insufficient_data`. A potential split requires source-scoped
 `email:*` and `webhook:*` identities with the same work key and event descriptor
 received within ten minutes. This is deliberately an ambiguity signal, not
 proof that the receipts are the same occurrence, and it never causes events to
@@ -250,8 +253,9 @@ be deduplicated. Distinct immutable comment or review IDs are never classified
 as splits merely because they belong to the same thread.
 
 The gate reports `insufficient_data` until the full configured observation window
-has been observed and contains at least one cross-source comparable event. It
-remains `blocked` while either transport has unmatched events or either
+has been observed and every cross-source match in a nonempty cohort has a
+complete action/intent/work-key trace. It remains `blocked` while either
+transport has unmatched events or either
 mismatch count is non-zero, and becomes `ready` only for a complete, nonempty,
 clean window. Run `gab migrate-db` before deploying this read model.
 

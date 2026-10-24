@@ -1691,6 +1691,7 @@ def test_webhook_coverage_includes_actionable_uncorrelated_email_keys(
     assert {(item["kind"], item["event_key"]) for item in exceptions["exceptions"]} == {
         ("imap_only", "issue_comment:created:gisce/repo:4"),
         ("imap_only", "email:<fallback@github.com>"),
+        ("incomplete_trace", "issue_comment:created:gisce/repo:1"),
         ("webhook_only", "issue_comment:created:gisce/repo:2"),
     }
     fallback_exception = next(
@@ -1783,6 +1784,78 @@ def test_webhook_promotion_gate_waits_for_a_complete_window_with_matches(tmp_pat
     assert coverage["observation_complete"] is False
     assert coverage["promotion_state"] == "insufficient_data"
     assert coverage["promotion_ready"] is False
+
+
+def test_webhook_promotion_gate_rejects_migrated_pairs_without_decision_trace(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    now = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    event_key = "issue_comment:created:gisce/repo:10"
+    with queue.connect() as con:
+        con.execute("DROP INDEX idx_ingest_receipts_decision_trace")
+        for column in (
+            "work_intent",
+            "decision",
+            "bridge_action",
+            "event_action",
+            "event_type",
+            "work_key",
+            "repository",
+        ):
+            con.execute(f"ALTER TABLE ingest_receipts DROP COLUMN {column}")
+        con.execute("DELETE FROM schema_migrations WHERE version=7")
+        con.executemany(
+            "INSERT INTO ingest_receipts("
+            "source,source_key,payload_hash,event_key,status,created_at,updated_at"
+            ") VALUES(?,?,?,?,?,?,?)",
+            [
+                (source, f"{source}-10", f"{source}-10", event_key, status, now, now)
+                for source, status in (("email", "accepted"), ("webhook", "duplicate"))
+            ],
+        )
+        con.executemany(
+            "INSERT INTO webhook_shadow_receipts("
+            "delivery_id,event_name,action,event_key,repository,payload_hash,"
+            "payload_json,status,created_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    "observation-start", "ping", None, None, "gisce/repo", "old",
+                    "{}", "unsupported", old,
+                ),
+                (
+                    "webhook-10", "issue_comment", "created", event_key,
+                    "gisce/repo", "webhook-10",
+                    json.dumps({"issue": {"number": 1}}), "observed", now,
+                ),
+            ],
+        )
+
+    JobQueue(db, migrate=True)
+    client = TestClient(create_app(DashboardConfig(
+        db=db,
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_retention_days=1,
+        webhook_promotion_observation_days=1,
+        webhook_coverage_grace_seconds=0,
+    )))
+
+    coverage = client.get("/api/webhooks/github/summary").json()["coverage"]
+    exceptions = client.get("/api/webhooks/github/exceptions").json()["exceptions"]
+
+    assert coverage["observation_complete"] is True
+    assert coverage["both"] == 1
+    assert coverage["decision_mismatches"] == 0
+    assert coverage["incomplete_decision_traces"] == 1
+    assert coverage["promotion_state"] == "insufficient_data"
+    assert coverage["promotion_ready"] is False
+    assert {
+        (item["kind"], item["reference"], item.get("related_reference"))
+        for item in exceptions
+        if item["kind"] == "incomplete_trace"
+    } == {("incomplete_trace", "email-10", "webhook-10")}
 
 
 def test_webhook_promotion_gate_ignores_distinct_immutable_comment_ids(tmp_path):
