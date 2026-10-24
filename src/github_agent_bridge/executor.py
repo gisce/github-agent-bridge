@@ -5,7 +5,6 @@ import os
 import signal
 import sqlite3
 import threading
-import time
 import uuid
 from dataclasses import dataclass
 
@@ -60,6 +59,18 @@ class ExecutorConfig:
     missing_followup_retries: int = 1
     transient_dispatch_retries: int = 2
     heartbeat_interval_seconds: float = 5.0
+    resize_poll_seconds: float = 0.5
+
+
+@dataclass
+class _WorkerSlot:
+    worker_id: str
+    retire_event: threading.Event
+    heartbeat_stop_event: threading.Event
+    claim_lock: threading.Lock
+    worker_thread: threading.Thread
+    heartbeat_thread: threading.Thread
+    draining: bool = False
 
 
 class ExecutorPool:
@@ -77,6 +88,10 @@ class ExecutorPool:
         self._worker_failures: list[tuple[str, BaseException]] = []
         self._worker_state_lock = threading.Lock()
         self._worker_states: dict[str, tuple[str, int | None, int]] = {}
+        self._worker_slots_lock = threading.Lock()
+        self._worker_slots: dict[str, _WorkerSlot] = {}
+        self._next_worker_number = 0
+        self._all_worker_ids: set[str] = set()
 
     def _set_worker_state(self, worker_id: str, loop_state: str, active_job_id: int | None = None, *, error: bool = False) -> None:
         with self._worker_state_lock:
@@ -119,18 +134,23 @@ class ExecutorPool:
                     return False
         return False
 
-    def _heartbeat_loop(self, worker_id: str) -> None:
-        while not self.stop_event.is_set():
+    def _heartbeat_loop(
+        self,
+        worker_id: str,
+        heartbeat_stop_event: threading.Event | None = None,
+    ) -> None:
+        heartbeat_stop_event = heartbeat_stop_event or self.stop_event
+        while not self.stop_event.is_set() and not heartbeat_stop_event.is_set():
             try:
                 self._record_worker_heartbeat(worker_id)
             except sqlite3.OperationalError as exc:
                 if not _is_sqlite_contention_error(exc):
                     raise
                 self._record_worker_storage_error(worker_id)
-                if self.stop_event.wait(self.config.idle_sleep_seconds):
+                if heartbeat_stop_event.wait(self.config.idle_sleep_seconds):
                     break
                 continue
-            self.stop_event.wait(self.config.heartbeat_interval_seconds)
+            heartbeat_stop_event.wait(self.config.heartbeat_interval_seconds)
         try:
             self._record_worker_heartbeat(worker_id)
         except sqlite3.OperationalError as exc:
@@ -259,15 +279,22 @@ class ExecutorPool:
 
     def work_one(self, worker_id: str | None = None) -> bool:
         worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
-        if self.queue.executor_paused():
-            self._set_worker_state(worker_id, "paused")
-            return False
-        self._set_worker_state(worker_id, "claiming")
-        job = self.queue.claim_next(worker_id, self.config.work_intents)
-        if not job:
-            self._set_worker_state(worker_id, "idle")
-            return False
-        self._set_worker_state(worker_id, "running", job.id)
+        with self._worker_slots_lock:
+            slot = self._worker_slots.get(worker_id)
+        claim_lock = slot.claim_lock if slot is not None else threading.Lock()
+        with claim_lock:
+            if slot is not None and slot.retire_event.is_set():
+                self._set_worker_state(worker_id, "draining")
+                return False
+            if self.queue.executor_paused():
+                self._set_worker_state(worker_id, "paused")
+                return False
+            self._set_worker_state(worker_id, "claiming")
+            job = self.queue.claim_next(worker_id, self.config.work_intents)
+            if not job:
+                self._set_worker_state(worker_id, "idle")
+                return False
+            self._set_worker_state(worker_id, "running", job.id)
         self._wake_commit_status_publisher()
         if self.stop_event.is_set():
             self.queue.block_running(
@@ -531,27 +558,140 @@ class ExecutorPool:
             self._commit_status_wakeup.wait(self.config.idle_sleep_seconds)
             self._commit_status_wakeup.clear()
 
-    def _loop(self, worker_id: str) -> None:
+    def _loop(
+        self,
+        worker_id: str,
+        retire_event: threading.Event | None = None,
+    ) -> None:
+        retire_event = retire_event or threading.Event()
         while not self.stop_event.is_set():
+            if retire_event.is_set():
+                self._set_worker_state(worker_id, "draining")
+                return
             did = self.work_one(worker_id)
             if self.config.run_once:
                 return
             if not did:
-                time.sleep(self.config.idle_sleep_seconds)
+                retire_event.wait(self.config.idle_sleep_seconds)
 
-    def _run_worker(self, worker_id: str) -> None:
+    def _run_worker(
+        self,
+        worker_id: str,
+        retire_event: threading.Event | None = None,
+        heartbeat_stop_event: threading.Event | None = None,
+    ) -> None:
         try:
-            self._loop(worker_id)
+            self._loop(worker_id, retire_event)
         except BaseException as exc:
             self._set_worker_state(worker_id, "error", error=True)
             self._record_worker_heartbeat(worker_id)
             with self._worker_failure_lock:
                 self._worker_failures.append((worker_id, exc))
             self._request_shutdown()
+        finally:
+            if heartbeat_stop_event is not None:
+                heartbeat_stop_event.set()
+
+    def _spawn_worker(self) -> _WorkerSlot:
+        with self._worker_slots_lock:
+            worker_number = self._next_worker_number
+            self._next_worker_number += 1
+        worker_id = f"{self.executor_id}/worker-{worker_number}"
+        retire_event = threading.Event()
+        heartbeat_stop_event = threading.Event()
+        claim_lock = threading.Lock()
+        heartbeat_thread = threading.Thread(
+            target=self._heartbeat_loop,
+            args=(worker_id, heartbeat_stop_event),
+            daemon=True,
+            name=f"gab-heartbeat-{worker_number}",
+        )
+        worker_thread = threading.Thread(
+            target=self._run_worker,
+            args=(worker_id, retire_event, heartbeat_stop_event),
+            daemon=False,
+            name=f"gab-worker-{worker_number}",
+        )
+        slot = _WorkerSlot(
+            worker_id=worker_id,
+            retire_event=retire_event,
+            heartbeat_stop_event=heartbeat_stop_event,
+            claim_lock=claim_lock,
+            worker_thread=worker_thread,
+            heartbeat_thread=heartbeat_thread,
+        )
+        self._set_worker_state(worker_id, "starting")
+        with self._worker_slots_lock:
+            self._worker_slots[worker_id] = slot
+            self._all_worker_ids.add(worker_id)
+        heartbeat_thread.start()
+        worker_thread.start()
+        return slot
+
+    def _mark_worker_draining(self, slot: _WorkerSlot) -> None:
+        with slot.claim_lock:
+            slot.draining = True
+            slot.retire_event.set()
+            with self._worker_state_lock:
+                _, active_job_id, errors = self._worker_states.get(
+                    slot.worker_id, ("starting", None, 0)
+                )
+                self._worker_states[slot.worker_id] = (
+                    "draining",
+                    active_job_id,
+                    errors,
+                )
+
+    def _reap_retired_workers(self) -> None:
+        with self._worker_slots_lock:
+            retired = [
+                slot
+                for slot in self._worker_slots.values()
+                if slot.draining and not slot.worker_thread.is_alive()
+            ]
+        for slot in retired:
+            slot.worker_thread.join()
+            slot.heartbeat_thread.join()
+            try:
+                self.queue.delete_worker_heartbeat(slot.worker_id, self.executor_id)
+            except sqlite3.OperationalError as exc:
+                if _is_sqlite_contention_error(exc):
+                    continue
+                raise
+            with self._worker_slots_lock:
+                self._worker_slots.pop(slot.worker_id, None)
+            with self._worker_state_lock:
+                self._worker_states.pop(slot.worker_id, None)
+
+    def _desired_worker_count(self, fallback: int) -> int:
+        desired = self.queue.executor_worker_count(fallback)
+        return desired if desired >= 1 else fallback
+
+    def _reconcile_workers(self, desired: int) -> None:
+        self._reap_retired_workers()
+        with self._worker_slots_lock:
+            active = [slot for slot in self._worker_slots.values() if not slot.draining]
+        if len(active) < desired:
+            for _ in range(desired - len(active)):
+                self._spawn_worker()
+            return
+        if len(active) > desired:
+            excess = sorted(
+                active,
+                key=lambda slot: int(slot.worker_id.rsplit("-", 1)[-1]),
+                reverse=True,
+            )[: len(active) - desired]
+            for slot in excess:
+                self._mark_worker_draining(slot)
 
     def _request_shutdown(self) -> None:
         self.stop_event.set()
         self._commit_status_wakeup.set()
+        with self._worker_slots_lock:
+            slots = list(self._worker_slots.values())
+        for slot in slots:
+            slot.retire_event.set()
+            slot.heartbeat_stop_event.set()
         shutdown = getattr(self.dispatcher, "shutdown", None)
         if callable(shutdown):
             shutdown()
@@ -598,8 +738,7 @@ class ExecutorPool:
         self._acquire_executor_lock()
         previous_handlers = self._install_signal_handlers()
         worker_count = 1 if self.config.run_once or self.config.workers <= 1 else self.config.workers
-        worker_ids = [f"{self.executor_id}/worker-{i}" for i in range(worker_count)]
-        threads: list[threading.Thread] = []
+        support_threads: list[threading.Thread] = []
         try:
             self.queue.delete_worker_heartbeats_except(self.executor_id)
             self.queue.block_running(
@@ -609,35 +748,45 @@ class ExecutorPool:
             self.queue.recover_acknowledgements()
             self.queue.recover_commit_statuses()
             self.queue.set_state("executor_process_tracking_id", self.executor_id)
-            self.queue.set_state("executor_worker_count", str(worker_count))
-            for worker_id in worker_ids:
-                self._set_worker_state(worker_id, "starting")
-                self._record_worker_heartbeat(worker_id)
-            heartbeat_threads = [
-                threading.Thread(target=self._heartbeat_loop, args=(worker_id,), daemon=True)
-                for worker_id in worker_ids
-            ]
-            worker_threads = [
-                threading.Thread(target=self._run_worker, args=(worker_id,), daemon=False)
-                for worker_id in worker_ids
-            ]
+            self.queue.resize_executor(worker_count)
             acknowledgement_thread = threading.Thread(target=self._acknowledgement_loop, daemon=False)
             commit_status_thread = threading.Thread(target=self._commit_status_loop, daemon=False)
-            threads = [*heartbeat_threads, commit_status_thread, *worker_threads, acknowledgement_thread]
-            for thread in threads:
+            support_threads = [commit_status_thread, acknowledgement_thread]
+            for thread in support_threads:
                 thread.start()
-            while any(thread.is_alive() for thread in worker_threads):
-                time.sleep(0.5)
+            self._reconcile_workers(worker_count)
+            while not self.stop_event.is_set():
+                with self._worker_slots_lock:
+                    worker_threads = [
+                        slot.worker_thread for slot in self._worker_slots.values()
+                    ]
+                if self.config.run_once and not any(
+                    thread.is_alive() for thread in worker_threads
+                ):
+                    break
+                desired = (
+                    worker_count
+                    if self.config.run_once
+                    else self._desired_worker_count(worker_count)
+                )
+                self._reconcile_workers(desired)
+                self.stop_event.wait(self.config.resize_poll_seconds)
         except KeyboardInterrupt:
             self._request_shutdown()
         finally:
             self._request_shutdown()
-            for thread in threads:
+            with self._worker_slots_lock:
+                slots = list(self._worker_slots.values())
+            for thread in [
+                *(slot.worker_thread for slot in slots),
+                *(slot.heartbeat_thread for slot in slots),
+                *support_threads,
+            ]:
                 thread.join()
             self.queue.block_running(
                 "executor shutdown interrupted running job",
                 "The executor stopped before this job completed. It was blocked, not auto-requeued, to avoid duplicate external actions.",
-                locked_by=set(worker_ids),
+                locked_by=set(self._all_worker_ids),
             )
             self._restore_signal_handlers(previous_handlers)
             self._release_executor_lock()

@@ -31,6 +31,7 @@ JOB_LIST_ORDER_SQL = """
     id DESC
 """
 EXECUTOR_PAUSE_STATE_KEY = "executor_paused"
+WORKER_HEARTBEAT_LIVE_SECONDS = 20
 SLO_WINDOWS = {
     "24h": timedelta(hours=24),
     "7d": timedelta(days=7),
@@ -348,6 +349,21 @@ def inspect_db_read_only(db: str | Path) -> dict[str, Any]:
             item["age_seconds"] = max(0, int(item["age_seconds"] or 0))
             heartbeats.append(item)
         out["worker_heartbeats"] = heartbeats
+        current_heartbeats = [
+            heartbeat
+            for heartbeat in heartbeats
+            if heartbeat["executor_id"] == out["executor_process_tracking_id"]
+            and heartbeat["age_seconds"] <= WORKER_HEARTBEAT_LIVE_SECONDS
+        ]
+        out["executor_worker_live_count"] = len(current_heartbeats)
+        out["executor_worker_busy_count"] = sum(
+            heartbeat["active_job_id"] is not None
+            for heartbeat in current_heartbeats
+        )
+        out["executor_worker_draining_count"] = sum(
+            heartbeat["loop_state"] == "draining"
+            for heartbeat in current_heartbeats
+        )
         knowledge_counts = {
             r["status"]: int(r["count"])
             for r in con.execute("SELECT status, count(*) count FROM feedback_rule_proposals GROUP BY status")

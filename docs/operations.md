@@ -43,7 +43,7 @@ gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 \
   run --mode live --workers 4 --review-timeout 900 --work-timeout 3600
 ```
 
-Intent-specific executor pool:
+Intent-filtered executor:
 
 ```bash
 gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 \
@@ -51,25 +51,47 @@ gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 \
   run --mode live --workers 2 --work-intent review_only --review-timeout 900
 ```
 
-Use `--work-intent` when an operator wants separate worker capacity for cheap
-review/comment follow-ups and heavier implementation jobs. Allowed values are
-`review_only`, `work_allowed`, and `all`; the flag may be repeated or
-comma-separated. Omitting it or passing `all` keeps the default all-intents
-executor behavior.
+Use `--work-intent` to limit the single executor process to `review_only`,
+`work_allowed`, or both. The flag may be repeated or comma-separated; omitting
+it or passing `all` keeps the default all-intents behavior. The filter applies
+only while claiming pending jobs, and the queue still enforces the per-
+`work_key` guard.
 
-A common production topology is:
+Only one executor process may own a database. The database-wide
+`*.executor.lock` deliberately rejects a second process, so do not configure
+the previously documented multi-pool topology against one queue. Use one
+general executor unless the whole deployment intentionally serves only one
+intent. Capacity within that process can be changed at runtime.
 
-| Pool | Example command | Purpose |
-| --- | --- | --- |
-| General | `gab ... run --mode live --workers 2` | Claims any pending job. Keeps the system simple when the queue is small. |
-| Review-only | `gab ... run --mode live --workers 2 --work-intent review_only` | Keeps replies, reviews, and analysis moving even when implementation work is backed up. |
-| Work-only | `gab ... run --mode live --workers 1 --work-intent work_allowed` | Caps concurrent state-changing work so long-running edits do not consume all executor slots. |
+### Resize the live executor
 
-Intent filters apply only while claiming pending jobs. The queue still enforces
-the per-`work_key` guard, so two pools cannot run two jobs for the same
-issue/PR/thread concurrently. If every running executor is filtered to
-`review_only`, `work_allowed` jobs remain pending until a general or work-only
-executor is available; `gab monitor` will report old pending jobs normally.
+Set the desired worker count without restarting the executor:
+
+```bash
+gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 \
+  resize-executor --workers 6
+gab --db ~/.local/state/github-agent-bridge/bridge.sqlite3 status
+```
+
+The System page exposes the same admin-only action. Its capacity panel and
+`gab status` distinguish:
+
+- `desired`: the persisted target consumed by the live executor;
+- `live`: workers still heartbeating, including workers that are draining;
+- `busy`: live workers with an active job;
+- `draining`: workers that will retire after their active job finishes.
+
+Scaling up starts additional worker and heartbeat loops in the existing
+process. Scaling down marks the highest-numbered excess workers as draining;
+they cannot claim another job, but an active job finishes normally before the
+worker and heartbeat retire. Rapid or concurrent requests converge on the last
+persisted desired count. A later scale-up may temporarily show `live` above
+`desired` while workers from an earlier scale-down finish draining.
+
+Resizing while paused is safe: new workers report `paused` and do not claim
+pending jobs until resume. Normal shutdown remains a separate operation and
+keeps the existing behavior of blocking an interrupted running job rather than
+automatically requeueing possible external side effects.
 
 For systemd installs, set `GITHUB_AGENT_BRIDGE_WORK_INTENT` in the private env
 file read by the service:
@@ -109,10 +131,12 @@ openclaw config set agents.defaults.maxConcurrent 8 --strict-json
 openclaw config validate
 ```
 
-Keep `GITHUB_AGENT_BRIDGE_WORKERS=4`; the extra OpenClaw slots are headroom for
-feedback and interactive operations, not additional bridge jobs. As a minimum
-sizing rule use `maxConcurrent >= workers + 2`; eight is the recommended value
-for four workers when feedback learning and interactive use are active.
+Keep `GITHUB_AGENT_BRIDGE_WORKERS=4` as the startup capacity; the extra OpenClaw
+slots are headroom for feedback and interactive operations, not additional
+bridge jobs. As a minimum sizing rule use
+`maxConcurrent >= desired_workers + 2`; eight is the recommended value when
+the executor may be resized up to four workers and feedback learning and
+interactive use are active.
 
 Reader timer job:
 

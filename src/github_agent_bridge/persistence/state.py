@@ -9,6 +9,7 @@ from .database import Database, TransactionMode
 
 
 EXECUTOR_PAUSE_STATE_KEY = "executor_paused"
+EXECUTOR_WORKER_COUNT_STATE_KEY = "executor_worker_count"
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,16 @@ class StateRepository:
         connection: sqlite3.Connection | None = None,
     ) -> bool:
         return self.executor_pause_state(connection=connection).paused
+
+    def set_executor_worker_count(self, workers: int) -> None:
+        self.set(EXECUTOR_WORKER_COUNT_STATE_KEY, str(workers))
+
+    def executor_worker_count(self, default: int = 0) -> int:
+        raw = self.get(EXECUTOR_WORKER_COUNT_STATE_KEY, str(default))
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return default
 
     @staticmethod
     def _get(con: sqlite3.Connection, key: str, default: str) -> str:

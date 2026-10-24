@@ -1424,6 +1424,35 @@ describe("system page", () => {
     confirm.mockRestore();
   });
 
+  it("shows desired, live, busy, and draining capacity and resizes as admin", async () => {
+    const user = userEvent.setup();
+    const onResize = vi.fn();
+    render(
+      <ExecutorPauseControl
+        state={{ paused: false }}
+        loading={false}
+        statusError={null}
+        pending={false}
+        actionError=""
+        capacity={{ desired: 2, live: 3, busy: 2, draining: 1 }}
+        isAdmin={true}
+        onChange={vi.fn()}
+        onResize={onResize}
+      />,
+    );
+
+    const capacity = screen.getByLabelText("Executor capacity");
+    expect(within(capacity).getByText("Desired")).toBeInTheDocument();
+    expect(within(capacity).getByText("Live")).toBeInTheDocument();
+    expect(within(capacity).getByText("Busy")).toBeInTheDocument();
+    expect(within(capacity).getByText("Draining")).toBeInTheDocument();
+    const input = screen.getByRole("spinbutton", { name: "Desired workers" });
+    await user.clear(input);
+    await user.type(input, "4");
+    await user.click(screen.getByRole("button", { name: "Resize" }));
+    expect(onResize).toHaveBeenCalledWith(4);
+  });
+
   const systemdUnit = {
     role: "executor",
     kind: "service",
