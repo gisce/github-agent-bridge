@@ -414,6 +414,9 @@ class JobQueue:
     def delete_worker_heartbeats_except(self, executor_id: str) -> int:
         return self.runtime.delete_worker_heartbeats_except(executor_id)
 
+    def delete_worker_heartbeat(self, worker_id: str, executor_id: str) -> bool:
+        return self.runtime.delete_worker_heartbeat(worker_id, executor_id)
+
     def register_runtime_process(
         self,
         job_id: int,
@@ -584,6 +587,15 @@ class JobQueue:
 
     def executor_paused(self) -> bool:
         return self.state.executor_paused()
+
+    def resize_executor(self, workers: int) -> int:
+        if workers < 1:
+            raise ValueError("executor worker count must be at least 1")
+        self.state.set_executor_worker_count(workers)
+        return workers
+
+    def executor_worker_count(self, default: int = 0) -> int:
+        return self.state.executor_worker_count(default)
 
     @staticmethod
     def _commit_status_feedback(

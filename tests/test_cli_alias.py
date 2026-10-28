@@ -39,6 +39,22 @@ def test_pause_resume_executor_cli_updates_queue_state(tmp_path, capsys):
     assert JobQueue(db).executor_paused() is False
 
 
+def test_resize_executor_cli_updates_desired_capacity(tmp_path, capsys):
+    db = tmp_path / "q.sqlite3"
+    JobQueue(db)
+
+    cli.main(["--db", str(db), "resize-executor", "--workers", "6"])
+
+    resized = capsys.readouterr().out
+    assert '"desired": 6' in resized
+    assert JobQueue(db).executor_worker_count() == 6
+
+    cli.main(["--db", str(db), "status"])
+    status = capsys.readouterr().out
+    assert '"executor_capacity"' in status
+    assert '"desired": 6' in status
+
+
 def test_status_cli_does_not_create_missing_database(tmp_path, capsys):
     db = tmp_path / "missing.sqlite3"
 

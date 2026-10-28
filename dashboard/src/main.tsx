@@ -161,6 +161,10 @@ type DashboardStatus = {
   autoupdate: AutoupdateState;
   executor_pause?: ExecutorPauseState;
   metrics?: {
+    executor_worker_count?: number;
+    executor_worker_live_count?: number;
+    executor_worker_busy_count?: number;
+    executor_worker_draining_count?: number;
     knowledge?: {
       proposed?: number;
       approved?: number;
@@ -175,6 +179,13 @@ type ExecutorPauseState = {
   reason?: string;
   updated_at?: string;
   error?: string;
+};
+
+type ExecutorCapacity = {
+  desired: number;
+  live: number;
+  busy: number;
+  draining: number;
 };
 
 type WebhookSummary = {
@@ -463,6 +474,11 @@ type ProcessesResponse = {
     service: string;
     pid: number | null;
     children: ProcessSample[];
+    workers?: Array<{ worker_id: string; loop_state: string; active_job_id: number | null }>;
+    expected_workers?: number;
+    live_workers?: number;
+    busy_workers?: number;
+    draining_workers?: number;
   };
   signals: {
     live_process: { state: string; child_count: number };
@@ -1131,6 +1147,8 @@ function App() {
   const [autoupdateError, setAutoupdateError] = React.useState("");
   const [executorPausePending, setExecutorPausePending] = React.useState(false);
   const [executorPauseError, setExecutorPauseError] = React.useState("");
+  const [executorResizePending, setExecutorResizePending] = React.useState(false);
+  const [executorResizeError, setExecutorResizeError] = React.useState("");
   const [sloWindow, setSloWindow] = React.useState<SloWindow>("7d");
   const [runtimeWindow, setRuntimeWindow] = React.useState<RuntimeWindow>("7d");
   const [pathname, setPathname] = React.useState(() => window.location.pathname);
@@ -1159,7 +1177,7 @@ function App() {
     enabled: isDashboardRoute,
     placeholderData: (previousData) => previousData,
   });
-  const processes = useQuery({ queryKey: ["processes"], queryFn: () => api<ProcessesResponse>("/api/processes"), enabled: isSystemRoute });
+  const processes = useQuery({ queryKey: ["processes"], queryFn: () => api<ProcessesResponse>("/api/processes"), enabled: isSystemRoute, refetchInterval: isSystemRoute ? 10000 : false });
   const systemd = useQuery({ queryKey: ["systemd"], queryFn: () => api<SystemdResponse>("/api/systemd"), enabled: isSystemRoute });
   const alerts = useQuery({ queryKey: ["alerts"], queryFn: () => api<{ alerts: AlertRecord[] }>("/api/alerts"), enabled: isSystemRoute });
   const webhookSummary = useQuery({
@@ -1332,6 +1350,25 @@ function App() {
       setExecutorPauseError(error instanceof Error ? error.message : String(error));
     } finally {
       setExecutorPausePending(false);
+    }
+  }, [queryClient]);
+  const resizeExecutor = React.useCallback(async (workers: number) => {
+    setExecutorResizePending(true);
+    setExecutorResizeError("");
+    try {
+      await api<{ executor_capacity: ExecutorCapacity }>("/api/executor/resize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ workers }),
+      });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["dashboard-status"] }),
+        queryClient.invalidateQueries({ queryKey: ["processes"] }),
+      ]);
+    } catch (error) {
+      setExecutorResizeError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setExecutorResizePending(false);
     }
   }, [queryClient]);
   const enableWebPush = React.useCallback(async () => {
@@ -1625,8 +1662,17 @@ function App() {
               executorPauseStatusError={dashboardStatus.error}
               executorPausePending={executorPausePending}
               executorPauseError={executorPauseError}
+              executorCapacity={{
+                desired: processes.data?.executor.expected_workers ?? dashboardStatus.data?.metrics?.executor_worker_count ?? 0,
+                live: processes.data?.executor.live_workers ?? dashboardStatus.data?.metrics?.executor_worker_live_count ?? 0,
+                busy: processes.data?.executor.busy_workers ?? dashboardStatus.data?.metrics?.executor_worker_busy_count ?? 0,
+                draining: processes.data?.executor.draining_workers ?? dashboardStatus.data?.metrics?.executor_worker_draining_count ?? 0,
+              }}
+              executorResizePending={executorResizePending}
+              executorResizeError={executorResizeError}
               isAdmin={Boolean(me.data?.user?.is_admin)}
               onExecutorPauseChange={setExecutorPaused}
+              onExecutorResize={resizeExecutor}
               processes={processes.data}
               processesLoading={processes.isLoading}
               processesError={processes.error}
@@ -2183,8 +2229,12 @@ function SystemPage({
   executorPauseStatusError,
   executorPausePending,
   executorPauseError,
+  executorCapacity,
+  executorResizePending,
+  executorResizeError,
   isAdmin,
   onExecutorPauseChange,
+  onExecutorResize,
   processes,
   processesLoading,
   processesError,
@@ -2210,8 +2260,12 @@ function SystemPage({
   executorPauseStatusError: Error | null;
   executorPausePending: boolean;
   executorPauseError: string;
+  executorCapacity: ExecutorCapacity;
+  executorResizePending: boolean;
+  executorResizeError: string;
   isAdmin: boolean;
   onExecutorPauseChange: (paused: boolean) => void;
+  onExecutorResize: (workers: number) => void;
   processes: ProcessesResponse | undefined;
   processesLoading: boolean;
   processesError: Error | null;
@@ -2240,8 +2294,12 @@ function SystemPage({
         statusError={executorPauseStatusError}
         pending={executorPausePending}
         actionError={executorPauseError}
+        capacity={executorCapacity}
+        resizePending={executorResizePending}
+        resizeError={executorResizeError}
         isAdmin={isAdmin}
         onChange={onExecutorPauseChange}
+        onResize={onExecutorResize}
       />
       {sloError ? <Banner tone="error" text={sloError.message} /> : null}
       <SloDashboard
@@ -2267,16 +2325,26 @@ function SystemPage({
   );
 }
 
-function ExecutorPauseControl({ state, loading, statusError, pending, actionError, isAdmin, onChange }: {
+function ExecutorPauseControl({ state, loading, statusError, pending, actionError, capacity, resizePending = false, resizeError = "", isAdmin, onChange, onResize }: {
   state: ExecutorPauseState | undefined;
   loading: boolean;
   statusError: Error | null;
   pending: boolean;
   actionError: string;
+  capacity?: ExecutorCapacity;
+  resizePending?: boolean;
+  resizeError?: string;
   isAdmin: boolean;
   onChange: (paused: boolean) => void;
+  onResize?: (workers: number) => void;
 }) {
   const paused = Boolean(state?.paused);
+  const [desiredWorkers, setDesiredWorkers] = React.useState(() => String(capacity?.desired || 1));
+  React.useEffect(() => {
+    if (capacity?.desired) setDesiredWorkers(String(capacity.desired));
+  }, [capacity?.desired]);
+  const parsedWorkers = Number(desiredWorkers);
+  const validWorkers = Number.isInteger(parsedWorkers) && parsedWorkers >= 1;
   return (
     <Panel title="Executor">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -2306,9 +2374,48 @@ function ExecutorPauseControl({ state, loading, statusError, pending, actionErro
           <span aria-hidden className="relative h-6 w-11 rounded-full bg-slate-300 transition-colors peer-checked:bg-primary peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-primary peer-disabled:opacity-50 after:absolute after:left-0.5 after:top-0.5 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform peer-checked:after:translate-x-5" />
         </label>
       </div>
+      {capacity ? (
+        <div className="mt-3 grid gap-3 border-t border-border pt-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" aria-label="Executor capacity">
+            <MiniStat label="Desired" value={capacity.desired} />
+            <MiniStat label="Live" value={capacity.live} />
+            <MiniStat label="Busy" value={capacity.busy} />
+            <MiniStat label="Draining" value={capacity.draining} />
+          </div>
+          <form
+            className="flex flex-wrap items-end gap-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (validWorkers && onResize) onResize(parsedWorkers);
+            }}
+          >
+            <label className="grid gap-1 text-xs font-semibold text-muted">
+              Desired workers
+              <input
+                aria-label="Desired workers"
+                className="control w-28"
+                type="number"
+                min="1"
+                step="1"
+                value={desiredWorkers}
+                disabled={!isAdmin || resizePending}
+                onChange={(event) => setDesiredWorkers(event.target.value)}
+              />
+            </label>
+            <button
+              type="submit"
+              className="h-9 rounded-md bg-primary px-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={!isAdmin || resizePending || !validWorkers || parsedWorkers === capacity.desired}
+            >
+              {resizePending ? "Resizing…" : "Resize"}
+            </button>
+          </form>
+        </div>
+      ) : null}
       {statusError ? <Banner tone="error" text={statusError.message} /> : null}
       {state?.error ? <Banner tone="error" text={state.error} /> : null}
       {actionError ? <Banner tone="error" text={`Action failed: ${actionError}`} /> : null}
+      {resizeError ? <Banner tone="error" text={`Resize failed: ${resizeError}`} /> : null}
     </Panel>
   );
 }

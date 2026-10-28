@@ -1287,7 +1287,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             "ping_webhook",
         ]
         if profile.get("is_admin"):
-            admin_actions.extend(["view_autoupdate_plan", "refresh_autoupdate_plan", "apply_autoupdate", "complete_autoupdate_reload", "pause_executor", "resume_executor"])
+            admin_actions.extend(["view_autoupdate_plan", "refresh_autoupdate_plan", "apply_autoupdate", "complete_autoupdate_reload", "pause_executor", "resume_executor", "resize_executor"])
         return {
             "service": "github-agent-bridge-dashboard",
             "read_only": False,
@@ -1311,6 +1311,29 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         queue = JobQueue(config.db)
         queue.resume_executor()
         return {"executor_pause": queue.executor_pause_state()}
+
+    @app.post("/api/executor/resize")
+    def api_executor_resize(
+        payload: dict[str, Any],
+        _: dict[str, Any] = Depends(current_admin_profile),
+    ) -> dict[str, Any]:
+        workers = payload.get("workers")
+        if isinstance(workers, bool) or not isinstance(workers, int) or workers < 1:
+            raise HTTPException(
+                status_code=422,
+                detail="workers must be an integer greater than or equal to 1",
+            )
+        queue = JobQueue(config.db)
+        queue.resize_executor(workers)
+        metrics = DashboardQueries(config.db).status()
+        return {
+            "executor_capacity": {
+                "desired": workers,
+                "live": metrics.get("executor_worker_live_count", 0),
+                "busy": metrics.get("executor_worker_busy_count", 0),
+                "draining": metrics.get("executor_worker_draining_count", 0),
+            }
+        }
 
     @app.post("/api/autoupdate/refresh")
     def api_autoupdate_refresh(_: dict[str, Any] = Depends(current_admin_profile)) -> dict[str, Any]:
@@ -1553,16 +1576,30 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
                 "children": metrics.get("executor_children", []),
                 "workers": metrics.get("worker_heartbeats", []),
                 "expected_workers": metrics.get("executor_worker_count", 0),
+                "live_workers": metrics.get(
+                    "executor_worker_live_count",
+                    metrics.get("worker_heartbeats_live", 0),
+                ),
+                "busy_workers": metrics.get("executor_worker_busy_count", 0),
+                "draining_workers": metrics.get("executor_worker_draining_count", 0),
             },
             "signals": {
                 "worker_liveness": {
                     "state": (
                         "live"
                         if metrics.get("executor_worker_count", 0)
-                        and metrics.get("worker_heartbeats_live", 0) == metrics.get("executor_worker_count", 0)
+                        and metrics.get(
+                            "executor_worker_live_count",
+                            metrics.get("worker_heartbeats_live", 0),
+                        )
+                        - metrics.get("executor_worker_draining_count", 0)
+                        == metrics.get("executor_worker_count", 0)
                         else "degraded"
                     ),
-                    "live_count": metrics.get("worker_heartbeats_live", 0),
+                    "live_count": metrics.get(
+                        "executor_worker_live_count",
+                        metrics.get("worker_heartbeats_live", 0),
+                    ),
                     "expected_count": metrics.get("executor_worker_count", 0),
                 },
                 "live_process": {

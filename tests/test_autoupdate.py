@@ -9,6 +9,7 @@ import pytest
 from github_agent_bridge.autoupdate import (
     _model_smoke_postcheck,
     apply_update_plan,
+    classify_changed_files,
     complete_pending_reload,
     default_install_command,
     default_migration_command,
@@ -21,6 +22,17 @@ from github_agent_bridge.autoupdate import (
 from github_agent_bridge.models import Notification
 from github_agent_bridge.policy import Policy
 from github_agent_bridge.queue import JobQueue
+
+
+def test_persistence_runtime_changes_require_executor_reload():
+    classification = classify_changed_files([
+        "src/github_agent_bridge/persistence/runtime.py",
+    ])
+
+    assert classification["risk"] == "executor_or_queue"
+    assert classification["risky_files"] == [
+        "src/github_agent_bridge/persistence/runtime.py",
+    ]
 
 
 def test_latest_release_reports_missing_gh_as_runtime_error():

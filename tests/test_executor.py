@@ -1,5 +1,6 @@
 import sqlite3
 import threading
+import time
 
 import pytest
 
@@ -17,6 +18,15 @@ def verified_feedback_authorization(monkeypatch):
         "github_agent_bridge.queue.resolve_feedback_authorization",
         lambda *args, **kwargs: "mentioned",
     )
+
+
+def wait_until(predicate, timeout=5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
 
 
 class FakeGitHub:
@@ -1207,6 +1217,168 @@ def test_shutdown_cancels_dispatch_and_blocks_job_without_requeue(tmp_path):
     assert stored.status == "blocked"
     assert stored.attempts == 1
     assert "executor shutdown requested" in stored.last_error
+
+
+def test_runtime_resize_scales_up_then_drains_busy_workers(tmp_path, monkeypatch):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    busy_job = enqueue_pr_comment(queue)
+    pool = ExecutorPool(
+        queue,
+        Policy(),
+        RecordingDispatcher(),
+        config=ExecutorConfig(
+            workers=2,
+            idle_sleep_seconds=0.01,
+            heartbeat_interval_seconds=0.01,
+            resize_poll_seconds=0.01,
+        ),
+    )
+    releases: dict[str, threading.Event] = {}
+    started: set[str] = set()
+    state_lock = threading.Lock()
+
+    def blocking_work(worker_id=None):
+        assert worker_id is not None
+        with state_lock:
+            release = releases.setdefault(worker_id, threading.Event())
+            started.add(worker_id)
+        pool._set_worker_state(worker_id, "running", busy_job.id)
+        while not release.wait(0.01):
+            if pool.stop_event.is_set():
+                return False
+        return True
+
+    monkeypatch.setattr(pool, "work_one", blocking_work)
+    thread = threading.Thread(target=pool.run)
+    thread.start()
+    try:
+        assert wait_until(lambda: len(started) == 2)
+        original_workers = set(started)
+
+        queue.resize_executor(4)
+        assert wait_until(lambda: len(started) == 4)
+        assert original_workers.issubset(started)
+        assert thread.is_alive() is True
+
+        queue.resize_executor(2)
+
+        def draining_workers():
+            with pool._worker_state_lock:
+                return {
+                    worker_id
+                    for worker_id, (loop_state, active_job_id, _) in pool._worker_states.items()
+                    if loop_state == "draining" and active_job_id == busy_job.id
+                }
+
+        assert wait_until(lambda: len(draining_workers()) == 2)
+        retiring = draining_workers()
+        assert retiring.isdisjoint(original_workers)
+        for worker_id in retiring:
+            releases[worker_id].set()
+
+        def live_worker_ids():
+            with queue.connect() as con:
+                return {
+                    row["worker_id"]
+                    for row in con.execute(
+                        "SELECT worker_id FROM worker_heartbeats WHERE executor_id=?",
+                        (pool.executor_id,),
+                    )
+                }
+
+        assert wait_until(lambda: live_worker_ids() == original_workers)
+        assert queue.executor_worker_count() == 2
+        assert pool.stop_event.is_set() is False
+    finally:
+        pool._request_shutdown()
+        thread.join(timeout=5)
+    assert thread.is_alive() is False
+
+
+def test_resizing_while_paused_starts_workers_without_claiming(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_comment(queue)
+    queue.pause_executor("capacity maintenance")
+    dispatcher = RecordingDispatcher()
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=FakeGitHub(assigned=True),
+        config=ExecutorConfig(
+            workers=1,
+            idle_sleep_seconds=0.01,
+            heartbeat_interval_seconds=0.01,
+            resize_poll_seconds=0.01,
+        ),
+    )
+
+    def paused_heartbeats():
+        with queue.connect() as con:
+            return con.execute(
+                "SELECT count(*) count FROM worker_heartbeats "
+                "WHERE executor_id=? AND loop_state='paused'",
+                (pool.executor_id,),
+            ).fetchone()["count"]
+
+    thread = threading.Thread(target=pool.run)
+    thread.start()
+    try:
+        assert wait_until(lambda: paused_heartbeats() == 1)
+        queue.resize_executor(3)
+
+        assert wait_until(lambda: paused_heartbeats() == 3)
+        stored = queue.get(job.id)
+        assert stored is not None
+        assert stored.status == "pending"
+        assert dispatcher.jobs == []
+    finally:
+        pool._request_shutdown()
+        thread.join(timeout=5)
+    assert thread.is_alive() is False
+
+
+def test_repeated_resize_requests_converge_on_latest_desired_count(tmp_path):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    queue.pause_executor("capacity maintenance")
+    pool = ExecutorPool(
+        queue,
+        Policy(),
+        RecordingDispatcher(),
+        config=ExecutorConfig(
+            workers=2,
+            idle_sleep_seconds=0.01,
+            heartbeat_interval_seconds=0.01,
+            resize_poll_seconds=0.01,
+        ),
+    )
+
+    def live_capacity():
+        with queue.connect() as con:
+            rows = con.execute(
+                "SELECT loop_state FROM worker_heartbeats WHERE executor_id=?",
+                (pool.executor_id,),
+            ).fetchall()
+        return len(rows), sum(row["loop_state"] == "draining" for row in rows)
+
+    thread = threading.Thread(target=pool.run)
+    thread.start()
+    try:
+        assert wait_until(lambda: live_capacity() == (2, 0))
+        queue.resize_executor(4)
+        assert wait_until(lambda: live_capacity() == (4, 0))
+
+        queue.resize_executor(1)
+        queue.resize_executor(3)
+
+        assert wait_until(
+            lambda: queue.executor_worker_count() == 3
+            and live_capacity() == (3, 0)
+        )
+    finally:
+        pool._request_shutdown()
+        thread.join(timeout=5)
+    assert thread.is_alive() is False
 
 
 def test_run_raises_when_worker_dies_unexpectedly(tmp_path):

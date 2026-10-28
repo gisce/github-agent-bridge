@@ -733,6 +733,16 @@ def test_worker_heartbeat_upserts_liveness_and_active_job(tmp_path):
     assert row["recent_error_count"] == 2
 
 
+def test_executor_worker_count_is_persisted_and_validated(tmp_path):
+    q = JobQueue(tmp_path / "bridge.sqlite3")
+
+    assert q.resize_executor(4) == 4
+    assert JobQueue(q.path).executor_worker_count() == 4
+
+    with pytest.raises(ValueError, match="at least 1"):
+        q.resize_executor(0)
+
+
 def test_claim_can_filter_by_work_intent(tmp_path):
     q = JobQueue(tmp_path / "q.sqlite3")
     work_job, _ = q.enqueue(notif(1, "<1@github.com>", BODY1), policy())

@@ -89,6 +89,7 @@ def test_dashboard_status_is_read_only_and_lists_recent_jobs(tmp_path):
         "complete_autoupdate_reload",
         "pause_executor",
         "resume_executor",
+        "resize_executor",
     ]
     assert response.json()["autoupdate"] == {}
     assert response.json()["executor_pause"] == {"paused": False}
@@ -205,9 +206,16 @@ def test_dashboard_executor_pause_is_visible_but_only_admin_can_change_it(tmp_pa
     assert "pause_executor" not in client.get("/api/status").json()["admin_actions"]
     assert client.post("/api/executor/pause").status_code == 403
     assert client.post("/api/executor/resume").status_code == 403
+    assert client.post("/api/executor/resize", json={"workers": 4}).status_code == 403
     assert queue.executor_paused() is False
 
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Admin"}, is_admin=True)))
+    resized = client.post("/api/executor/resize", json={"workers": 4})
+    assert resized.status_code == 200
+    assert resized.json()["executor_capacity"]["desired"] == 4
+    assert queue.executor_worker_count() == 4
+    assert client.post("/api/executor/resize", json={"workers": 0}).status_code == 422
+
     paused = client.post("/api/executor/pause")
     assert paused.status_code == 200
     assert paused.json()["executor_pause"]["paused"] is True

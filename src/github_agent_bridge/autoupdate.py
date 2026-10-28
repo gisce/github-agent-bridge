@@ -31,6 +31,7 @@ RISKY_PATH_PREFIXES = (
     "src/github_agent_bridge/executor.py",
     "src/github_agent_bridge/monitor.py",
     "src/github_agent_bridge/parser.py",
+    "src/github_agent_bridge/persistence/",
     "src/github_agent_bridge/policy.py",
     "src/github_agent_bridge/queue.py",
     "src/github_agent_bridge/reader.py",
