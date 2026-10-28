@@ -2,6 +2,30 @@
 
 <!-- version list -->
 
+## v0.86.0 (2026-10-28)
+
+### Bug Fixes
+
+- Harden webhook promotion gate
+  ([`29c84bc`](https://github.com/gisce/github-agent-bridge/commit/29c84bce96db0e9374e4d31e284bd1757c6186c7))
+
+- Reject incomplete promotion decision traces
+  ([`f7ead51`](https://github.com/gisce/github-agent-bridge/commit/f7ead5133d24b76594ff14108e5801d6c8e3c799))
+
+### Chores
+
+- **deps**: Bump @vitest/mocker and vitest in /dashboard
+  ([`0b0dcab`](https://github.com/gisce/github-agent-bridge/commit/0b0dcab67cece4ca456cb71ced4ba0f2cab955cf))
+
+- **deps**: Bump undici from 7.30.0 to 7.30.1 in /dashboard
+  ([`71f8c48`](https://github.com/gisce/github-agent-bridge/commit/71f8c4854ff96de8dccaeb5aa6c4d880b0e22360))
+
+### Features
+
+- Add webhook promotion mismatch gate
+  ([`3e98679`](https://github.com/gisce/github-agent-bridge/commit/3e9867938d596a6a71dd45cdf39bcd1c43f9b4a9))
+
+
 ## v0.85.0 (2026-10-24)
 
 ### Features
