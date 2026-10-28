@@ -1,6 +1,9 @@
+import subprocess
 from datetime import datetime, timezone
 
-from github_agent_bridge.cli import build_parser
+import pytest
+
+from github_agent_bridge.cli import build_parser, main
 from github_agent_bridge.webhook_audit import (
     REQUIRED_WEBHOOK_EVENTS,
     audit_organization_webhook,
@@ -86,6 +89,24 @@ def test_audit_webhook_reports_configuration_drift():
     )
 
 
+def test_audit_webhook_fails_closed_when_tls_setting_is_missing():
+    report = audit_organization_webhook(
+        "gisce",
+        ENDPOINT,
+        max_delivery_age_seconds=3600,
+        failure_threshold=3,
+        api=api_for(
+            [hook(config={"url": ENDPOINT, "content_type": "json"})],
+            [{"delivered_at": "2026-10-28T19:55:00Z", "status_code": 204}],
+        ),
+        now=NOW,
+    )
+
+    assert report.ok is False
+    assert report.metrics["tls_verify"] is False
+    assert "webhook TLS verification setting is missing" in report.alerts
+
+
 def test_audit_webhook_reports_stale_and_repeated_failed_deliveries():
     report = audit_organization_webhook(
         "gisce",
@@ -141,3 +162,33 @@ def test_audit_webhook_cli_arguments():
     assert args.max_delivery_age_seconds == 21600
     assert args.failure_threshold == 3
     assert args.json is True
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_error"),
+    [
+        (subprocess.TimeoutExpired(["gh", "api"], 30), "request timed out"),
+        (FileNotFoundError(), "GitHub CLI executable not found"),
+    ],
+)
+def test_audit_webhook_cli_reports_gh_execution_errors(
+    monkeypatch,
+    capsys,
+    error,
+    expected_error,
+):
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr("github_agent_bridge.webhook_audit.subprocess.run", fail)
+
+    result = main([
+        "audit-webhook",
+        "--owner",
+        "gisce",
+        "--endpoint",
+        ENDPOINT,
+    ])
+
+    assert result == 2
+    assert expected_error in capsys.readouterr().err

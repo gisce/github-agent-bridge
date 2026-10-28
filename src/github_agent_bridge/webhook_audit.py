@@ -58,14 +58,21 @@ class WebhookAuditReport:
 
 
 def gh_api(path: str, *, gh_bin: str = "gh") -> Any:
-    proc = subprocess.run(
-        [gh_bin, "api", path],
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=30,
-    )
+    try:
+        proc = subprocess.run(
+            [gh_bin, "api", path],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise WebhookAuditError(
+            f"GitHub API request timed out for {path} after {exc.timeout}s"
+        ) from exc
+    except FileNotFoundError as exc:
+        raise WebhookAuditError(f"GitHub CLI executable not found: {gh_bin}") from exc
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip() or "unknown GitHub API error"
         raise WebhookAuditError(f"GitHub API request failed for {path}: {detail}")
@@ -119,13 +126,17 @@ def audit_organization_webhook(
     config = hook.get("config") or {}
     events = {str(event) for event in hook.get("events") or []}
     missing_events = sorted(REQUIRED_WEBHOOK_EVENTS - events)
+    tls_verify = config.get("insecure_ssl") == "0"
     alerts: list[str] = []
     if not bool(hook.get("active")):
         alerts.append("webhook is inactive")
     if str(config.get("content_type") or "").lower() != "json":
         alerts.append("webhook content type is not json")
-    if str(config.get("insecure_ssl") or "0") != "0":
-        alerts.append("webhook TLS verification is disabled")
+    if not tls_verify:
+        if config.get("insecure_ssl") is None:
+            alerts.append("webhook TLS verification setting is missing")
+        else:
+            alerts.append("webhook TLS verification is disabled")
     if missing_events:
         alerts.append("missing required event subscriptions: " + ", ".join(missing_events))
 
@@ -169,7 +180,7 @@ def audit_organization_webhook(
     metrics = {
         "active": bool(hook.get("active")),
         "content_type": config.get("content_type"),
-        "tls_verify": str(config.get("insecure_ssl") or "0") == "0",
+        "tls_verify": tls_verify,
         "events": sorted(events),
         "missing_events": missing_events,
         "deliveries_checked": len(deliveries),
