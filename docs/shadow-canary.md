@@ -90,6 +90,10 @@ recorded as a duplicate of it.
 Inspect webhook summary, exceptions and deliveries in the administrator
 dashboard. Do not widen the canary while there are unexplained actionable
 IMAP-only events, split jobs, or action/intent mismatches.
+Run `gab audit-webhook --owner <org> --endpoint <public-url>` with an identity
+that can inspect organization hooks. A clean coverage gate is not sufficient if
+the hook is inactive, misses a required event family, disables TLS verification,
+has stopped delivering, or has repeated delivery failures.
 The **Promotion gate** card remains `insufficient data` until the complete
 configured observation window contains at least one comparable cross-source
 event. It is only `ready` when that window has no unmatched events, no
