@@ -30,11 +30,19 @@ def hook(**overrides):
 
 
 def api_for(hooks, deliveries):
+    return paginated_api([hooks], [deliveries])
+
+
+def paginated_api(hook_pages, delivery_pages):
     def api(path):
-        if path == "/orgs/gisce/hooks?per_page=100":
-            return hooks
-        if path == "/orgs/gisce/hooks/123/deliveries?per_page=100":
-            return deliveries
+        hook_prefix = "/orgs/gisce/hooks?per_page=100&page="
+        delivery_prefix = "/orgs/gisce/hooks/123/deliveries?per_page=100&page="
+        if path.startswith(hook_prefix):
+            page = int(path.removeprefix(hook_prefix))
+            return hook_pages[page - 1] if page <= len(hook_pages) else []
+        if path.startswith(delivery_prefix):
+            page = int(path.removeprefix(delivery_prefix))
+            return delivery_pages[page - 1] if page <= len(delivery_pages) else []
         raise AssertionError(path)
 
     return api
@@ -145,6 +153,54 @@ def test_audit_webhook_requires_one_exact_endpoint_match():
     assert report.ok is False
     assert report.metrics["matching_hooks"] == 0
     assert "not found" in report.alerts[0]
+
+
+def test_audit_webhook_detects_matching_hook_on_second_inventory_page():
+    first_page = [hook()] + [
+        hook(
+            id=1000 + index,
+            config={
+                "url": f"https://bridge.example/hooks/{index}",
+                "content_type": "json",
+                "insecure_ssl": "0",
+            },
+        )
+        for index in range(99)
+    ]
+
+    report = audit_organization_webhook(
+        "gisce",
+        ENDPOINT,
+        max_delivery_age_seconds=3600,
+        failure_threshold=3,
+        api=paginated_api([first_page, [hook(id=456)]], []),
+        now=NOW,
+    )
+
+    assert report.ok is False
+    assert report.metrics["matching_hooks"] == 2
+    assert "matched more than one hook" in report.alerts[0]
+
+
+def test_audit_webhook_scans_failures_beyond_first_delivery_page():
+    failed_delivery = {
+        "delivered_at": "2026-10-28T19:55:00Z",
+        "status_code": 500,
+    }
+
+    report = audit_organization_webhook(
+        "gisce",
+        ENDPOINT,
+        max_delivery_age_seconds=3600,
+        failure_threshold=101,
+        api=paginated_api([[hook()]], [[failed_delivery] * 100, [failed_delivery]]),
+        now=NOW,
+    )
+
+    assert report.ok is False
+    assert report.metrics["deliveries_checked"] == 101
+    assert report.metrics["consecutive_failures"] == 101
+    assert any("101 consecutive failed deliveries" in alert for alert in report.alerts)
 
 
 def test_audit_webhook_cli_arguments():

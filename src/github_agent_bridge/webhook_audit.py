@@ -17,6 +17,7 @@ REQUIRED_WEBHOOK_EVENTS = frozenset({
     "pull_request_review_comment",
     "workflow_run",
 })
+GITHUB_PAGE_SIZE = 100
 
 
 class WebhookAuditError(RuntimeError):
@@ -101,9 +102,15 @@ def audit_organization_webhook(
         raise ValueError("failure_threshold must be positive")
 
     owner_path = urllib.parse.quote(owner, safe="")
-    hooks = api(f"/orgs/{owner_path}/hooks?per_page=100")
-    if not isinstance(hooks, list):
-        raise WebhookAuditError("GitHub hook inventory returned an unexpected response")
+    hooks = [
+        hook
+        for page in _api_pages(
+            api,
+            f"/orgs/{owner_path}/hooks",
+            response_name="GitHub hook inventory",
+        )
+        for hook in page
+    ]
 
     matches = [
         hook for hook in hooks
@@ -140,21 +147,35 @@ def audit_organization_webhook(
     if missing_events:
         alerts.append("missing required event subscriptions: " + ", ".join(missing_events))
 
-    deliveries = api(f"/orgs/{owner_path}/hooks/{hook_id}/deliveries?per_page=100")
-    if not isinstance(deliveries, list):
-        raise WebhookAuditError("GitHub hook deliveries returned an unexpected response")
-    deliveries = sorted(
-        (delivery for delivery in deliveries if isinstance(delivery, dict)),
-        key=lambda delivery: str(delivery.get("delivered_at") or ""),
-        reverse=True,
-    )
-
     latest_age: int | None = None
     consecutive_failures = 0
+    deliveries: list[dict[str, Any]] = []
+    scan_finished = False
+    for page in _api_pages(
+        api,
+        f"/orgs/{owner_path}/hooks/{hook_id}/deliveries",
+        response_name="GitHub hook deliveries",
+    ):
+        for delivery in page:
+            deliveries.append(delivery)
+            if _delivery_succeeded(delivery):
+                scan_finished = True
+                break
+            consecutive_failures += 1
+            if consecutive_failures >= failure_threshold:
+                scan_finished = True
+                break
+        if scan_finished:
+            break
+
     if not deliveries:
         alerts.append("webhook has no retained GitHub deliveries")
     else:
-        delivered_at = _parse_github_datetime(deliveries[0].get("delivered_at"))
+        latest_delivery = max(
+            deliveries,
+            key=lambda delivery: str(delivery.get("delivered_at") or ""),
+        )
+        delivered_at = _parse_github_datetime(latest_delivery.get("delivered_at"))
         if delivered_at is None:
             alerts.append("latest webhook delivery has no valid delivered_at timestamp")
         else:
@@ -167,10 +188,6 @@ def audit_organization_webhook(
                     f"latest webhook delivery age {latest_age}s exceeds "
                     f"{max_delivery_age_seconds}s"
                 )
-        for delivery in deliveries:
-            if _delivery_succeeded(delivery):
-                break
-            consecutive_failures += 1
         if consecutive_failures >= failure_threshold:
             alerts.append(
                 f"webhook has {consecutive_failures} consecutive failed deliveries "
@@ -195,6 +212,25 @@ def audit_organization_webhook(
         alerts=alerts,
         metrics=metrics,
     )
+
+
+def _api_pages(
+    api: Callable[[str], Any],
+    path: str,
+    *,
+    response_name: str,
+):
+    page_number = 1
+    while True:
+        page = api(
+            f"{path}?per_page={GITHUB_PAGE_SIZE}&page={page_number}"
+        )
+        if not isinstance(page, list):
+            raise WebhookAuditError(f"{response_name} returned an unexpected response")
+        yield [item for item in page if isinstance(item, dict)]
+        if len(page) < GITHUB_PAGE_SIZE:
+            return
+        page_number += 1
 
 
 def _parse_github_datetime(value: Any) -> datetime | None:
