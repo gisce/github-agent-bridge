@@ -138,6 +138,45 @@ def test_query_plan_index_migration_upgrades_existing_database(tmp_path):
     assert expected <= indexes
 
 
+def test_ingest_decision_trace_migration_adds_nullable_audit_columns(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    with queue.connect() as con:
+        con.execute("DROP INDEX idx_ingest_receipts_decision_trace")
+        for column in (
+            "work_intent",
+            "decision",
+            "bridge_action",
+            "event_action",
+            "event_type",
+            "work_key",
+            "repository",
+        ):
+            con.execute(f"ALTER TABLE ingest_receipts DROP COLUMN {column}")
+        con.execute("DELETE FROM schema_migrations WHERE version=7")
+
+    with pytest.raises(MigrationRequiredError, match="pending migrations 7"):
+        JobQueue(db)
+
+    JobQueue(db, migrate=True)
+    with sqlite3.connect(db) as con:
+        columns = {row[1] for row in con.execute("PRAGMA table_info(ingest_receipts)")}
+        index = con.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' "
+            "AND name='idx_ingest_receipts_decision_trace'"
+        ).fetchone()
+    assert {
+        "repository",
+        "work_key",
+        "event_type",
+        "event_action",
+        "bridge_action",
+        "decision",
+        "work_intent",
+    } <= columns
+    assert index is not None
+
+
 def test_slo_instrumentation_migration_adds_nullable_signals_without_backfill(
     tmp_path,
 ):

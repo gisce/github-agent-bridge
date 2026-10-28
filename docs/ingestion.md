@@ -139,8 +139,10 @@ split so opening the overview does not load hook inventory or delivery history:
   IMAP denominator and mean matching delay. The previous `/status` path remains
   a summary-only compatibility alias.
 - `GET /api/webhooks/github/exceptions` returns a bounded operator queue for
-  IMAP-only, webhook-only, and unmatchable retained events. It never returns raw
-  payload or comment bodies.
+  IMAP-only, webhook-only, unmatchable, decision-mismatch and potential
+  split-identity events. Paired anomalies include both receipt references plus
+  repository and event descriptor; the endpoint never returns raw payload or
+  comment bodies.
 - `GET /api/webhooks/github/timeseries?from=<iso>&to=<iso>&bucket=day|hour`
   returns only the requested interval. Daily ranges are capped at 366 days and
   hourly ranges at 31 days; omitted bounds default to the configured retention
@@ -226,12 +228,36 @@ Coverage compares canonical event families shared by both transports and also
 counts any source-specific email event that created trusted executable work.
 This keeps `email:*` and other uncorrelated IMAP events in the denominator and
 the exception queue instead of hiding the exact gaps that block promotion.
-Passive email handled as `archive_notification` remains excluded. The window
-starts at the first retained webhook receipt and ends before a configurable
-grace period; historical IMAP receipts from before webhook observation began
-remain excluded. Set
-`GITHUB_AGENT_BRIDGE_WEBHOOK_COVERAGE_GRACE_SECONDS` to change the default
-ten-minute grace period.
+Passive email handled as `archive_notification` remains excluded. The bridge
+durably records when webhook observation first starts, independently of receipt
+payload retention. The promotion window covers seven complete days by default
+and ends before a configurable grace period; historical IMAP receipts from
+before webhook observation began remain excluded. Set
+`GITHUB_AGENT_BRIDGE_WEBHOOK_PROMOTION_OBSERVATION_DAYS` to change the required
+duration and `GITHUB_AGENT_BRIDGE_WEBHOOK_COVERAGE_GRACE_SECONDS` to change the
+default ten-minute grace period. Receipt retention must cover the full window
+plus its grace period or the gate remains `insufficient_data`.
+
+Every durable ingestion receipt also records the normalized repository, work
+key, event descriptor, bridge action, policy decision and work intent. The
+dashboard compares those receipt-scoped decisions when both transports share a
+canonical identity. It reports action/intent/work-key mismatches, incomplete
+decision traces and potential split identities separately. Receipts retained
+from before migration v7 have nullable trace columns: their event coverage
+remains visible, but they are not a comparable decision cohort and keep the
+gate at `insufficient_data`. A potential split requires source-scoped
+`email:*` and `webhook:*` identities with the same work key and event descriptor
+received within ten minutes. This is deliberately an ambiguity signal, not
+proof that the receipts are the same occurrence, and it never causes events to
+be deduplicated. Distinct immutable comment or review IDs are never classified
+as splits merely because they belong to the same thread.
+
+The gate reports `insufficient_data` until the full configured observation window
+has been observed and every cross-source match in a nonempty cohort has a
+complete action/intent/work-key trace. It remains `blocked` while either
+transport has unmatched events or either
+mismatch count is non-zero, and becomes `ready` only for a complete, nonempty,
+clean window. Run `gab migrate-db` before deploying this read model.
 
 ## Primary webhook with stable IMAP fallback
 

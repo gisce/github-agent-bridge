@@ -14,6 +14,8 @@ WEBHOOK_COVERAGE_EVENT_GLOBS = (
     "commit_comment:created:*",
     "workflow_run:workflow_run_failed:*",
 )
+SPLIT_IDENTITY_MAX_DELAY_SECONDS = 600
+WEBHOOK_OBSERVATION_STARTED_AT_KEY = "webhook_observation_started_at"
 
 
 def _coverage_predicate(column: str) -> str:
@@ -95,6 +97,11 @@ class WebhookRepository:
                 operation="webhooks.persist_delivery",
             ) as con:
                 con.execute(
+                    "INSERT OR IGNORE INTO state(key,value) "
+                    "SELECT ?,COALESCE(MIN(created_at),?) FROM webhook_shadow_receipts",
+                    (WEBHOOK_OBSERVATION_STARTED_AT_KEY, created_at),
+                )
+                con.execute(
                     "DELETE FROM webhook_shadow_receipts WHERE julianday(created_at) < julianday('now', ?)",
                     (f"-{retention_days} days",),
                 )
@@ -162,12 +169,20 @@ class WebhookRepository:
             job_id=job_id,
         )
 
-    def first_receipt_created_at(self) -> str | None:
-        with self.database.read("webhooks.first_receipt_created_at") as con:
+    def observation_started_at(self) -> str | None:
+        with self.database.read("webhooks.observation_started_at") as con:
             row = con.execute(
-                "SELECT MIN(created_at) first_created_at FROM webhook_shadow_receipts"
+                "SELECT COALESCE("
+                " (SELECT value FROM state WHERE key=?),"
+                " (SELECT MIN(created_at) FROM webhook_shadow_receipts)"
+                ") observation_started_at",
+                (WEBHOOK_OBSERVATION_STARTED_AT_KEY,),
             ).fetchone()
-        return str(row["first_created_at"]) if row and row["first_created_at"] else None
+        return (
+            str(row["observation_started_at"])
+            if row and row["observation_started_at"]
+            else None
+        )
 
     def summary(self, window_start: str, window_end: str) -> dict[str, Any]:
         with self.database.read("webhooks.summary") as con:
@@ -179,21 +194,76 @@ class WebhookRepository:
             ).fetchone()
             coverage = con.execute(
                 "WITH email_events AS ("
-                " SELECT i.event_key,MIN(i.created_at) created_at FROM ingest_receipts i"
+                " SELECT i.event_key,MIN(i.created_at) created_at,MIN(i.work_key) work_key,"
+                " MIN(i.event_type) event_type,MIN(i.event_action) event_action FROM ingest_receipts i"
                 " LEFT JOIN jobs j ON j.id=i.job_id"
                 f" WHERE i.source='email' AND julianday(i.created_at)>=julianday(?) AND julianday(i.created_at)<=julianday(?) AND {_email_coverage_predicate('i.event_key', 'j')}"
                 " GROUP BY i.event_key"
                 "), webhook_events AS ("
-                " SELECT event_key,MIN(created_at) created_at FROM webhook_shadow_receipts INDEXED BY idx_webhook_shadow_coverage"
-                f" WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_coverage_predicate('event_key')}"
-                " GROUP BY event_key"
+                " SELECT w.event_key,MIN(w.created_at) created_at,"
+                " MIN(COALESCE(j.work_key,w.repository || '#' || COALESCE("
+                " json_extract(w.payload_json,'$.issue.number'),"
+                " json_extract(w.payload_json,'$.pull_request.number')))) work_key,"
+                " MIN(w.event_name) event_type,MIN(CASE WHEN w.action='submitted' THEN 'created' ELSE w.action END) event_action"
+                " FROM webhook_shadow_receipts w INDEXED BY idx_webhook_shadow_coverage"
+                " LEFT JOIN jobs j ON j.id=w.job_id"
+                f" WHERE julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?) AND {_coverage_predicate('w.event_key')}"
+                " GROUP BY w.event_key"
+                "), decision_traces AS ("
+                " SELECT e.event_key,"
+                " MAX(CASE WHEN e.bridge_action IS NOT NULL AND w.bridge_action IS NOT NULL"
+                " AND e.work_intent IS NOT NULL AND w.work_intent IS NOT NULL"
+                " AND e.work_key IS NOT NULL AND w.work_key IS NOT NULL THEN 1 ELSE 0 END) comparable,"
+                " MAX(CASE WHEN e.bridge_action IS NOT NULL AND w.bridge_action IS NOT NULL"
+                " AND e.work_intent IS NOT NULL AND w.work_intent IS NOT NULL"
+                " AND e.work_key IS NOT NULL AND w.work_key IS NOT NULL"
+                " AND (e.bridge_action<>w.bridge_action OR e.work_intent<>w.work_intent"
+                " OR e.work_key<>w.work_key) THEN 1 ELSE 0 END) mismatch"
+                " FROM ingest_receipts e JOIN ingest_receipts w USING(event_key)"
+                " WHERE e.source='email' AND w.source='webhook'"
+                " AND julianday(e.created_at)>=julianday(?) AND julianday(e.created_at)<=julianday(?)"
+                " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
+                " GROUP BY e.event_key"
+                "), matched_events AS ("
+                " SELECT e.event_key,COALESCE(d.comparable,0) decision_comparable"
+                " FROM email_events e JOIN webhook_events w USING(event_key)"
+                " LEFT JOIN decision_traces d USING(event_key)"
+                "), split_identities AS ("
+                " SELECT e.event_key,w.event_key FROM ingest_receipts e JOIN ingest_receipts w"
+                " ON e.source='email' AND w.source='webhook'"
+                " AND e.event_key GLOB 'email:*' AND w.event_key GLOB 'webhook:*'"
+                " AND e.work_key=w.work_key AND e.event_type=w.event_type"
+                " AND e.event_action=w.event_action"
+                " WHERE e.work_key IS NOT NULL AND e.event_type IS NOT NULL"
+                " AND e.event_action IS NOT NULL"
+                " AND julianday(e.created_at)>=julianday(?) AND julianday(e.created_at)<=julianday(?)"
+                " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
+                " AND ABS((julianday(w.created_at)-julianday(e.created_at))*86400.0)<=?"
+                " GROUP BY e.event_key,w.event_key"
                 ") SELECT"
                 " (SELECT COUNT(*) FROM email_events) imap_events,"
                 " (SELECT COUNT(*) FROM webhook_events) webhook_events,"
-                " (SELECT COUNT(*) FROM email_events JOIN webhook_events USING(event_key)) both_events,"
+                " (SELECT COUNT(*) FROM matched_events) both_events,"
+                " (SELECT COALESCE(SUM(mismatch),0) FROM decision_traces) decision_mismatches,"
+                " (SELECT COUNT(*) FROM matched_events WHERE decision_comparable=0) incomplete_decision_traces,"
+                " (SELECT COUNT(*) FROM split_identities) split_identities,"
                 " (SELECT AVG(ABS((julianday(w.created_at)-julianday(i.created_at))*86400000.0))"
                 "  FROM email_events i JOIN webhook_events w USING(event_key)) match_delay_ms",
-                (window_start, window_end, window_start, window_end),
+                (
+                    window_start,
+                    window_end,
+                    window_start,
+                    window_end,
+                    window_start,
+                    window_end,
+                    window_start,
+                    window_end,
+                    window_start,
+                    window_end,
+                    window_start,
+                    window_end,
+                    SPLIT_IDENTITY_MAX_DELAY_SECONDS,
+                ),
             ).fetchone()
             inventory = con.execute(
                 "SELECT (SELECT COUNT(*) FROM webhook_hooks) hooks,"
@@ -214,6 +284,9 @@ class WebhookRepository:
             "imap_events": int(coverage["imap_events"]),
             "webhook_events": int(coverage["webhook_events"]),
             "both_events": int(coverage["both_events"]),
+            "decision_mismatches": int(coverage["decision_mismatches"]),
+            "incomplete_decision_traces": int(coverage["incomplete_decision_traces"]),
+            "split_identities": int(coverage["split_identities"]),
             "match_delay_ms": coverage["match_delay_ms"],
             "hooks": int(inventory["hooks"]),
             "deliveries": int(inventory["deliveries"]),
@@ -227,32 +300,104 @@ class WebhookRepository:
             rows = con.execute(
                 "WITH email_events AS MATERIALIZED ("
                 " SELECT i.event_key,MIN(i.source_key) reference,MIN(i.created_at) created_at,"
-                " MIN(j.repo) repository FROM ingest_receipts i"
+                " MIN(COALESCE(i.repository,j.repo)) repository,"
+                " MIN(i.event_type) event_type,MIN(i.event_action) event_action"
+                " FROM ingest_receipts i"
                 " LEFT JOIN jobs j ON j.id=i.job_id"
                 f" WHERE i.source='email' AND julianday(i.created_at)>=julianday(?) AND julianday(i.created_at)<=julianday(?) AND {_email_coverage_predicate('i.event_key', 'j')}"
                 " GROUP BY i.event_key"
                 "), webhook_events AS MATERIALIZED ("
                 " SELECT event_key,MIN(delivery_id) reference,MIN(created_at) created_at,"
-                " MIN(repository) repository FROM webhook_shadow_receipts INDEXED BY idx_webhook_shadow_coverage"
+                " MIN(repository) repository,MIN(event_name) event_type,"
+                " MIN(CASE WHEN action='submitted' THEN 'created' ELSE action END) event_action"
+                " FROM webhook_shadow_receipts INDEXED BY idx_webhook_shadow_coverage"
                 f" WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_coverage_predicate('event_key')}"
                 " GROUP BY event_key"
+                "), decision_traces AS ("
+                " SELECT e.event_key,MIN(e.source_key) reference,"
+                " MIN(w.source_key) related_reference,MIN(e.created_at) created_at,"
+                " MIN(COALESCE(e.repository,w.repository)) repository,"
+                " MIN(COALESCE(e.event_type,w.event_type)) event_type,"
+                " MIN(COALESCE(e.event_action,w.event_action)) event_action,"
+                " MAX(CASE WHEN e.bridge_action IS NOT NULL AND w.bridge_action IS NOT NULL"
+                " AND e.work_intent IS NOT NULL AND w.work_intent IS NOT NULL"
+                " AND e.work_key IS NOT NULL AND w.work_key IS NOT NULL THEN 1 ELSE 0 END) comparable,"
+                " MAX(CASE WHEN e.bridge_action IS NOT NULL AND w.bridge_action IS NOT NULL"
+                " AND e.work_intent IS NOT NULL AND w.work_intent IS NOT NULL"
+                " AND e.work_key IS NOT NULL AND w.work_key IS NOT NULL"
+                " AND (e.bridge_action<>w.bridge_action OR e.work_intent<>w.work_intent"
+                " OR e.work_key<>w.work_key) THEN 1 ELSE 0 END) mismatch"
+                " FROM ingest_receipts e JOIN ingest_receipts w USING(event_key)"
+                " WHERE e.source='email' AND w.source='webhook'"
+                " AND julianday(e.created_at)>=julianday(?) AND julianday(e.created_at)<=julianday(?)"
+                " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
+                " GROUP BY e.event_key"
+                "), incomplete_traces AS ("
+                " SELECT e.event_key,e.reference,w.reference related_reference,"
+                " CASE WHEN e.created_at>w.created_at THEN e.created_at ELSE w.created_at END created_at,"
+                " COALESCE(e.repository,w.repository) repository,"
+                " COALESCE(e.event_type,w.event_type) event_type,"
+                " COALESCE(e.event_action,w.event_action) event_action"
+                " FROM email_events e JOIN webhook_events w USING(event_key)"
+                " LEFT JOIN decision_traces d USING(event_key)"
+                " WHERE COALESCE(d.comparable,0)=0"
+                "), split_pairs AS ("
+                " SELECT e.event_key,w.event_key related_event_key,e.source_key reference,"
+                " w.source_key related_reference,"
+                " CASE WHEN e.created_at>w.created_at THEN e.created_at ELSE w.created_at END created_at,"
+                " COALESCE(e.repository,w.repository) repository,"
+                " COALESCE(e.event_type,w.event_type) event_type,"
+                " COALESCE(e.event_action,w.event_action) event_action"
+                " FROM ingest_receipts e JOIN ingest_receipts w"
+                " ON e.source='email' AND w.source='webhook'"
+                " AND e.event_key GLOB 'email:*' AND w.event_key GLOB 'webhook:*'"
+                " AND e.work_key=w.work_key AND e.event_type=w.event_type"
+                " AND e.event_action=w.event_action"
+                " WHERE e.work_key IS NOT NULL AND e.event_type IS NOT NULL"
+                " AND e.event_action IS NOT NULL"
+                " AND julianday(e.created_at)>=julianday(?) AND julianday(e.created_at)<=julianday(?)"
+                " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
+                " AND ABS((julianday(w.created_at)-julianday(e.created_at))*86400.0)<=?"
+                " GROUP BY e.event_key,w.event_key"
                 "), candidates AS ("
-                " SELECT 'imap_only' kind,i.event_key,i.reference,i.created_at,i.repository "
+                " SELECT 'imap_only' kind,i.event_key,NULL related_event_key,i.reference,"
+                " NULL related_reference,i.created_at,i.repository,i.event_type,i.event_action"
                 " FROM email_events i LEFT JOIN webhook_events w USING(event_key)"
                 " WHERE w.event_key IS NULL UNION ALL "
-                " SELECT 'webhook_only',w.event_key,w.reference,w.created_at,w.repository "
+                " SELECT 'webhook_only',w.event_key,NULL,w.reference,NULL,w.created_at,"
+                " w.repository,w.event_type,w.event_action"
                 " FROM webhook_events w LEFT JOIN email_events i USING(event_key)"
                 " WHERE i.event_key IS NULL UNION ALL "
-                " SELECT 'unmatchable',NULL,w.delivery_id,w.created_at,w.repository "
+                " SELECT 'unmatchable',NULL,NULL,w.delivery_id,NULL,w.created_at,"
+                " w.repository,w.event_name,w.action"
                 " FROM webhook_shadow_receipts w INDEXED BY idx_webhook_shadow_coverage WHERE w.event_key IS NULL"
                 " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
-                ") SELECT kind,event_key,reference,created_at,repository FROM candidates "
+                " UNION ALL SELECT 'decision_mismatch',event_key,NULL,reference,"
+                " related_reference,created_at,repository,event_type,event_action"
+                " FROM decision_traces WHERE mismatch=1 UNION ALL "
+                " SELECT 'incomplete_trace',event_key,NULL,reference,"
+                " related_reference,created_at,repository,event_type,event_action"
+                " FROM incomplete_traces UNION ALL "
+                " SELECT 'split_identity',event_key,related_event_key,reference,"
+                " related_reference,created_at,repository,event_type,event_action"
+                " FROM split_pairs"
+                ") SELECT kind,event_key,related_event_key,reference,related_reference,"
+                "created_at,repository,event_type,event_action FROM candidates "
                 "ORDER BY created_at DESC LIMIT ?",
                 (
                     window_start,
                     window_end,
                     window_start,
                     window_end,
+                    window_start,
+                    window_end,
+                    window_start,
+                    window_end,
+                    window_start,
+                    window_end,
+                    window_start,
+                    window_end,
+                    SPLIT_IDENTITY_MAX_DELAY_SECONDS,
                     window_start,
                     window_end,
                     limit,

@@ -127,16 +127,30 @@ def _webhook_coverage_window(
     repository: WebhookRepository,
     *,
     retention_days: int,
+    observation_days: int,
     grace_seconds: int,
-) -> tuple[str, str]:
-    end = datetime.now(UTC) - timedelta(seconds=grace_seconds)
-    start = end - timedelta(days=retention_days)
-    first = repository.first_receipt_created_at()
-    if first:
-        start = max(start, _parse_webhook_datetime(str(first), "webhook_created_at"))
+) -> tuple[str, str, bool]:
+    now = datetime.now(UTC)
+    end = now - timedelta(seconds=grace_seconds)
+    requested_start = end - timedelta(days=observation_days)
+    retained_start = now - timedelta(days=retention_days)
+    start = max(requested_start, retained_start)
+    observation_complete = False
+    observation_started_at = repository.observation_started_at()
+    if observation_started_at:
+        first_observed = _parse_webhook_datetime(
+            str(observation_started_at), "webhook_observation_started_at"
+        )
+        history_retained = retained_start <= requested_start
+        observation_complete = history_retained and first_observed <= requested_start
+        start = max(start, first_observed)
     if start > end:
         start = end
-    return _webhook_datetime_value(start), _webhook_datetime_value(end)
+    return (
+        _webhook_datetime_value(start),
+        _webhook_datetime_value(end),
+        observation_complete,
+    )
 
 
 def _encode_webhook_delivery_cursor(created_at: str, delivery_id: str) -> str:
@@ -295,6 +309,7 @@ class DashboardConfig:
         webhook_secrets_by_owner: dict[str, tuple[str, ...]] | None = None,
         webhook_max_bytes: int | None = None,
         webhook_retention_days: int | None = None,
+        webhook_promotion_observation_days: int | None = None,
         webhook_coverage_grace_seconds: int | None = None,
         webhook_mode: str | None = None,
         webhook_policy: str | Path | None = None,
@@ -322,6 +337,14 @@ class DashboardConfig:
         self.webhook_secrets_by_owner = webhook_secrets_by_owner if webhook_secrets_by_owner is not None else _webhook_secrets_by_owner_env()
         self.webhook_max_bytes = webhook_max_bytes or int(os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_MAX_BYTES", "1048576"))
         self.webhook_retention_days = webhook_retention_days or int(os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_RETENTION_DAYS", "30"))
+        self.webhook_promotion_observation_days = max(
+            1,
+            (
+                webhook_promotion_observation_days
+                if webhook_promotion_observation_days is not None
+                else int(os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_PROMOTION_OBSERVATION_DAYS", "7"))
+            ),
+        )
         self.webhook_coverage_grace_seconds = max(
             0,
             (
@@ -977,12 +1000,30 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     @app.get("/api/webhooks/github/summary")
     def github_webhook_shadow_summary(_: dict[str, Any] = Depends(current_admin_profile)) -> dict[str, Any]:
         ensure_webhook_schema()
-        window_start, window_end = _webhook_coverage_window(
+        window_start, window_end, observation_complete = _webhook_coverage_window(
             webhook_repository,
             retention_days=config.webhook_retention_days,
+            observation_days=config.webhook_promotion_observation_days,
             grace_seconds=config.webhook_coverage_grace_seconds,
         )
         summary = webhook_repository.summary(window_start, window_end)
+        has_comparable_events = (
+            summary["both_events"] > 0
+            and summary["incomplete_decision_traces"] == 0
+        )
+        parity_clean = (
+            summary["imap_events"] == summary["both_events"]
+            and summary["webhook_events"] == summary["both_events"]
+            and summary["decision_mismatches"] == 0
+            and summary["split_identities"] == 0
+        )
+        promotion_state = (
+            "insufficient_data"
+            if not observation_complete or not has_comparable_events
+            else "ready"
+            if parity_clean
+            else "blocked"
+        )
         counts = {
             name: count
             for name, count in (
@@ -1006,6 +1047,12 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
                 "both": summary["both_events"],
                 "imap_only": max(summary["imap_events"] - summary["both_events"], 0),
                 "webhook_only": max(summary["webhook_events"] - summary["both_events"], 0),
+                "decision_mismatches": summary["decision_mismatches"],
+                "incomplete_decision_traces": summary["incomplete_decision_traces"],
+                "split_identities": summary["split_identities"],
+                "observation_complete": observation_complete,
+                "promotion_state": promotion_state,
+                "promotion_ready": promotion_state == "ready",
                 "imap_eligible": summary["imap_events"],
                 "ratio": (
                     summary["both_events"] / summary["imap_events"]
@@ -1017,6 +1064,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
                 ),
                 "window_start": window_start,
                 "window_end": window_end,
+                "observation_days": config.webhook_promotion_observation_days,
                 "grace_seconds": config.webhook_coverage_grace_seconds,
             },
         }
@@ -1028,9 +1076,10 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Return bounded, actionable shadow divergences without loading all receipts."""
         ensure_webhook_schema()
-        window_start, window_end = _webhook_coverage_window(
+        window_start, window_end, _ = _webhook_coverage_window(
             webhook_repository,
             retention_days=config.webhook_retention_days,
+            observation_days=config.webhook_promotion_observation_days,
             grace_seconds=config.webhook_coverage_grace_seconds,
         )
         rows = webhook_repository.exceptions(window_start, window_end, limit)
