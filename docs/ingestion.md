@@ -118,15 +118,35 @@ organization webhook under **Organization settings → Webhooks**:
 2. Set **Content type** to `application/json` and **Secret** to the matching
    configured owner secret.
 3. Keep SSL verification enabled and the webhook active.
-4. Select individual events: **Issue comments**, **Pull request reviews**,
-   **Pull request review comments**, **Commit comments**, and **Workflow runs**.
-   Do not select “Send me everything” for Phase 1.
+4. Select individual events: **Issues**, **Pull requests**, **Issue comments**,
+   **Pull request reviews**, **Pull request review comments**, **Commit
+   comments**, and **Workflow runs**. The first two are required for assignment,
+   review-request and lifecycle parity. Do not select “Send me everything” for
+   Phase 1.
 
 A repository webhook covers only that repository. An organization webhook
 covers repositories in that organization and is the recommended deployment.
 Multiple organizations and multiple hooks may use the same endpoint when each
 owner has its own entry in `GITHUB_AGENT_BRIDGE_WEBHOOK_SECRETS_BY_OWNER`.
 GitHub's `X-GitHub-Hook-ID` header keeps their inventory and activity separate.
+
+Audit the live GitHub configuration and its retained delivery history before
+widening the canary or promoting it. The command is read-only, matches the
+exact public endpoint, checks the seven required event families, active/JSON/TLS
+configuration, delivery freshness, and consecutive failures:
+
+```bash
+gab audit-webhook \
+  --owner your-org \
+  --endpoint https://bridge.example/api/webhooks/github \
+  --max-delivery-age-seconds 21600 \
+  --failure-threshold 3
+```
+
+The `gh` identity needs organization-hook read access (`admin:org_hook` for a
+classic token). Exit status `2` means the audit found drift, silence, repeated
+failures, or could not inspect the hook; it never sends a ping or changes hook
+configuration.
 
 The endpoint stores routing metadata, a SHA-256 payload hash, the canonical
 event key, and the verified JSON payload in `webhook_shadow_receipts`. The

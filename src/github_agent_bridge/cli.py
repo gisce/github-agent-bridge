@@ -40,6 +40,7 @@ from .policy import Policy, validate_policy_file
 from .queue import JobQueue
 from .reader import ImapConfig, ImapReader, imap_mailbox_arg
 from .sql.migrations import migration_history
+from .webhook_audit import WebhookAuditError, audit_organization_webhook, gh_api
 
 DEFAULT_DB = os.path.expanduser("~/.local/state/github-agent-bridge/bridge.sqlite3")
 DEFAULT_POLICY = os.path.expanduser("~/.config/github-agent-bridge/policy.json")
@@ -420,6 +421,22 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     return 0 if report.ok else 2
 
 
+def cmd_audit_webhook(args: argparse.Namespace) -> int:
+    try:
+        report = audit_organization_webhook(
+            args.owner,
+            args.endpoint,
+            max_delivery_age_seconds=args.max_delivery_age_seconds,
+            failure_threshold=args.failure_threshold,
+            api=lambda path: gh_api(path, gh_bin=args.gh_bin),
+        )
+    except (ValueError, WebhookAuditError) as exc:
+        print(f"webhook audit failed: {exc}", file=sys.stderr)
+        return 2
+    print(json.dumps(report.to_dict(), indent=2) if args.json else report.text())
+    return 0 if report.ok else 2
+
+
 def cmd_update(args: argparse.Namespace) -> int:
     if args.complete_pending:
         completion = complete_pending_reload(
@@ -664,6 +681,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--no-persist-observability", action="store_true", help="skip writing process samples and alert observations")
     s.set_defaults(func=cmd_monitor)
+    s = sub.add_parser(
+        "audit-webhook",
+        help="audit an organization webhook configuration and recent GitHub deliveries",
+    )
+    s.add_argument("--owner", required=True)
+    s.add_argument("--endpoint", required=True, help="exact public webhook URL configured in GitHub")
+    s.add_argument("--max-delivery-age-seconds", type=int, default=21600)
+    s.add_argument("--failure-threshold", type=int, default=3)
+    s.add_argument("--gh-bin", default="gh")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_audit_webhook)
     s = sub.add_parser("update", help="check a GitHub release update and record safe reload state")
     s.add_argument("--repo", default=os.getenv("GITHUB_AGENT_BRIDGE_AUTOUPDATE_REPO") or "gisce/github-agent-bridge")
     s.add_argument("--repo-dir", default=os.getenv("GITHUB_AGENT_BRIDGE_AUTOUPDATE_REPO_DIR") or ".")

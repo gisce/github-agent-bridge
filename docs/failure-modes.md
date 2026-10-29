@@ -5,7 +5,7 @@ Known failures and expected containment behavior.
 | Failure | Expected behavior | Operator response |
 | --- | --- | --- |
 | Invalid webhook signature | Delivery is rejected before persistence or enqueue. | Verify the owner-specific secret and proxy preserves raw request bytes. |
-| Webhook delivery gap | IMAP may win the canonical event during the fallback phase. | Inspect hook deliveries and the webhook exception queue; do not disable IMAP until the gap is explained. |
+| Webhook delivery gap | IMAP may win the canonical event during the fallback phase. | Run `gab audit-webhook`, inspect hook deliveries and the webhook exception queue; do not disable IMAP until the gap is explained. |
 | IMAP burst backlog | Reader enqueues oldest-first and never waits for agents. | Monitor pending age and worker capacity. |
 | Agent dispatch timeout | Job becomes `blocked`; unrelated jobs continue. | Inspect `last_error`, then retry or fix policy/agent issue. |
 | Duplicate notification | Notification coalesces into active `work_key`. | No action unless coalescing count is suspiciously high. |
