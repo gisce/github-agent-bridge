@@ -2,6 +2,22 @@
 
 <!-- version list -->
 
+## v0.87.0 (2026-10-29)
+
+### Bug Fixes
+
+- Fail webhook audit closed on incomplete checks
+  ([`7d532e3`](https://github.com/gisce/github-agent-bridge/commit/7d532e30b71f0acc6a60cdb59860e6d6c5e99ec4))
+
+- Paginate webhook audit reads
+  ([`274c552`](https://github.com/gisce/github-agent-bridge/commit/274c552f74f5ac66f30e41c78e06fa145f420569))
+
+### Features
+
+- Audit organization webhook health
+  ([`89398bc`](https://github.com/gisce/github-agent-bridge/commit/89398bc075962000297d57900689bb39c30b21fe))
+
+
 ## v0.86.0 (2026-10-28)
 
 ### Bug Fixes
