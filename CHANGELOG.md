@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.87.1 (2026-10-30)
+
+### Bug Fixes
+
+- Align pull request review intent across transports
+  ([`6b62ff9`](https://github.com/gisce/github-agent-bridge/commit/6b62ff9799ce3317a58dce0652626baf34b9405d))
+
+
 ## v0.87.0 (2026-10-29)
 
 ### Bug Fixes
