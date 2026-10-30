@@ -1152,6 +1152,52 @@ def test_webhook_canary_enqueues_actionable_pull_request_review_states(tmp_path,
         assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
 
 
+def test_webhook_changes_requested_on_assigned_bot_pr_allows_work(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "github_agent_bridge.queue.trigger_actor_details_for_enqueue",
+        lambda notification, ctx: None,
+    )
+    payload = pull_request_review_payload(
+        state="changes_requested",
+        review_id=5710723075,
+        sender="pilipilisbot",
+        body="Please bind the shadow delivery to its own receipt.",
+        pr_author="giscebot",
+        assignees=("giscebot",),
+    )
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=canary_policy(tmp_path),
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(
+            payload,
+            delivery="review-assigned-bot-pr",
+            event="pull_request_review",
+        ),
+    )
+
+    assert response.json()["enqueue_status"] == "enqueued"
+    with sqlite3.connect(config.db) as con:
+        work_intent, metadata_json = con.execute(
+            "SELECT work_intent,metadata_json FROM jobs"
+        ).fetchone()
+    metadata = json.loads(metadata_json)
+    assert work_intent == "work_allowed"
+    assert metadata["feedback_actionability"] == "pr_authored_by_bot"
+    assert metadata["intent_guardrail"] == (
+        "bot_authored_pr_changes_requested_work_allowed"
+    )
+
+
 def test_webhook_canary_ignores_unaddressed_review_on_someone_elses_pr(tmp_path):
     payload = pull_request_review_payload(
         state="changes_requested",
