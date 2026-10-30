@@ -172,14 +172,27 @@ class JobQueue:
             "source_received_at": n.source_received_at,
         }
         feedback_actionability = str(n.metadata.get("feedback_actionability") or "")
+        feedback_review_state = str(n.metadata.get("review_state") or "").lower()
         feedback_target = ctx.target_kind in FEEDBACK_TARGET_KINDS
         if source == "email" and feedback_target and not feedback_actionability:
-            feedback_actionability = resolve_feedback_authorization(
+            authorization = resolve_feedback_authorization(
                 ctx,
                 policy.bot_logins,
             )
+            feedback_actionability = str(authorization)
+            feedback_review_state = str(
+                getattr(authorization, "review_state", None)
+                or feedback_review_state
+            ).lower()
             metadata["feedback_actionability"] = feedback_actionability
         if feedback_target and feedback_actionability == "ignored":
+            return None, "ignored"
+        if (
+            source == "email"
+            and ctx.target_kind == "review"
+            and feedback_review_state
+            and feedback_review_state not in {"changes_requested", "commented"}
+        ):
             return None, "ignored"
         structured_feedback = feedback_actionability in {
             "mentioned",
@@ -189,12 +202,18 @@ class JobQueue:
         }
         unresolved_feedback = feedback_actionability == "defer_to_executor"
         bot_authored_changes_requested = bool(
-            n.metadata.get("github_event") == "pull_request_review"
-            and n.metadata.get("review_state") == "changes_requested"
+            ctx.target_kind == "review"
+            and feedback_review_state == "changes_requested"
             and feedback_actionability == "pr_authored_by_bot"
         )
         if n.metadata:
             metadata.update(n.metadata)
+        if feedback_review_state:
+            metadata.update({
+                "github_event": "pull_request_review",
+                "github_action": "submitted",
+                "review_state": feedback_review_state,
+            })
         if resolved_event is not None:
             metadata["github_event_resolution"] = {
                 "status": "resolved",

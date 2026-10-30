@@ -27,6 +27,26 @@ class FeedbackAuthorizationFacts:
     complete: bool = True
 
 
+class FeedbackAuthorizationResult(str):
+    """Authorization value with verified source metadata.
+
+    This remains a string for compatibility with existing policy callers while
+    carrying review state fetched from GitHub for transport-neutral intent.
+    """
+
+    review_state: str | None
+
+    def __new__(
+        cls,
+        value: str,
+        *,
+        review_state: str | None = None,
+    ) -> FeedbackAuthorizationResult:
+        result = super().__new__(cls, value)
+        result.review_state = review_state
+        return result
+
+
 def first_mentioned_login(body: str | None) -> str | None:
     match = re.search(r"@([A-Za-z0-9-]+)", body or "")
     return match.group(1).lower() if match else None
@@ -170,7 +190,7 @@ def resolve_feedback_authorization(
         if isinstance(thread, dict) and isinstance(thread.get("assignees"), list)
         else []
     )
-    return evaluate_feedback_authorization(
+    authorization = evaluate_feedback_authorization(
         FeedbackAuthorizationFacts(
             body=(str(source.get("body") or "") if source is not None else None),
             assignees=tuple(
@@ -190,4 +210,13 @@ def resolve_feedback_authorization(
             complete=source is not None and (thread is not None or not ctx.issue_number),
         ),
         bot_logins,
+    )
+    review_state = (
+        str(source.get("state") or "").lower() or None
+        if ctx.target_kind == "review" and source is not None
+        else None
+    )
+    return FeedbackAuthorizationResult(
+        authorization,
+        review_state=review_state,
     )

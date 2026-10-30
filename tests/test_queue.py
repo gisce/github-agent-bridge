@@ -5,6 +5,7 @@ from threading import Barrier
 import pytest
 
 import github_agent_bridge.queue as queue_module
+from github_agent_bridge.actionability import resolve_feedback_authorization
 from github_agent_bridge.models import (
     GitHubContext,
     Notification,
@@ -1113,6 +1114,97 @@ def test_enqueue_cannot_downgrade_changes_requested_on_bot_authored_pr(
     assert job.metadata["intent_classifier"]["llm"]["action"] == (
         "archive_notification"
     )
+
+
+def test_email_changes_requested_uses_verified_review_state(tmp_path, monkeypatch):
+    responses = {
+        "repos/gisce/example/pulls/42/reviews/4815162342": {
+            "body": "Please add regression coverage.",
+            "state": "CHANGES_REQUESTED",
+        },
+        "repos/gisce/example/issues/42": {
+            "user": {"login": "giscebot"},
+            "assignees": [],
+            "pull_request": {"url": "https://api.github.com/repos/gisce/example/pulls/42"},
+        },
+    }
+    monkeypatch.setattr(
+        "github_agent_bridge.actionability._github_json",
+        lambda endpoint, **kwargs: responses[endpoint],
+    )
+    monkeypatch.setattr(
+        queue_module, "resolve_feedback_authorization", resolve_feedback_authorization
+    )
+    monkeypatch.setattr(
+        queue_module, "trigger_actor_details_for_enqueue", lambda notification, ctx: None
+    )
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = q.enqueue(
+        Notification(
+            uid=1,
+            message_id="<changes-requested-email@github.com>",
+            subject="Re: [gisce/example] Review feedback (PR #42)",
+            from_addr="reviewer <notifications@github.com>",
+            body=(
+                "Please add regression coverage.\n\n"
+                "https://github.com/gisce/example/pull/42"
+                "#pullrequestreview-4815162342"
+            ),
+            auth={"spf": True, "dkim": True, "dmarc": True},
+        ),
+        Policy(trusted_orgs={"gisce"}, bot_logins={"giscebot"}),
+    )
+
+    assert state == "enqueued"
+    assert job is not None
+    assert job.action == "reply_comment"
+    assert job.work_intent == "work_allowed"
+    assert job.metadata["review_state"] == "changes_requested"
+    assert job.metadata["intent_guardrail"] == (
+        "bot_authored_pr_changes_requested_work_allowed"
+    )
+
+
+def test_email_approved_review_is_ignored_like_webhook(tmp_path, monkeypatch):
+    responses = {
+        "repos/gisce/example/pulls/42/reviews/4815162343": {
+            "body": "Looks good to me.",
+            "state": "APPROVED",
+        },
+        "repos/gisce/example/issues/42": {
+            "user": {"login": "giscebot"},
+            "assignees": [],
+            "pull_request": {"url": "https://api.github.com/repos/gisce/example/pulls/42"},
+        },
+    }
+    monkeypatch.setattr(
+        "github_agent_bridge.actionability._github_json",
+        lambda endpoint, **kwargs: responses[endpoint],
+    )
+    monkeypatch.setattr(
+        queue_module, "resolve_feedback_authorization", resolve_feedback_authorization
+    )
+    q = JobQueue(tmp_path / "q.sqlite3")
+
+    job, state = q.enqueue(
+        Notification(
+            uid=2,
+            message_id="<approved-review-email@github.com>",
+            subject="Re: [gisce/example] Review feedback (PR #42)",
+            from_addr="reviewer <notifications@github.com>",
+            body=(
+                "Looks good to me.\n\n"
+                "https://github.com/gisce/example/pull/42"
+                "#pullrequestreview-4815162343"
+            ),
+            auth={"spf": True, "dkim": True, "dmarc": True},
+        ),
+        Policy(trusted_orgs={"gisce"}, bot_logins={"giscebot"}),
+    )
+
+    assert job is None
+    assert state == "ignored"
 
 
 def test_enqueue_falls_back_when_llm_intent_confidence_is_low(tmp_path, monkeypatch):
