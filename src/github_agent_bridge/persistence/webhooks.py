@@ -19,26 +19,40 @@ WEBHOOK_OBSERVATION_STARTED_AT_KEY = "webhook_observation_started_at"
 
 
 def _coverage_predicate(column: str) -> str:
-    if column not in {"event_key", "i.event_key", "w.event_key"}:
+    if column not in {
+        "event_key",
+        "i.event_key",
+        "wi.event_key",
+        "e.event_key",
+        "w.event_key",
+    }:
         raise ValueError("unsupported webhook coverage column")
     return "(" + " OR ".join(
         f"{column} GLOB '{pattern}'" for pattern in WEBHOOK_COVERAGE_EVENT_GLOBS
     ) + ")"
 
 
-def _email_coverage_predicate(event_key: str, job_alias: str) -> str:
-    """Include comparable keys plus actionable email events lacking one.
+def _actionable_ingest_predicate(receipt_alias: str, job_alias: str) -> str:
+    """Select receipts that produced executable work.
 
-    A source-specific event key is evidence of a parity gap when IMAP created
-    executable work. Passive subscription mail remains outside the promotion
-    gate so routine archive traffic cannot make webhook coverage look worse.
+    Migration v7 cannot backfill decision traces. Keep legacy comparable
+    identities in the cohort so missing traces fail closed, but require new
+    receipts to have an auto-trusted, non-archive decision.
     """
-    if job_alias != "j":
-        raise ValueError("unsupported email coverage job alias")
+    if (receipt_alias, job_alias) not in {
+        ("i", "j"),
+        ("wi", "j"),
+        ("e", "ej"),
+        ("w", "wj"),
+    }:
+        raise ValueError("unsupported webhook coverage aliases")
     return (
-        f"({_coverage_predicate(event_key)} OR "
-        f"({job_alias}.decision='auto_trusted' "
-        f"AND {job_alias}.action<>'archive_notification'))"
+        f"((COALESCE({receipt_alias}.decision,{job_alias}.decision)='auto_trusted' "
+        f"AND COALESCE({receipt_alias}.bridge_action,{job_alias}.action)"
+        "<>'archive_notification') OR "
+        f"({receipt_alias}.decision IS NULL "
+        f"AND {receipt_alias}.bridge_action IS NULL "
+        f"AND {_coverage_predicate(f'{receipt_alias}.event_key')}))"
     )
 
 
@@ -197,7 +211,9 @@ class WebhookRepository:
                 " SELECT i.event_key,MIN(i.created_at) created_at,MIN(i.work_key) work_key,"
                 " MIN(i.event_type) event_type,MIN(i.event_action) event_action FROM ingest_receipts i"
                 " LEFT JOIN jobs j ON j.id=i.job_id"
-                f" WHERE i.source='email' AND julianday(i.created_at)>=julianday(?) AND julianday(i.created_at)<=julianday(?) AND {_email_coverage_predicate('i.event_key', 'j')}"
+                " WHERE i.source='email' AND i.event_key IS NOT NULL"
+                " AND julianday(i.created_at)>=julianday(?) AND julianday(i.created_at)<=julianday(?)"
+                f" AND {_actionable_ingest_predicate('i', 'j')}"
                 " GROUP BY i.event_key"
                 "), webhook_events AS ("
                 " SELECT w.event_key,MIN(w.created_at) created_at,"
@@ -206,8 +222,11 @@ class WebhookRepository:
                 " json_extract(w.payload_json,'$.pull_request.number')))) work_key,"
                 " MIN(w.event_name) event_type,MIN(CASE WHEN w.action='submitted' THEN 'created' ELSE w.action END) event_action"
                 " FROM webhook_shadow_receipts w INDEXED BY idx_webhook_shadow_coverage"
-                " LEFT JOIN jobs j ON j.id=w.job_id"
-                f" WHERE julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?) AND {_coverage_predicate('w.event_key')}"
+                " JOIN ingest_receipts wi ON wi.source='webhook' AND wi.source_key=w.delivery_id"
+                " LEFT JOIN jobs j ON j.id=COALESCE(w.job_id,wi.job_id)"
+                " WHERE w.event_key IS NOT NULL"
+                " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
+                f" AND {_actionable_ingest_predicate('wi', 'j')}"
                 " GROUP BY w.event_key"
                 "), decision_traces AS ("
                 " SELECT e.event_key,"
@@ -220,6 +239,8 @@ class WebhookRepository:
                 " AND (e.bridge_action<>w.bridge_action OR e.work_intent<>w.work_intent"
                 " OR e.work_key<>w.work_key) THEN 1 ELSE 0 END) mismatch"
                 " FROM ingest_receipts e JOIN ingest_receipts w USING(event_key)"
+                " JOIN email_events ae USING(event_key)"
+                " JOIN webhook_events aw USING(event_key)"
                 " WHERE e.source='email' AND w.source='webhook'"
                 " AND julianday(e.created_at)>=julianday(?) AND julianday(e.created_at)<=julianday(?)"
                 " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
@@ -234,8 +255,12 @@ class WebhookRepository:
                 " AND e.event_key GLOB 'email:*' AND w.event_key GLOB 'webhook:*'"
                 " AND e.work_key=w.work_key AND e.event_type=w.event_type"
                 " AND e.event_action=w.event_action"
+                " LEFT JOIN jobs ej ON ej.id=e.job_id"
+                " LEFT JOIN jobs wj ON wj.id=w.job_id"
                 " WHERE e.work_key IS NOT NULL AND e.event_type IS NOT NULL"
                 " AND e.event_action IS NOT NULL"
+                f" AND {_actionable_ingest_predicate('e', 'ej')}"
+                f" AND {_actionable_ingest_predicate('w', 'wj')}"
                 " AND julianday(e.created_at)>=julianday(?) AND julianday(e.created_at)<=julianday(?)"
                 " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
                 " AND ABS((julianday(w.created_at)-julianday(e.created_at))*86400.0)<=?"
@@ -304,15 +329,21 @@ class WebhookRepository:
                 " MIN(i.event_type) event_type,MIN(i.event_action) event_action"
                 " FROM ingest_receipts i"
                 " LEFT JOIN jobs j ON j.id=i.job_id"
-                f" WHERE i.source='email' AND julianday(i.created_at)>=julianday(?) AND julianday(i.created_at)<=julianday(?) AND {_email_coverage_predicate('i.event_key', 'j')}"
+                " WHERE i.source='email' AND i.event_key IS NOT NULL"
+                " AND julianday(i.created_at)>=julianday(?) AND julianday(i.created_at)<=julianday(?)"
+                f" AND {_actionable_ingest_predicate('i', 'j')}"
                 " GROUP BY i.event_key"
                 "), webhook_events AS MATERIALIZED ("
-                " SELECT event_key,MIN(delivery_id) reference,MIN(created_at) created_at,"
-                " MIN(repository) repository,MIN(event_name) event_type,"
-                " MIN(CASE WHEN action='submitted' THEN 'created' ELSE action END) event_action"
-                " FROM webhook_shadow_receipts INDEXED BY idx_webhook_shadow_coverage"
-                f" WHERE julianday(created_at)>=julianday(?) AND julianday(created_at)<=julianday(?) AND {_coverage_predicate('event_key')}"
-                " GROUP BY event_key"
+                " SELECT w.event_key,MIN(w.delivery_id) reference,MIN(w.created_at) created_at,"
+                " MIN(w.repository) repository,MIN(w.event_name) event_type,"
+                " MIN(CASE WHEN w.action='submitted' THEN 'created' ELSE w.action END) event_action"
+                " FROM webhook_shadow_receipts w INDEXED BY idx_webhook_shadow_coverage"
+                " JOIN ingest_receipts wi ON wi.source='webhook' AND wi.source_key=w.delivery_id"
+                " LEFT JOIN jobs j ON j.id=COALESCE(w.job_id,wi.job_id)"
+                " WHERE w.event_key IS NOT NULL"
+                " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
+                f" AND {_actionable_ingest_predicate('wi', 'j')}"
+                " GROUP BY w.event_key"
                 "), decision_traces AS ("
                 " SELECT e.event_key,MIN(e.source_key) reference,"
                 " MIN(w.source_key) related_reference,MIN(e.created_at) created_at,"
@@ -328,6 +359,8 @@ class WebhookRepository:
                 " AND (e.bridge_action<>w.bridge_action OR e.work_intent<>w.work_intent"
                 " OR e.work_key<>w.work_key) THEN 1 ELSE 0 END) mismatch"
                 " FROM ingest_receipts e JOIN ingest_receipts w USING(event_key)"
+                " JOIN email_events ae USING(event_key)"
+                " JOIN webhook_events aw USING(event_key)"
                 " WHERE e.source='email' AND w.source='webhook'"
                 " AND julianday(e.created_at)>=julianday(?) AND julianday(e.created_at)<=julianday(?)"
                 " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
@@ -353,8 +386,12 @@ class WebhookRepository:
                 " AND e.event_key GLOB 'email:*' AND w.event_key GLOB 'webhook:*'"
                 " AND e.work_key=w.work_key AND e.event_type=w.event_type"
                 " AND e.event_action=w.event_action"
+                " LEFT JOIN jobs ej ON ej.id=e.job_id"
+                " LEFT JOIN jobs wj ON wj.id=w.job_id"
                 " WHERE e.work_key IS NOT NULL AND e.event_type IS NOT NULL"
                 " AND e.event_action IS NOT NULL"
+                f" AND {_actionable_ingest_predicate('e', 'ej')}"
+                f" AND {_actionable_ingest_predicate('w', 'wj')}"
                 " AND julianday(e.created_at)>=julianday(?) AND julianday(e.created_at)<=julianday(?)"
                 " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
                 " AND ABS((julianday(w.created_at)-julianday(e.created_at))*86400.0)<=?"

@@ -1453,7 +1453,7 @@ def test_webhook_monitoring_endpoints_keep_summary_light_and_return_real_data(tm
             "mean_match_delay_ms", "grace_seconds",
         )
     } == {
-        "both": 0, "imap_only": 0, "webhook_only": 1,
+        "both": 0, "imap_only": 0, "webhook_only": 0,
         "imap_eligible": 0, "ratio": None, "mean_match_delay_ms": None,
         "grace_seconds": 0,
     }
@@ -1532,7 +1532,7 @@ def test_webhook_monitoring_endpoints_keep_summary_light_and_return_real_data(tm
     assert timeseries["points"][0]["unsupported"] == 1
     exceptions = client.get("/api/webhooks/github/exceptions").json()["exceptions"]
     assert {(item["kind"], item["reference"]) for item in exceptions} == {
-        ("unmatchable", "ping-1"), ("webhook_only", "delivery-1"),
+        ("unmatchable", "ping-1"),
     }
 
 
@@ -1628,6 +1628,33 @@ def test_webhook_coverage_includes_actionable_uncorrelated_email_keys(
                 ("email-only", "hash-2", "issue_comment:created:gisce/repo:4", "accepted", within_window, within_window),
                 ("email-recent", "hash-3", "issue_comment:created:gisce/repo:5", "accepted", too_recent, too_recent),
                 ("email-old", "hash-4", "issue_comment:created:gisce/repo:6", "accepted", too_old, too_old),
+            ],
+        )
+        con.executemany(
+            "INSERT INTO ingest_receipts("
+            "source,source_key,payload_hash,event_key,repository,work_key,"
+            "event_type,event_action,bridge_action,decision,work_intent,"
+            "status,created_at,updated_at"
+            ") VALUES('webhook',?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    source_key, payload_hash, event_key, "gisce/repo",
+                    f"gisce/repo#{number}", "issue_comment", "created",
+                    "reply_comment", "auto_trusted", "review_only", status,
+                    created_at, created_at,
+                )
+                for source_key, payload_hash, event_key, number, status, created_at in (
+                    (
+                        "matched", "matched",
+                        "issue_comment:created:gisce/repo:1", 1, "duplicate",
+                        within_window,
+                    ),
+                    (
+                        "webhook-only", "webhook-only",
+                        "issue_comment:created:gisce/repo:2", 2, "accepted",
+                        within_window,
+                    ),
+                )
             ],
         )
     fallback_job, fallback_state = queue.enqueue(
@@ -1737,6 +1764,206 @@ def test_webhook_promotion_gate_requires_a_complete_nonempty_observation(tmp_pat
     assert empty_cohort["promotion_ready"] is False
 
 
+def test_webhook_promotion_gate_excludes_non_actionable_webhook_receipts(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    now = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    event_key = "issue_comment:created:gisce/repo:10"
+    with sqlite3.connect(db) as con:
+        con.executemany(
+            "INSERT INTO ingest_receipts("
+            "source,source_key,payload_hash,event_key,repository,work_key,"
+            "event_type,event_action,bridge_action,decision,work_intent,"
+            "status,created_at,updated_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    source, f"{source}-10", f"{source}-10", event_key,
+                    "gisce/repo", "gisce/repo#10", "issue_comment", "created",
+                    "reply_comment", "auto_trusted", "work_allowed", status,
+                    now, now,
+                )
+                for source, status in (("email", "accepted"), ("webhook", "duplicate"))
+            ],
+        )
+        con.executemany(
+            "INSERT INTO webhook_shadow_receipts("
+            "delivery_id,event_name,action,event_key,repository,payload_hash,"
+            "payload_json,status,enqueue_status,created_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    "observation-start", "ping", None, None, "gisce/repo", "old",
+                    "{}", "unsupported", None, old,
+                ),
+                (
+                    "webhook-10", "issue_comment", "created", event_key,
+                    "gisce/repo", "webhook-10", "{}", "observed", "duplicate", now,
+                ),
+                *(
+                    (
+                        f"noise-{status}", "issue_comment", "created",
+                        f"issue_comment:created:gisce/repo:{index}", "gisce/repo",
+                        f"noise-{status}", "{}", "observed", status, now,
+                    )
+                    for index, status in enumerate(
+                        ("ignored", "ignored_bot", "outside_canary"), start=20
+                    )
+                ),
+            ],
+        )
+    client = TestClient(create_app(DashboardConfig(
+        db=db,
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_retention_days=1,
+        webhook_promotion_observation_days=1,
+        webhook_coverage_grace_seconds=0,
+    )))
+
+    coverage = client.get("/api/webhooks/github/summary").json()["coverage"]
+
+    assert coverage["both"] == 1
+    assert coverage["webhook_only"] == 0
+    assert coverage["promotion_state"] == "ready"
+    assert coverage["promotion_ready"] is True
+
+
+def test_webhook_promotion_gate_does_not_reuse_an_old_receipt_by_event_key(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    observation_start = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+    old_receipt = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+    now = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    event_key = "issue_comment:created:gisce/repo:10"
+    with sqlite3.connect(db) as con:
+        con.executemany(
+            "INSERT INTO ingest_receipts("
+            "source,source_key,payload_hash,event_key,repository,work_key,"
+            "event_type,event_action,bridge_action,decision,work_intent,"
+            "status,created_at,updated_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    "webhook", "old-delivery", "old-delivery", event_key,
+                    "gisce/repo", "gisce/repo#10", "issue_comment", "created",
+                    "reply_comment", "auto_trusted", "work_allowed", "accepted",
+                    old_receipt, old_receipt,
+                ),
+                (
+                    "email", "email-10", "email-10", event_key,
+                    "gisce/repo", "gisce/repo#10", "issue_comment", "created",
+                    "reply_comment", "auto_trusted", "work_allowed", "accepted",
+                    now, now,
+                ),
+            ],
+        )
+        con.executemany(
+            "INSERT INTO webhook_shadow_receipts("
+            "delivery_id,event_name,action,event_key,repository,payload_hash,"
+            "payload_json,status,enqueue_status,created_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    "observation-start", "ping", None, None, "gisce/repo", "start",
+                    "{}", "unsupported", None, observation_start,
+                ),
+                (
+                    "ignored-delivery", "issue_comment", "created", event_key,
+                    "gisce/repo", "ignored-delivery", "{}", "observed", "ignored",
+                    now,
+                ),
+            ],
+        )
+    client = TestClient(create_app(DashboardConfig(
+        db=db,
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_promotion_observation_days=7,
+        webhook_coverage_grace_seconds=0,
+    )))
+
+    coverage = client.get("/api/webhooks/github/summary").json()["coverage"]
+
+    assert coverage["imap_only"] == 1
+    assert coverage["webhook_only"] == 0
+    assert coverage["both"] == 0
+    assert coverage["promotion_state"] == "insufficient_data"
+
+
+def test_webhook_promotion_gate_includes_actionable_lifecycle_events(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    now = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    events = (
+        (
+            "pull_request:merged:gisce/repo:42:event:1001",
+            "pull_request", "closed", "sync_after_merge",
+        ),
+        (
+            "pull_request:review_requested:gisce/repo:42:event:1002",
+            "pull_request", "review_requested", "submit_review",
+        ),
+    )
+    with sqlite3.connect(db) as con:
+        con.executemany(
+            "INSERT INTO ingest_receipts("
+            "source,source_key,payload_hash,event_key,repository,work_key,"
+            "event_type,event_action,bridge_action,decision,work_intent,"
+            "status,created_at,updated_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    source, f"{source}-{index}", f"{source}-{index}", event_key,
+                    "gisce/repo", "gisce/repo#42", event_type, event_action,
+                    bridge_action, "auto_trusted", "review_only", status, now, now,
+                )
+                for index, (event_key, event_type, event_action, bridge_action)
+                in enumerate(events, start=1)
+                for source, status in (("email", "accepted"), ("webhook", "duplicate"))
+            ],
+        )
+        con.executemany(
+            "INSERT INTO webhook_shadow_receipts("
+            "delivery_id,event_name,action,event_key,repository,payload_hash,"
+            "payload_json,status,enqueue_status,created_at"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    "observation-start", "ping", None, None, "gisce/repo", "old",
+                    "{}", "unsupported", None, old,
+                ),
+                *(
+                    (
+                        f"webhook-{index}", event_type, event_action, event_key,
+                        "gisce/repo", f"webhook-{index}", "{}", "observed",
+                        "duplicate", now,
+                    )
+                    for index, (event_key, event_type, event_action, _bridge_action)
+                    in enumerate(events, start=1)
+                ),
+            ],
+        )
+    client = TestClient(create_app(DashboardConfig(
+        db=db,
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_retention_days=1,
+        webhook_promotion_observation_days=1,
+        webhook_coverage_grace_seconds=0,
+    )))
+
+    coverage = client.get("/api/webhooks/github/summary").json()["coverage"]
+
+    assert coverage["both"] == 2
+    assert coverage["imap_only"] == 0
+    assert coverage["webhook_only"] == 0
+    assert coverage["promotion_state"] == "ready"
+    assert coverage["promotion_ready"] is True
+
+
 def test_webhook_promotion_gate_waits_for_a_complete_window_with_matches(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     JobQueue(db)
@@ -1751,7 +1978,9 @@ def test_webhook_promotion_gate_waits_for_a_complete_window_with_matches(tmp_pat
             ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 (
-                    source, f"{source}-10", f"{source}-10", event_key,
+                    source,
+                    "delivery-10" if source == "webhook" else "email-10",
+                    f"{source}-10", event_key,
                     "gisce/repo", "gisce/repo#1", "issue_comment", "created",
                     "reply_comment", "auto_trusted", "work_allowed", status, now, now,
                 )
@@ -1872,7 +2101,13 @@ def test_webhook_promotion_gate_ignores_distinct_immutable_comment_ids(tmp_path)
             ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 (
-                    source, f"{source}-{comment_id}", f"{source}-{comment_id}",
+                    source,
+                    (
+                        f"delivery-{comment_id}"
+                        if source == "webhook"
+                        else f"email-{comment_id}"
+                    ),
+                    f"{source}-{comment_id}",
                     f"issue_comment:created:gisce/repo:{comment_id}",
                     "gisce/repo", "gisce/repo#1", "issue_comment", "created",
                     "reply_comment", "auto_trusted", "work_allowed", status, now, now,
@@ -1938,7 +2173,7 @@ def test_webhook_promotion_gate_reports_decision_and_fallback_identity_mismatche
                     "reply_comment", "auto_trusted", "work_allowed", "accepted", now, now,
                 ),
                 (
-                    "webhook", "webhook-match", "h2", "issue_comment:created:gisce/repo:1",
+                    "webhook", "delivery-match", "h2", "issue_comment:created:gisce/repo:1",
                     "gisce/repo", "gisce/repo#1", "issue_comment", "created",
                     "reply_comment", "auto_trusted", "review_only", "duplicate", now, now,
                 ),
@@ -2000,7 +2235,7 @@ def test_webhook_promotion_gate_reports_decision_and_fallback_identity_mismatche
         for item in exceptions
         if item["kind"] in {"decision_mismatch", "split_identity"}
     } == {
-        ("decision_mismatch", "issue_comment", "email-match", "webhook-match"),
+        ("decision_mismatch", "issue_comment", "email-match", "delivery-match"),
         ("split_identity", "issues", "email-split", "delivery-split"),
     }
 
