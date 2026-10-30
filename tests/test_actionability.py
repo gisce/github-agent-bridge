@@ -34,6 +34,18 @@ def test_pull_request_authorship_is_a_positive_signal():
     ) == "pr_authored_by_bot"
 
 
+def test_pull_request_authorship_is_not_masked_by_assignment():
+    assert evaluate_feedback_authorization(
+        FeedbackAuthorizationFacts(
+            body="Please address the migration safety gap.",
+            assignees=("giscebot",),
+            subject_author="giscebot",
+            is_pull_request=True,
+        ),
+        {"giscebot"},
+    ) == "pr_authored_by_bot"
+
+
 def test_first_mention_must_address_the_configured_bot():
     assert evaluate_feedback_authorization(
         FeedbackAuthorizationFacts(body="@marc ask @giscebot to check this"),

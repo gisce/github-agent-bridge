@@ -1124,7 +1124,7 @@ def test_email_changes_requested_uses_verified_review_state(tmp_path, monkeypatc
         },
         "repos/gisce/example/issues/42": {
             "user": {"login": "giscebot"},
-            "assignees": [],
+            "assignees": [{"login": "giscebot"}],
             "pull_request": {"url": "https://api.github.com/repos/gisce/example/pulls/42"},
         },
     }

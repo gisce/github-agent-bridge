@@ -69,11 +69,11 @@ def evaluate_feedback_authorization(
         return "defer_to_executor"
     if first_mentioned_login(facts.body) in configured:
         return "mentioned"
-    if configured.intersection(login.lower() for login in facts.assignees):
-        return "assigned"
     author = (facts.subject_author or "").lower()
     if facts.is_pull_request and author in configured:
         return "pr_authored_by_bot"
+    if configured.intersection(login.lower() for login in facts.assignees):
+        return "assigned"
     return "ignored"
 
 
