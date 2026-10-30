@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.87.3 (2026-10-30)
+
+### Bug Fixes
+
+- Preserve bot PR authorship over assignment
+  ([`786ea11`](https://github.com/gisce/github-agent-bridge/commit/786ea11ca561ccd7ee2822fe9cd30401cc8c28b7))
+
+
 ## v0.87.2 (2026-10-30)
 
 ### Bug Fixes
