@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v0.87.2 (2026-10-30)
+
+### Bug Fixes
+
+- Bind webhook coverage to its delivery receipt
+  ([`8e8b768`](https://github.com/gisce/github-agent-bridge/commit/8e8b768bd13053591856fab6ed624da96b453589))
+
+- Scope webhook promotion gate to actionable events
+  ([`cbe3fc6`](https://github.com/gisce/github-agent-bridge/commit/cbe3fc6912fbfc10f39a87e08a1dcecb6b1b35ac))
+
+
 ## v0.87.1 (2026-10-30)
 
 ### Bug Fixes
