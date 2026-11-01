@@ -129,14 +129,17 @@ def _webhook_coverage_window(
     retention_days: int,
     observation_days: int,
     grace_seconds: int,
-) -> tuple[str, str, bool]:
+    configured_observation_start: str | None = None,
+) -> tuple[str, str, bool, str | None]:
     now = datetime.now(UTC)
     end = now - timedelta(seconds=grace_seconds)
     requested_start = end - timedelta(days=observation_days)
     retained_start = now - timedelta(days=retention_days)
     start = max(requested_start, retained_start)
     observation_complete = False
-    observation_started_at = repository.observation_started_at()
+    observation_started_at = (
+        configured_observation_start or repository.observation_started_at()
+    )
     if observation_started_at:
         first_observed = _parse_webhook_datetime(
             str(observation_started_at), "webhook_observation_started_at"
@@ -150,7 +153,14 @@ def _webhook_coverage_window(
         _webhook_datetime_value(start),
         _webhook_datetime_value(end),
         observation_complete,
+        observation_started_at,
     )
+
+
+def _webhook_promotion_scope(config: DashboardConfig) -> set[str] | None:
+    if config.webhook_policy is None:
+        return None
+    return Policy.from_file(config.webhook_policy).webhook_canary_repos
 
 
 def _encode_webhook_delivery_cursor(created_at: str, delivery_id: str) -> str:
@@ -311,6 +321,7 @@ class DashboardConfig:
         webhook_retention_days: int | None = None,
         webhook_promotion_observation_days: int | None = None,
         webhook_coverage_grace_seconds: int | None = None,
+        webhook_observation_started_at: str | None = None,
         webhook_mode: str | None = None,
         webhook_policy: str | Path | None = None,
         webhook_primary_ack: bool | None = None,
@@ -353,6 +364,27 @@ class DashboardConfig:
                 else int(os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_COVERAGE_GRACE_SECONDS", "600"))
             ),
         )
+        observation_start = (
+            webhook_observation_started_at
+            if webhook_observation_started_at is not None
+            else os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_OBSERVATION_STARTED_AT", "")
+        )
+        if observation_start:
+            try:
+                parsed_observation_start = datetime.fromisoformat(
+                    observation_start.replace("Z", "+00:00")
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    "GITHUB_AGENT_BRIDGE_WEBHOOK_OBSERVATION_STARTED_AT must be an ISO-8601 datetime"
+                ) from exc
+            if parsed_observation_start.tzinfo is None:
+                parsed_observation_start = parsed_observation_start.replace(tzinfo=UTC)
+            self.webhook_observation_started_at = _webhook_datetime_value(
+                parsed_observation_start.astimezone(UTC)
+            )
+        else:
+            self.webhook_observation_started_at = None
         self.webhook_mode = (webhook_mode or os.getenv("GITHUB_AGENT_BRIDGE_WEBHOOK_MODE", "shadow")).lower()
         if self.webhook_mode not in {"shadow", "canary", "primary"}:
             raise ValueError("GITHUB_AGENT_BRIDGE_WEBHOOK_MODE must be shadow, canary, or primary")
@@ -1000,13 +1032,25 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     @app.get("/api/webhooks/github/summary")
     def github_webhook_shadow_summary(_: dict[str, Any] = Depends(current_admin_profile)) -> dict[str, Any]:
         ensure_webhook_schema()
-        window_start, window_end, observation_complete = _webhook_coverage_window(
+        (
+            window_start,
+            window_end,
+            observation_complete,
+            observation_started_at,
+        ) = _webhook_coverage_window(
             webhook_repository,
             retention_days=config.webhook_retention_days,
             observation_days=config.webhook_promotion_observation_days,
             grace_seconds=config.webhook_coverage_grace_seconds,
+            configured_observation_start=config.webhook_observation_started_at,
         )
-        summary = webhook_repository.summary(window_start, window_end)
+        scope_repositories = _webhook_promotion_scope(config)
+        summary = webhook_repository.summary(
+            window_start, window_end, scope_repositories
+        )
+        outside_scope = webhook_repository.outside_scope_counts(
+            window_start, window_end, scope_repositories
+        )
         has_comparable_events = (
             summary["both_events"] > 0
             and summary["incomplete_decision_traces"] == 0
@@ -1051,6 +1095,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
                 "incomplete_decision_traces": summary["incomplete_decision_traces"],
                 "split_identities": summary["split_identities"],
                 "observation_complete": observation_complete,
+                "observation_started_at": observation_started_at,
                 "promotion_state": promotion_state,
                 "promotion_ready": promotion_state == "ready",
                 "imap_eligible": summary["imap_events"],
@@ -1066,6 +1111,13 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
                 "window_end": window_end,
                 "observation_days": config.webhook_promotion_observation_days,
                 "grace_seconds": config.webhook_coverage_grace_seconds,
+                "scope_repositories": (
+                    sorted(scope_repositories)
+                    if scope_repositories is not None
+                    else None
+                ),
+                "outside_scope_imap_eligible": outside_scope["imap_events"],
+                "outside_scope_webhook_eligible": outside_scope["webhook_events"],
             },
         }
 
@@ -1076,18 +1128,27 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         """Return bounded, actionable shadow divergences without loading all receipts."""
         ensure_webhook_schema()
-        window_start, window_end, _ = _webhook_coverage_window(
+        window_start, window_end, _, _ = _webhook_coverage_window(
             webhook_repository,
             retention_days=config.webhook_retention_days,
             observation_days=config.webhook_promotion_observation_days,
             grace_seconds=config.webhook_coverage_grace_seconds,
+            configured_observation_start=config.webhook_observation_started_at,
         )
-        rows = webhook_repository.exceptions(window_start, window_end, limit)
+        scope_repositories = _webhook_promotion_scope(config)
+        rows = webhook_repository.exceptions(
+            window_start, window_end, limit, scope_repositories
+        )
         return {
             "exceptions": rows,
             "window_start": window_start,
             "window_end": window_end,
             "grace_seconds": config.webhook_coverage_grace_seconds,
+            "scope_repositories": (
+                sorted(scope_repositories)
+                if scope_repositories is not None
+                else None
+            ),
         }
 
     @app.get("/api/webhooks/github/timeseries")

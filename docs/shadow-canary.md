@@ -87,6 +87,11 @@ Set `GITHUB_AGENT_BRIDGE_WEBHOOK_MODE=canary`, point
 canonical event identity, the first receipt creates the job and the second is
 recorded as a duplicate of it.
 
+Set `GITHUB_AGENT_BRIDGE_WEBHOOK_OBSERVATION_STARTED_AT` to the ISO-8601 UTC
+deployment instant for the code and configuration being validated. Promotion
+metrics and exceptions use only `webhookCanaryRepos`; out-of-scope actionable
+events remain visible as separate counters but do not block this cohort.
+
 Inspect webhook summary, exceptions and deliveries in the administrator
 dashboard. Do not widen the canary while there are unexplained actionable
 IMAP-only events, split jobs, or action/intent mismatches.

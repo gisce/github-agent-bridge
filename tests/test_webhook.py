@@ -2538,3 +2538,111 @@ def test_submitted_review_uses_same_canonical_key_as_email_ingestion(tmp_path):
     )
 
     assert response.json()["event_key"] == "pull_request_review:created:gisce/github-agent-bridge:1234"
+
+
+def test_webhook_promotion_gate_is_scoped_to_canary_repositories(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    policy_path = tmp_path / "policy.json"
+    policy_path.write_text(json.dumps({
+        "trustedOrgs": ["gisce"],
+        "webhookCanaryRepos": ["gisce/in-scope"],
+    }))
+    observation_start = (datetime.now(UTC) - timedelta(days=2)).replace(
+        microsecond=0
+    ).isoformat().replace("+00:00", "Z")
+    observed_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    rows = [
+        ("in", "gisce/in-scope"),
+        ("out", "gisce/out-of-scope"),
+    ]
+    with sqlite3.connect(db) as con:
+        con.executemany(
+            "INSERT INTO webhook_shadow_receipts("
+            "delivery_id,event_name,action,event_key,repository,payload_hash,"
+            "payload_json,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    f"delivery-{label}", "issue_comment", "created",
+                    f"issue_comment:created:{repository}:1", repository,
+                    f"hash-{label}", "{}", "observed", observed_at,
+                )
+                for label, repository in rows
+            ],
+        )
+        con.executemany(
+            "INSERT INTO ingest_receipts("
+            "source,source_key,payload_hash,event_key,repository,work_key,"
+            "event_type,event_action,bridge_action,decision,work_intent,"
+            "status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    source,
+                    f"delivery-{label}" if source == "webhook" else f"email-{label}",
+                    f"{source}-{label}",
+                    f"issue_comment:created:{repository}:1",
+                    repository,
+                    f"{repository}#1",
+                    "issue_comment",
+                    "created",
+                    "reply_comment",
+                    "auto_trusted",
+                    "work_allowed",
+                    "duplicate" if source == "webhook" else "accepted",
+                    observed_at,
+                    observed_at,
+                )
+                for label, repository in rows
+                for source in ("email", "webhook")
+            ],
+        )
+    client = TestClient(create_app(DashboardConfig(
+        db=db,
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=policy_path,
+        webhook_promotion_observation_days=1,
+        webhook_coverage_grace_seconds=0,
+        webhook_observation_started_at=observation_start,
+    )))
+
+    summary = client.get("/api/webhooks/github/summary").json()["coverage"]
+    exceptions = client.get("/api/webhooks/github/exceptions").json()
+
+    assert summary["scope_repositories"] == ["gisce/in-scope"]
+    assert summary["both"] == 1
+    assert summary["imap_only"] == 0
+    assert summary["webhook_only"] == 0
+    assert summary["outside_scope_imap_eligible"] == 1
+    assert summary["outside_scope_webhook_eligible"] == 1
+    assert summary["promotion_state"] == "ready"
+    assert exceptions["scope_repositories"] == ["gisce/in-scope"]
+    assert exceptions["exceptions"] == []
+
+
+def test_explicit_webhook_observation_start_resets_promotion_window(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    queue = JobQueue(db)
+    queue.set_state(
+        "webhook_observation_started_at",
+        (datetime.now(UTC) - timedelta(days=30)).isoformat(),
+    )
+    observation_start = (datetime.now(UTC) - timedelta(hours=1)).replace(
+        microsecond=0
+    ).isoformat().replace("+00:00", "Z")
+    client = TestClient(create_app(DashboardConfig(
+        db=db,
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_promotion_observation_days=1,
+        webhook_coverage_grace_seconds=0,
+        webhook_observation_started_at=observation_start,
+    )))
+
+    coverage = client.get("/api/webhooks/github/summary").json()["coverage"]
+
+    assert coverage["observation_started_at"] == observation_start
+    assert coverage["window_start"] == observation_start
+    assert coverage["observation_complete"] is False
+    assert coverage["promotion_state"] == "insufficient_data"
