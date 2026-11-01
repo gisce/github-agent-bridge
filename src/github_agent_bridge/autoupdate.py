@@ -44,15 +44,8 @@ DASHBOARD_PATH_PREFIXES = (
     "src/github_agent_bridge/dashboard_data.py",
     "src/github_agent_bridge/dashboard_static/",
 )
-WEBHOOK_PATH_PREFIXES = (
-    "src/github_agent_bridge/backend.py",
-    "src/github_agent_bridge/models.py",
-    "src/github_agent_bridge/parser.py",
-    "src/github_agent_bridge/policy.py",
-    "src/github_agent_bridge/queue.py",
-    "src/github_agent_bridge/sql/",
-    "src/github_agent_bridge/webhook.py",
-)
+WEBHOOK_PATH_PREFIXES = ("src/github_agent_bridge/",)
+WEBHOOK_PATH_EXCLUSIONS = ("src/github_agent_bridge/dashboard_static/",)
 SYSTEMD_PATH_PREFIXES = ("systemd/",)
 DEFAULT_SYSTEMD_UNITS = {
     "executor": "github-agent-bridge.service",
@@ -147,7 +140,16 @@ def classify_changed_files(files: Sequence[str]) -> dict[str, Any]:
     risky_files = [path for path in files if path.startswith(RISKY_PATH_PREFIXES)]
     migration_files = [path for path in files if path.startswith("src/github_agent_bridge/sql/") or "/migrations/" in path]
     dashboard_files = [path for path in files if path.startswith(DASHBOARD_PATH_PREFIXES)]
-    webhook_files = [path for path in files if path.startswith(WEBHOOK_PATH_PREFIXES)]
+    # The webhook entry point imports backend.py, which in turn imports most of
+    # the package. Treat package code as shared runtime code so an update cannot
+    # leave ingress running an older import graph. Dashboard static assets are
+    # the only package subtree that is not loaded by the webhook process.
+    webhook_files = [
+        path
+        for path in files
+        if path.startswith(WEBHOOK_PATH_PREFIXES)
+        and not path.startswith(WEBHOOK_PATH_EXCLUSIONS)
+    ]
     systemd_files = [path for path in files if path.startswith(SYSTEMD_PATH_PREFIXES)]
     dashboard_only = bool(files) and len(dashboard_files) == len(files) and not webhook_files
     webhook_only = bool(files) and len(webhook_files) == len(files) and not dashboard_files and not risky_files

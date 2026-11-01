@@ -6,12 +6,18 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from .monitor import ALERT_RUNNING_NO_EXECUTOR_CHILD, ALERT_RUNNING_PROCESS_MISMATCH
 from .observability import configure_sentry
+
+
+def _default_bridge_bin() -> str:
+    """Resolve the bridge CLI installed beside this monitor entry point."""
+    return str(Path(sys.executable).with_name("github-agent-bridge"))
 
 
 @dataclass(frozen=True)
@@ -57,7 +63,7 @@ class AlertConfig:
         values = env or os.environ
         state_dir = Path(values.get("GITHUB_AGENT_BRIDGE_STATE_DIR", "~/.local/state/github-agent-bridge")).expanduser()
         return cls(
-            bridge_bin=values.get("GITHUB_AGENT_BRIDGE_BIN", "~/.local/bin/github-agent-bridge"),
+            bridge_bin=values.get("GITHUB_AGENT_BRIDGE_BIN", _default_bridge_bin()),
             openclaw_bin=values.get("GITHUB_AGENT_BRIDGE_OPENCLAW_BIN", "~/.nvm/versions/node/v24.14.0/bin/openclaw"),
             db=values.get("GITHUB_AGENT_BRIDGE_DB", "~/.local/state/github-agent-bridge/bridge.sqlite3"),
             policy=values.get("GITHUB_AGENT_BRIDGE_POLICY", "~/.config/github-agent-bridge/policy.json"),
@@ -517,10 +523,10 @@ def main(argv: list[str] | None = None) -> int:
         print(unlock_output, end="" if unlock_output.endswith("\n") else "\n")
 
     if not should_send_alert(config.state_file, output, config.resend_seconds):
-        return 0
+        return monitor_proc.returncode
 
     send_alert(config, output, unlock_output)
-    return 0
+    return monitor_proc.returncode
 
 
 if __name__ == "__main__":

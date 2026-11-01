@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 from github_agent_bridge import monitor_alert
@@ -32,6 +34,50 @@ def test_should_send_alert_persists_and_throttles(tmp_path):
     assert monitor_alert.should_send_alert(state_file, "boom", resend_seconds=900, now=1000) is True
     assert monitor_alert.should_send_alert(state_file, "boom", resend_seconds=900, now=1500) is False
     assert monitor_alert.should_send_alert(state_file, "boom", resend_seconds=900, now=2001) is True
+
+
+def test_alert_config_defaults_to_bridge_installed_beside_monitor_python(tmp_path):
+    config = monitor_alert.AlertConfig.from_env({
+        "GITHUB_AGENT_BRIDGE_STATE_DIR": str(tmp_path),
+    })
+
+    assert config.bridge_bin == str(Path(sys.executable).with_name("github-agent-bridge"))
+
+
+def test_main_propagates_monitor_failure_after_sending_alert(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    sent = []
+    monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
+    monkeypatch.setattr(
+        monitor_alert,
+        "run_monitor",
+        lambda config: subprocess.CompletedProcess([], 2, "invalid monitor arguments\n"),
+    )
+    monkeypatch.setattr(monitor_alert, "maybe_unlock_stale", lambda config, output: "")
+    monkeypatch.setattr(monitor_alert, "should_send_alert", lambda *args, **kwargs: True)
+    monkeypatch.setattr(monitor_alert, "send_alert", lambda config, output, unlock: sent.append(output))
+
+    assert monitor_alert.main() == 2
+    assert sent == ["invalid monitor arguments\n"]
+
+
+def test_main_propagates_throttled_monitor_failure(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
+    monkeypatch.setattr(
+        monitor_alert,
+        "run_monitor",
+        lambda config: subprocess.CompletedProcess([], 3, "still failing\n"),
+    )
+    monkeypatch.setattr(monitor_alert, "maybe_unlock_stale", lambda config, output: "")
+    monkeypatch.setattr(monitor_alert, "should_send_alert", lambda *args, **kwargs: False)
+    monkeypatch.setattr(
+        monitor_alert,
+        "send_alert",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("alert is throttled")),
+    )
+
+    assert monitor_alert.main() == 3
 
 
 def test_alert_config_passes_slo_thresholds_from_environment(tmp_path, monkeypatch):
