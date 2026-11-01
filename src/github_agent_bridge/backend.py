@@ -897,7 +897,11 @@ def create_webhook_app(config: DashboardConfig | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, Any]:
-        return {"ok": True, "service": "github-agent-bridge-webhook-ingress"}
+        return {
+            "ok": True,
+            "service": "github-agent-bridge-webhook-ingress",
+            "version": __version__,
+        }
 
     @app.post("/api/webhooks/github")
     async def github_webhook(request: Request) -> dict[str, Any]:
@@ -986,6 +990,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         return {
             "ok": bool(metrics.get("db_exists") and metrics.get("schema_ok", True)),
             "service": "github-agent-bridge-dashboard",
+            "version": __version__,
             "db_exists": bool(metrics.get("db_exists")),
             "schema_ok": bool(metrics.get("schema_ok", True)),
             "oauth_configured": config.oauth_ready,

@@ -534,6 +534,7 @@ def test_dashboard_missing_db_does_not_create_database(tmp_path):
     response = TestClient(app).get("/api/health")
 
     assert response.json()["db_exists"] is False
+    assert response.json()["version"] == __version__
     assert db.exists() is False
 
 
