@@ -51,6 +51,7 @@ from .policy import Policy
 from .systemd_status import allowed_unit_names, stream_journal_lines, systemd_status
 from .web_push import delete_subscription, save_subscription, subscription_status
 from .webhook import (
+    bot_is_pull_request_reviewer,
     persist_shadow_delivery,
     resolve_github_event_for_webhook,
     verify_signature,
@@ -849,24 +850,43 @@ async def _receive_github_webhook(
         elif sender_login in policy.bot_logins:
             enqueue_status = "ignored_bot"
         else:
-            notification = webhook_notification(
-                event_name,
-                delivery_id,
-                payload,
-                bot_logins=policy.bot_logins,
-                received_at=source_received_at,
-            )
-            if notification is None:
-                enqueue_status = "ignored"
-            else:
-                job, enqueue_status = JobQueue(config.db).ingest(
-                    notification,
-                    policy,
-                    source="webhook",
-                    source_key=delivery_id,
-                    resolved_event=resolved_event,
+            action = str(payload.get("action") or "")
+            rereview_authorized = False
+            if event_name == "pull_request" and action == "synchronize":
+                if policy.enabled_repos and repo not in policy.enabled_repos:
+                    enqueue_status = "outside_enabled_repos"
+                else:
+                    reviewer_status = await asyncio.to_thread(
+                        bot_is_pull_request_reviewer,
+                        payload,
+                        policy.bot_logins,
+                    )
+                    if reviewer_status is None:
+                        enqueue_status = "reviewer_lookup_failed"
+                    elif not reviewer_status:
+                        enqueue_status = "ignored"
+                    else:
+                        rereview_authorized = True
+            if enqueue_status is None:
+                notification = webhook_notification(
+                    event_name,
+                    delivery_id,
+                    payload,
+                    bot_logins=policy.bot_logins,
+                    received_at=source_received_at,
+                    rereview_authorized=rereview_authorized,
                 )
-                job_id = job.id if job else None
+                if notification is None:
+                    enqueue_status = "ignored"
+                else:
+                    job, enqueue_status = JobQueue(config.db).ingest(
+                        notification,
+                        policy,
+                        source="webhook",
+                        source_key=delivery_id,
+                        resolved_event=resolved_event,
+                    )
+                    job_id = job.id if job else None
     receipt = persist_shadow_delivery(
         config.db,
         delivery_id=delivery_id,
