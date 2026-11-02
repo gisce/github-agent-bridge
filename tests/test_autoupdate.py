@@ -345,6 +345,48 @@ def test_executor_update_records_pending_reload_when_jobs_are_active(tmp_path, m
     assert load_update_state(q)["service_plan"]["deferred"][0]["command"] == "restart"
 
 
+def test_noop_refresh_preserves_pending_executor_reload(tmp_path, monkeypatch):
+    monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
+    db = tmp_path / "bridge.sqlite3"
+    q = JobQueue(db)
+    job_id = enqueue_job(q)
+
+    deferred_plan = plan_update(
+        db,
+        repo_dir=tmp_path,
+        installed_version="1.2.3",
+        runner=release_runner("v1.2.4", ["src/github_agent_bridge/executor.py"]),
+    )
+    record_update_plan(db, deferred_plan)
+    q.finish(job_id, "done", "finished")
+
+    noop_plan = plan_update(
+        db,
+        repo_dir=tmp_path,
+        installed_version="1.2.4",
+        runner=release_runner("v1.2.4", []),
+    )
+    state = record_update_plan(db, noop_plan)
+
+    assert noop_plan["decision"] == "noop"
+    assert state["installed_version"] == "1.2.4"
+    assert state["decision"] == "stage_defer_executor_reload"
+    assert state["executor_reload_pending"] is True
+    assert [action["unit"] for action in state["service_plan"]["deferred"]] == [
+        "github-agent-bridge.service"
+    ]
+    calls: list[list[str]] = []
+    completion = complete_pending_reload(
+        db,
+        systemctl_bin="systemctl-test",
+        runner=lambda args, cwd: calls.append(list(args)) or completed("ok"),
+    )
+
+    assert completion["completed"] is True
+    assert calls == [["systemctl-test", "--user", "restart", "github-agent-bridge.service"]]
+    assert load_update_state(q)["executor_reload_pending"] is False
+
+
 def test_migration_update_is_deferred_while_jobs_are_active(tmp_path, monkeypatch):
     monkeypatch.setattr("github_agent_bridge.actors.github_actor_details_for_context", lambda ctx, *, gh_bin="gh": None)
     db = tmp_path / "bridge.sqlite3"
