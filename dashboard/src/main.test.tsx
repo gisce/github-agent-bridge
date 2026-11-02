@@ -251,8 +251,14 @@ describe("dashboard routing and API query helpers", () => {
     expect(screen.getByText("Incomplete decision traces")).toBeInTheDocument();
     expect(screen.getByText("Split identities")).toBeInTheDocument();
     expect(screen.getByText("Outside scope IMAP")).toBeInTheDocument();
-    expect(screen.getByText(/Promotion scope: 1 configured repositories/)).toBeInTheDocument();
+    expect(screen.getByText(/Shadow rollout cohort: 1 configured repositories/)).toBeInTheDocument();
     expect(screen.getByText("blocked")).toBeInTheDocument();
+  });
+
+  it("labels the primary promotion scope as global eligibility", () => {
+    render(<WebhookPage summary={{ mode: "primary", configured: true, receipts: {}, duplicate_deliveries: 0, cross_source_matches: 1, totals: { hooks: 1, deliveries: 1 }, coverage: { both: 1, imap_only: 0, webhook_only: 0, imap_eligible: 1, ratio: 1, promotion_state: "ready", promotion_ready: true, window_start: "2026-10-01T00:00:00Z", window_end: "2026-10-08T00:00:00Z", scope_repositories: null } }} timeseries={[]} section="overview" summaryLoading={false} sectionLoading={false} loadingMore={false} hasMore={false} deliveryFilters={{ hook_id: "", event_name: "", repository: "", result: "", enqueue_status: "" }} error={null} onSectionChange={vi.fn()} onLoadMore={vi.fn()} onDeliveryFiltersChange={vi.fn()} onViewHook={vi.fn()} onRefresh={vi.fn()} />);
+
+    expect(screen.getByText(/Primary eligibility scope: all repositories/)).toBeInTheDocument();
   });
 
   it("navigates webhook hook inventory and delivery details", async () => {

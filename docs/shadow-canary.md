@@ -91,6 +91,7 @@ Set `GITHUB_AGENT_BRIDGE_WEBHOOK_OBSERVATION_STARTED_AT` to the ISO-8601 UTC
 deployment instant for the code and configuration being validated. Promotion
 metrics and exceptions use only `webhookCanaryRepos`; out-of-scope actionable
 events remain visible as separate counters but do not block this cohort.
+Shadow mode uses the same intended rollout cohort for observational coverage.
 
 Inspect webhook summary, exceptions and deliveries in the administrator
 dashboard. Do not widen the canary while there are unexplained actionable
@@ -119,6 +120,9 @@ GITHUB_AGENT_BRIDGE_WEBHOOK_PRIMARY_ACK=true
 `primary` fails closed without the explicit acknowledgement and policy path.
 It stops applying the narrower `webhookCanaryRepos` list, but the global
 `enabledRepos`, trust, action and routing policy still apply.
+Promotion metrics and exceptions therefore cover `enabledRepos` during this
+second window. If `enabledRepos` is empty, policy semantics are unrestricted
+and the gate covers every repository.
 
 Keep the IMAP reader active during a second stable observation window. Primary
 changes which source is expected to win; it does not remove the idempotency or

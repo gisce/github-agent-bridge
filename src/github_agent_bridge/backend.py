@@ -160,7 +160,10 @@ def _webhook_coverage_window(
 def _webhook_promotion_scope(config: DashboardConfig) -> set[str] | None:
     if config.webhook_policy is None:
         return None
-    return Policy.from_file(config.webhook_policy).webhook_canary_repos
+    policy = Policy.from_file(config.webhook_policy)
+    if config.webhook_mode == "primary":
+        return policy.enabled_repos or None
+    return policy.webhook_canary_repos
 
 
 def _encode_webhook_delivery_cursor(created_at: str, delivery_id: str) -> str:
