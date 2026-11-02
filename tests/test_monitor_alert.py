@@ -36,12 +36,42 @@ def test_should_send_alert_persists_and_throttles(tmp_path):
     assert monitor_alert.should_send_alert(state_file, "boom", resend_seconds=900, now=2001) is True
 
 
-def test_alert_config_defaults_to_bridge_installed_beside_monitor_python(tmp_path):
+def test_alert_config_defaults_to_bridge_beside_user_entrypoint(tmp_path, monkeypatch):
+    monitor_bin = tmp_path / ".local/bin/github-agent-bridge-monitor-alert"
+    monkeypatch.setattr(sys, "argv", ["github-agent-bridge-monitor-alert"])
+    monkeypatch.setattr(monitor_alert.shutil, "which", lambda executable: str(monitor_bin))
+
     config = monitor_alert.AlertConfig.from_env({
         "GITHUB_AGENT_BRIDGE_STATE_DIR": str(tmp_path),
     })
 
-    assert config.bridge_bin == str(Path(sys.executable).with_name("github-agent-bridge"))
+    assert config.bridge_bin == str(monitor_bin.with_name("github-agent-bridge"))
+
+
+def test_alert_config_defaults_to_bridge_beside_virtualenv_entrypoint(tmp_path, monkeypatch):
+    monitor_bin = tmp_path / ".venv/bin/github-agent-bridge-monitor-alert"
+    monkeypatch.setattr(sys, "argv", [str(monitor_bin)])
+    monkeypatch.setattr(monitor_alert.shutil, "which", lambda executable: None)
+
+    config = monitor_alert.AlertConfig.from_env({
+        "GITHUB_AGENT_BRIDGE_STATE_DIR": str(tmp_path),
+    })
+
+    assert config.bridge_bin == str(monitor_bin.with_name("github-agent-bridge"))
+
+
+def test_alert_config_explicit_bridge_bin_overrides_entrypoint_resolution(tmp_path, monkeypatch):
+    def fail_default():
+        raise AssertionError("default resolution must not run for an explicit override")
+
+    monkeypatch.setattr(monitor_alert, "_default_bridge_bin", fail_default)
+
+    config = monitor_alert.AlertConfig.from_env({
+        "GITHUB_AGENT_BRIDGE_STATE_DIR": str(tmp_path),
+        "GITHUB_AGENT_BRIDGE_BIN": "/opt/github-agent-bridge",
+    })
+
+    assert config.bridge_bin == "/opt/github-agent-bridge"
 
 
 def test_main_propagates_monitor_failure_after_sending_alert(tmp_path, monkeypatch):

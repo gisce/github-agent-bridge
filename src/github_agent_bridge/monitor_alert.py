@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -17,7 +18,8 @@ from .observability import configure_sentry
 
 def _default_bridge_bin() -> str:
     """Resolve the bridge CLI installed beside this monitor entry point."""
-    return str(Path(sys.executable).with_name("github-agent-bridge"))
+    monitor_bin = shutil.which(sys.argv[0]) or sys.argv[0]
+    return str(Path(monitor_bin).resolve().with_name("github-agent-bridge"))
 
 
 @dataclass(frozen=True)
@@ -62,8 +64,11 @@ class AlertConfig:
     def from_env(cls, env: dict[str, str] | None = None) -> AlertConfig:
         values = env or os.environ
         state_dir = Path(values.get("GITHUB_AGENT_BRIDGE_STATE_DIR", "~/.local/state/github-agent-bridge")).expanduser()
+        bridge_bin = values.get("GITHUB_AGENT_BRIDGE_BIN")
+        if bridge_bin is None:
+            bridge_bin = _default_bridge_bin()
         return cls(
-            bridge_bin=values.get("GITHUB_AGENT_BRIDGE_BIN", _default_bridge_bin()),
+            bridge_bin=bridge_bin,
             openclaw_bin=values.get("GITHUB_AGENT_BRIDGE_OPENCLAW_BIN", "~/.nvm/versions/node/v24.14.0/bin/openclaw"),
             db=values.get("GITHUB_AGENT_BRIDGE_DB", "~/.local/state/github-agent-bridge/bridge.sqlite3"),
             policy=values.get("GITHUB_AGENT_BRIDGE_POLICY", "~/.config/github-agent-bridge/policy.json"),
