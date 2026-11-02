@@ -32,6 +32,7 @@ def test_dedicated_webhook_ingress_exposes_only_health_and_delivery(tmp_path):
 
     assert client.get("/api/health").json() == {
         "ok": True, "service": "github-agent-bridge-webhook-ingress",
+        "version": backend.__version__,
     }
     assert client.post(
         "/api/webhooks/github", content=payload, headers=signed_headers(payload),

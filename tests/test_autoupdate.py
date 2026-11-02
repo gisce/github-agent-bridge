@@ -35,6 +35,25 @@ def test_persistence_runtime_changes_require_executor_reload():
     ]
 
 
+@pytest.mark.parametrize(
+    "changed_file",
+    [
+        "src/github_agent_bridge/actionability.py",
+        "src/github_agent_bridge/persistence/webhooks.py",
+    ],
+)
+def test_shared_runtime_changes_restart_webhook_ingress(changed_file):
+    classification = classify_changed_files([changed_file])
+    plan = plan_systemd_actions("stage_full_reload", classification)
+
+    assert classification["webhook_files"] == [changed_file]
+    assert [item["unit"] for item in plan["immediate"]] == [
+        "github-agent-bridge-dashboard.service",
+        "github-agent-bridge-webhook.service",
+        "github-agent-bridge.service",
+    ]
+
+
 def test_latest_release_reports_missing_gh_as_runtime_error():
     with pytest.raises(RuntimeError, match=r"No such file or directory.*missing-gh"):
         latest_release("gisce/github-agent-bridge", gh_bin="/missing-gh")
@@ -421,6 +440,7 @@ def test_full_update_is_allowed_when_queue_is_quiet(tmp_path, monkeypatch):
     assert plan["executor_restart_allowed"] is True
     assert [item["unit"] for item in plan["service_plan"]["immediate"]] == [
         "github-agent-bridge-dashboard.service",
+        "github-agent-bridge-webhook.service",
         "github-agent-bridge.service",
     ]
 
