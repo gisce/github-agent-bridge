@@ -2,6 +2,31 @@
 
 <!-- version list -->
 
+## v0.88.0 (2026-11-02)
+
+### Bug Fixes
+
+- Expose loaded service version in health checks
+  ([`05eeb88`](https://github.com/gisce/github-agent-bridge/commit/05eeb8894de89464bc1213a403fed166a0fc03fe))
+
+- Keep webhook runtime and monitor coherent
+  ([`b84205b`](https://github.com/gisce/github-agent-bridge/commit/b84205b4e0b4d00a51ac976b8fc29915dc4a374a))
+
+- Resolve monitor CLI beside its entrypoint
+  ([`c414a23`](https://github.com/gisce/github-agent-bridge/commit/c414a23faa78ffe20b65c133004278fbd041261a))
+
+- Scope webhook promotion to rollout cohort
+  ([`f229f5d`](https://github.com/gisce/github-agent-bridge/commit/f229f5de2e6ff47cfb2015e336f66e03b56c1e3d))
+
+- Use primary eligibility scope for promotion gate
+  ([`c3cbda0`](https://github.com/gisce/github-agent-bridge/commit/c3cbda0a28c78c28f236c15723d5d001b83d488b))
+
+### Features
+
+- Re-review pull requests after new pushes
+  ([`7f1dc6a`](https://github.com/gisce/github-agent-bridge/commit/7f1dc6a44f0ac76351def29d9dd3426456db7b7b))
+
+
 ## v0.87.3 (2026-10-30)
 
 ### Bug Fixes
