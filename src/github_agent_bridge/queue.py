@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 from .models import GitHubContext, Job, Notification, ResolvedGitHubEvent
@@ -150,6 +151,9 @@ class JobQueue:
         self._ensure_initialized()
         source_key = source_key or n.message_id
         ctx = extract_github_context(n.body)
+        head_sha = str(n.metadata.get("github_head_sha") or "").lower()
+        if source == "webhook" and ctx.is_pull_request and head_sha:
+            ctx = replace(ctx, commit_sha=head_sha)
         resolved_event = resolved_event or (
             resolve_github_event_for_notification(n, ctx)
             if source == "email"

@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .actors import resolve_github_event_occurrence
+from .actors import default_gh_bin, resolve_github_event_occurrence
 from .actionability import feedback_authorization_from_webhook
 from .models import Notification, ResolvedGitHubEvent, utc_now
 from .ingestion_contract import canonical_event_identity
@@ -38,6 +40,111 @@ def verify_signature(payload: bytes, signature: str, secrets: tuple[str, ...]) -
         )
         for secret in secrets
     )
+
+
+def bot_is_pull_request_reviewer(
+    payload: dict[str, Any],
+    bot_logins: set[str],
+    *,
+    gh_bin: str | None = None,
+    timeout: int = 5,
+) -> bool | None:
+    """Return whether a configured bot has an active PR review request.
+
+    The signed synchronize payload proves current outstanding review requests.
+    Completed reviews disappear from that list, so the issue timeline remains
+    the source of truth for the most recent request/removal transition. ``None``
+    means the paginated lookup could not be completed and callers must fail
+    closed instead of dispatching an unauthorised review.
+    """
+    configured = {
+        str(login).lower().lstrip("@")
+        for login in bot_logins
+        if str(login).strip()
+    }
+    if not configured:
+        return False
+    pull_request = payload.get("pull_request")
+    if not isinstance(pull_request, dict):
+        return False
+    requested_reviewers = pull_request.get("requested_reviewers")
+    if isinstance(requested_reviewers, list) and any(
+        str(reviewer.get("login") or "").lower() in configured
+        for reviewer in requested_reviewers
+        if isinstance(reviewer, dict)
+    ):
+        return True
+    repository = payload.get("repository")
+    repo = (
+        str(repository.get("full_name") or "").lower()
+        if isinstance(repository, dict)
+        else ""
+    )
+    number = pull_request.get("number")
+    if not repo or not isinstance(number, int) or number <= 0:
+        return False
+    endpoint = f"repos/{repo}/issues/{number}/events?per_page=100"
+    try:
+        proc = subprocess.run(
+            [
+                gh_bin or default_gh_bin(),
+                "api",
+                "--paginate",
+                "--slurp",
+                endpoint,
+            ],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        pages = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(pages, list) or any(
+        not isinstance(page, list) for page in pages
+    ):
+        return None
+    latest: dict[str, tuple[int, bool]] = {}
+    for page in pages:
+        for event in page:
+            if not isinstance(event, dict):
+                continue
+            action = str(event.get("event") or "").lower()
+            if action not in {"review_requested", "review_request_removed"}:
+                continue
+            reviewer = event.get("requested_reviewer")
+            login = (
+                str(reviewer.get("login") or "").lower()
+                if isinstance(reviewer, dict)
+                else ""
+            )
+            if login not in configured:
+                continue
+            event_id = event.get("id")
+            if not isinstance(event_id, int) or event_id <= 0:
+                return None
+            current = latest.get(login)
+            if current is None or event_id > current[0]:
+                latest[login] = (event_id, action == "review_requested")
+    return any(active for _, active in latest.values())
+
+
+def _pull_request_head_sha(payload: dict[str, Any]) -> str | None:
+    pull_request = payload.get("pull_request")
+    head = pull_request.get("head") if isinstance(pull_request, dict) else None
+    value = str(
+        payload.get("after")
+        or (head.get("sha") if isinstance(head, dict) else "")
+        or ""
+    ).lower()
+    return value if re.fullmatch(r"[0-9a-f]{40,64}", value) else None
 
 
 def canonical_webhook_event_key(
@@ -127,6 +234,17 @@ def canonical_webhook_event_key(
                 else requested_login
             ),
         ) or (fallback if number and requested_login else None)
+    if event_name == "pull_request" and action == "synchronize":
+        pull_request = payload.get("pull_request") or {}
+        number = pull_request.get("number") if isinstance(pull_request, dict) else None
+        head_sha = _pull_request_head_sha(payload)
+        return canonical_event_identity(
+            repository=repo,
+            thread=number,
+            event_type=event_name,
+            event_action=action,
+            object_id=head_sha,
+        )
     if event_name == "pull_request" and action == "closed":
         pull_request = payload.get("pull_request") or {}
         merged = pull_request.get("merged") if isinstance(pull_request, dict) else False
@@ -264,6 +382,7 @@ def webhook_notification(
     *,
     bot_logins: set[str] | None = None,
     received_at: str | None = None,
+    rereview_authorized: bool = False,
 ) -> Notification | None:
     """Translate actionable webhook payloads into the transport-neutral queue input."""
     received_at = received_at or utc_now()
@@ -276,6 +395,7 @@ def webhook_notification(
         ("pull_request_review_comment", "created"),
         ("pull_request_review", "submitted"),
         ("pull_request", "review_requested"),
+        ("pull_request", "synchronize"),
         ("pull_request", "assigned"),
         ("pull_request", "closed"),
         ("commit_comment", "created"),
@@ -311,6 +431,9 @@ def webhook_notification(
         reviewer = payload.get("requested_reviewer") if isinstance(payload.get("requested_reviewer"), dict) else {}
         requested_login = str(reviewer.get("login") or "").lower()
         if requested_login not in configured_logins:
+            return None
+    if event_name == "pull_request" and action == "synchronize":
+        if not rereview_authorized or _pull_request_head_sha(payload) is None:
             return None
     if event_name == "workflow_run":
         conclusion = str(source.get("conclusion") or "").lower()
@@ -351,6 +474,8 @@ def webhook_notification(
         assignee = payload.get("assignee") if isinstance(payload.get("assignee"), dict) else {}
         target_label = "pull request" if event_name == "pull_request" else "issue"
         body = f"Assigned @{str(assignee.get('login') or '')} to this {target_label}."
+    elif event_name == "pull_request" and action == "synchronize":
+        body = "The pull request head changed. Review requested."
     elif event_name == "pull_request":
         body = "Review requested."
     else:
@@ -402,6 +527,11 @@ def webhook_notification(
             **(
                 {"review_state": str(source.get("state") or "").lower()}
                 if event_name == "pull_request_review"
+                else {}
+            ),
+            **(
+                {"github_head_sha": _pull_request_head_sha(payload)}
+                if event_name == "pull_request" and action == "synchronize"
                 else {}
             ),
         },

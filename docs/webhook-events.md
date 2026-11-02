@@ -27,11 +27,29 @@ and other actions remain distinct observational identities and must not
 retrigger work without an explicit Phase 2 policy decision. For `issues`, only
 `assigned` is actionable when the payload assignee matches a configured bot
 login. For `pull_request`, `assigned` and `review_requested` retain their
-configured-bot checks, while `closed` is actionable only when `merged=true`;
-that delivery becomes a read-only `sync_after_merge` job. Comment and review
+configured-bot checks. `synchronize` creates a new read-only `submit_review`
+job only when a configured bot is still a reviewer, while `closed` is
+actionable only when `merged=true`; that delivery becomes a read-only
+`sync_after_merge` job. Comment and review
 deliveries must additionally be addressed to the bot, belong to a PR authored
 by the bot, or target a PR/issue assigned to the bot. Being a reviewer,
 subscriber, or email recipient is not authorization to work.
+
+Reviewer membership is not copied into a bridge-owned table. A synchronize
+payload can directly prove an outstanding request through
+`pull_request.requested_reviewers`; after a completed review disappears from
+that list, the bridge reads the fully paginated issue timeline and uses the
+latest `review_requested`/`review_request_removed` transition for each
+configured bot. This keeps GitHub as the source of truth and avoids stale state
+or merge cleanup. A failed, incomplete or malformed lookup fails closed with
+`reviewer_lookup_failed`. Canary mode performs the lookup only for
+`webhookCanaryRepos`; both canary and primary modes also honor `enabledRepos`
+before calling GitHub.
+
+Each accepted synchronize delivery is keyed by repository, PR number and the
+new head SHA. The SHA is also retained in the job context, so a push received
+while an older review is running queues a distinct follow-up behind the
+per-work-key concurrency guard instead of coalescing into the stale review.
 
 Assignment, review-request, issue-close and issue-reopen deliveries use an
 immutable timeline event ID only after API resolution proves one unique match.

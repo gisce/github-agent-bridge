@@ -54,6 +54,13 @@ def canonical_event_identity(
         return None
     if event_type == "pull_request" and action == "merged" and thread:
         return f"pull_request:merged:{repo}:{thread}"
+    if (
+        event_type == "pull_request"
+        and action == "synchronize"
+        and thread
+        and object_id
+    ):
+        return f"pull_request:synchronize:{repo}:{thread}:{str(object_id).lower()}"
     if event_type == "workflow_run" and object_id:
         return f"workflow_run:{action}:{repo}:{object_id}"
     if (event_type, action) in OCCURRENCE_ACTIONS and thread:
@@ -169,6 +176,8 @@ def _descriptor(
             bridge_action,
             ctx.workflow_run_id,
         )
+    elif event_type == "pull_request" and event_action == "synchronize":
+        object_id = str(notification.metadata.get("github_head_sha") or "") or None
     elif bridge_action == "sync_after_merge":
         event_type, event_action = "pull_request", "merged"
     elif flags["assigned"] and bridge_action == "open_issue":

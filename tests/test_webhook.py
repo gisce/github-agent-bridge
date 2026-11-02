@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import sqlite3
+import subprocess
 from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -16,6 +17,7 @@ from github_agent_bridge.parser import extract_github_context
 from github_agent_bridge.policy import Policy
 from github_agent_bridge.queue import JobQueue
 from github_agent_bridge.webhook import (
+    bot_is_pull_request_reviewer,
     resolve_github_event_for_webhook,
     webhook_notification,
 )
@@ -213,6 +215,129 @@ def pull_request_closed_payload(*, merged: bool, number: int = 272) -> bytes:
         },
         "sender": {"login": "ecarreras"},
     }).encode()
+
+
+def pull_request_synchronize_payload(
+    *,
+    number: int = 233,
+    requested_reviewers: tuple[str, ...] = (),
+    before: str = "1" * 40,
+    after: str = "2" * 40,
+) -> bytes:
+    return json.dumps({
+        "action": "synchronize",
+        "before": before,
+        "after": after,
+        "repository": {"full_name": "gisce/github-agent-bridge"},
+        "pull_request": {
+            "id": 1829195123,
+            "number": number,
+            "title": "feat: enable guarded webhook canary ingestion",
+            "html_url": (
+                f"https://github.com/gisce/github-agent-bridge/pull/{number}"
+            ),
+            "requested_reviewers": [
+                {"login": login} for login in requested_reviewers
+            ],
+            "head": {"sha": after},
+        },
+        "sender": {"login": "ecarreras"},
+    }).encode()
+
+
+def test_synchronize_reviewer_lookup_uses_current_payload_without_api(monkeypatch):
+    def fail_run(*args, **kwargs):
+        raise AssertionError("current requested reviewers should not need an API call")
+
+    monkeypatch.setattr("github_agent_bridge.webhook.subprocess.run", fail_run)
+
+    assert bot_is_pull_request_reviewer(
+        json.loads(
+            pull_request_synchronize_payload(requested_reviewers=("GISCEBOT",))
+        ),
+        {"giscebot"},
+    ) is True
+
+
+def test_synchronize_reviewer_lookup_uses_complete_timeline(monkeypatch):
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps([
+                [
+                    {
+                        "id": 101,
+                        "event": "review_requested",
+                        "requested_reviewer": {"login": "giscebot"},
+                    }
+                ],
+                [
+                    {
+                        "id": 202,
+                        "event": "review_request_removed",
+                        "requested_reviewer": {"login": "giscebot"},
+                    }
+                ],
+            ]),
+            stderr="",
+        )
+
+    monkeypatch.setattr("github_agent_bridge.webhook.subprocess.run", fake_run)
+
+    assert bot_is_pull_request_reviewer(
+        json.loads(pull_request_synchronize_payload()),
+        {"giscebot"},
+        gh_bin="/opt/bin/gh",
+    ) is False
+    assert calls[0][0] == [
+        "/opt/bin/gh",
+        "api",
+        "--paginate",
+        "--slurp",
+        "repos/gisce/github-agent-bridge/issues/233/events?per_page=100",
+    ]
+
+
+def test_synchronize_reviewer_lookup_accepts_latest_review_request(monkeypatch):
+    events = [[
+        {
+            "id": 202,
+            "event": "review_request_removed",
+            "requested_reviewer": {"login": "giscebot"},
+        },
+        {
+            "id": 303,
+            "event": "review_requested",
+            "requested_reviewer": {"login": "giscebot"},
+        },
+    ]]
+    monkeypatch.setattr(
+        "github_agent_bridge.webhook.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, stdout=json.dumps(events), stderr=""
+        ),
+    )
+
+    assert bot_is_pull_request_reviewer(
+        json.loads(pull_request_synchronize_payload()), {"giscebot"}
+    ) is True
+
+
+def test_synchronize_reviewer_lookup_fails_closed_on_api_error(monkeypatch):
+    monkeypatch.setattr(
+        "github_agent_bridge.webhook.subprocess.run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 1, stdout="", stderr="rate limited"
+        ),
+    )
+
+    assert bot_is_pull_request_reviewer(
+        json.loads(pull_request_synchronize_payload()), {"giscebot"}
+    ) is None
 
 
 def assignment_payload(
@@ -782,6 +907,41 @@ def test_webhook_canary_ignores_repo_outside_webhook_canary_repos(tmp_path):
         ).fetchone()[0] == "outside_canary"
 
 
+def test_webhook_canary_does_not_lookup_rereviewer_outside_scope(
+    tmp_path, monkeypatch
+):
+    def fail_lookup(payload, bot_logins):
+        raise AssertionError("outside-canary repositories must not use the API")
+
+    monkeypatch.setattr(
+        "github_agent_bridge.backend.bot_is_pull_request_reviewer", fail_lookup
+    )
+    policy = canary_policy(tmp_path)
+    policy.write_text(json.dumps({
+        "trustedOrgs": ["gisce"],
+        "webhookCanaryRepos": ["gisce/other"],
+        "botLogins": ["giscebot"],
+    }))
+    payload = pull_request_synchronize_payload()
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=policy,
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(
+            payload, delivery="outside-canary-sync", event="pull_request"
+        ),
+    )
+
+    assert response.json()["enqueue_status"] == "outside_canary"
+
+
 def test_webhook_canary_ignores_events_created_by_configured_bot(tmp_path):
     payload = pull_request_review_payload(state="commented", sender="giscebot")
     config = DashboardConfig(
@@ -928,6 +1088,180 @@ def test_webhook_canary_preserves_review_request_sender_as_trigger_actor(tmp_pat
     assert response.json()["enqueue_status"] == "enqueued"
     with sqlite3.connect(config.db) as con:
         assert con.execute("SELECT trigger_actor FROM jobs").fetchone()[0] == "review-requester"
+
+
+def test_webhook_canary_enqueues_rereview_after_pull_request_synchronize(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "github_agent_bridge.backend.bot_is_pull_request_reviewer",
+        lambda payload, bot_logins: True,
+    )
+    policy = canary_policy(tmp_path)
+    policy.write_text(json.dumps({
+        "trustedOrgs": ["gisce"],
+        "webhookCanaryRepos": ["gisce/github-agent-bridge"],
+        "botLogins": ["giscebot"],
+        "actions": {"trustedAuto": ["submit_review"]},
+    }))
+    payload = pull_request_synchronize_payload()
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=policy,
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(
+            payload,
+            delivery="review-synchronize",
+            event="pull_request",
+        ),
+    )
+
+    assert response.json()["enqueue_status"] == "enqueued"
+    assert response.json()["event_key"] == (
+        "pull_request:synchronize:gisce/github-agent-bridge:233:" + "2" * 40
+    )
+    with sqlite3.connect(config.db) as con:
+        row = con.execute(
+            "SELECT action,work_intent,work_key,context_json,metadata_json FROM jobs"
+        ).fetchone()
+        assert row[:3] == (
+            "submit_review",
+            "review_only",
+            "gisce/github-agent-bridge#233",
+        )
+        assert json.loads(row[3])["commit_sha"] == "2" * 40
+        assert json.loads(row[4])["event_envelope"]["event_action"] == (
+            "synchronize"
+        )
+
+
+def test_webhook_canary_ignores_synchronize_when_bot_is_not_reviewer(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "github_agent_bridge.backend.bot_is_pull_request_reviewer",
+        lambda payload, bot_logins: False,
+    )
+    payload = pull_request_synchronize_payload()
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=canary_policy(tmp_path),
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(
+            payload,
+            delivery="non-reviewer-synchronize",
+            event="pull_request",
+        ),
+    )
+
+    assert response.json()["enqueue_status"] == "ignored"
+    with sqlite3.connect(config.db) as con:
+        assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_webhook_canary_reports_synchronize_reviewer_lookup_failure(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "github_agent_bridge.backend.bot_is_pull_request_reviewer",
+        lambda payload, bot_logins: None,
+    )
+    payload = pull_request_synchronize_payload()
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=canary_policy(tmp_path),
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(
+            payload,
+            delivery="reviewer-lookup-failure",
+            event="pull_request",
+        ),
+    )
+
+    assert response.json()["enqueue_status"] == "reviewer_lookup_failed"
+    with sqlite3.connect(config.db) as con:
+        assert con.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        assert con.execute(
+            "SELECT enqueue_status FROM webhook_shadow_receipts"
+        ).fetchone()[0] == "reviewer_lookup_failed"
+
+
+def test_webhook_synchronize_new_sha_does_not_coalesce_into_running_review(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(
+        "github_agent_bridge.backend.bot_is_pull_request_reviewer",
+        lambda payload, bot_logins: True,
+    )
+    policy = canary_policy(tmp_path)
+    policy.write_text(json.dumps({
+        "trustedOrgs": ["gisce"],
+        "webhookCanaryRepos": ["gisce/github-agent-bridge"],
+        "botLogins": ["giscebot"],
+        "actions": {"trustedAuto": ["submit_review"]},
+    }))
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="canary",
+        webhook_policy=policy,
+    )
+    client = TestClient(create_app(config))
+    first_payload = pull_request_synchronize_payload(after="2" * 40)
+    first = client.post(
+        "/api/webhooks/github",
+        content=first_payload,
+        headers=signed_headers(
+            first_payload, delivery="first-synchronize", event="pull_request"
+        ),
+    )
+    running = JobQueue(config.db).claim_next("review-worker")
+    second_payload = pull_request_synchronize_payload(
+        before="2" * 40, after="3" * 40
+    )
+
+    second = client.post(
+        "/api/webhooks/github",
+        content=second_payload,
+        headers=signed_headers(
+            second_payload, delivery="second-synchronize", event="pull_request"
+        ),
+    )
+
+    assert first.json()["enqueue_status"] == "enqueued"
+    assert running is not None
+    assert second.json()["enqueue_status"] == "enqueued"
+    with sqlite3.connect(config.db) as con:
+        rows = con.execute(
+            "SELECT status,context_json FROM jobs ORDER BY id"
+        ).fetchall()
+        assert [row[0] for row in rows] == ["running", "pending"]
+        assert [json.loads(row[1])["commit_sha"] for row in rows] == [
+            "2" * 40,
+            "3" * 40,
+        ]
 
 
 def test_webhook_canary_enqueues_failed_workflow_run(tmp_path):
@@ -1107,6 +1441,42 @@ def test_webhook_commit_comment_keeps_cross_source_identity(tmp_path, monkeypatc
         assert con.execute(
             "SELECT event_key FROM ingest_receipts WHERE source='webhook'"
         ).fetchone()[0] == expected
+
+
+def test_webhook_primary_does_not_lookup_rereviewer_outside_enabled_repos(
+    tmp_path, monkeypatch
+):
+    def fail_lookup(payload, bot_logins):
+        raise AssertionError("disabled repositories must not use the API")
+
+    monkeypatch.setattr(
+        "github_agent_bridge.backend.bot_is_pull_request_reviewer", fail_lookup
+    )
+    policy = canary_policy(tmp_path)
+    policy.write_text(json.dumps({
+        "trustedOrgs": ["gisce"],
+        "enabledRepos": ["gisce/other"],
+        "botLogins": ["giscebot"],
+    }))
+    payload = pull_request_synchronize_payload()
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets=(SECRET,),
+        webhook_mode="primary",
+        webhook_policy=policy,
+        webhook_primary_ack=True,
+    )
+
+    response = TestClient(create_app(config)).post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(
+            payload, delivery="outside-enabled-sync", event="pull_request"
+        ),
+    )
+
+    assert response.json()["enqueue_status"] == "outside_enabled_repos"
 
 
 def test_webhook_canary_ignores_approved_pull_request_reviews(tmp_path):
