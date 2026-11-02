@@ -204,6 +204,7 @@ type WebhookSummary = {
     incomplete_decision_traces?: number;
     split_identities?: number;
     observation_complete?: boolean;
+    observation_started_at?: string | null;
     promotion_state?: "insufficient_data" | "blocked" | "ready";
     promotion_ready?: boolean;
     imap_eligible: number;
@@ -213,6 +214,9 @@ type WebhookSummary = {
     window_end?: string;
     observation_days?: number;
     grace_seconds?: number;
+    scope_repositories?: string[] | null;
+    outside_scope_imap_eligible?: number;
+    outside_scope_webhook_eligible?: number;
   };
 };
 
@@ -2094,6 +2098,11 @@ function WebhookPage({
   const promotionState = summary?.coverage?.promotion_state
     ?? (summary?.coverage?.promotion_ready ? "ready" : "blocked");
   const promotionLabel = promotionState === "insufficient_data" ? "insufficient data" : promotionState;
+  const promotionScopeLabel = summary?.mode === "primary"
+    ? "Primary eligibility scope"
+    : summary?.mode === "canary"
+      ? "Canary rollout cohort"
+      : "Shadow rollout cohort";
   const sections = [
     { id: "overview" as const, label: "Overview" },
     { id: "hooks" as const, label: "Hooks", count: summary?.totals?.hooks },
@@ -2129,8 +2138,10 @@ function WebhookPage({
             <MiniStat label="Incomplete decision traces" value={summary?.coverage?.incomplete_decision_traces ?? 0} />
             <MiniStat label="Split identities" value={summary?.coverage?.split_identities ?? 0} />
             <MiniStat label="Promotion gate" value={promotionLabel} />
+            <MiniStat label="Outside scope IMAP" value={summary?.coverage?.outside_scope_imap_eligible ?? 0} />
+            <MiniStat label="Outside scope webhook" value={summary?.coverage?.outside_scope_webhook_eligible ?? 0} />
           </div>
-          {summary?.coverage?.window_start && summary.coverage.window_end ? <p className="mt-3 font-mono text-xs text-muted">Actionable IMAP events and comparable webhook events from <TimeText value={summary.coverage.window_start} /> to <TimeText value={summary.coverage.window_end} />; {summary.coverage.observation_days ?? 7} observation days required and newest {summary.coverage.grace_seconds ?? 0}s excluded.</p> : null}
+          {summary?.coverage?.window_start && summary.coverage.window_end ? <p className="mt-3 font-mono text-xs text-muted">Actionable IMAP events and comparable webhook events from <TimeText value={summary.coverage.window_start} /> to <TimeText value={summary.coverage.window_end} />; {summary.coverage.observation_days ?? 7} observation days required and newest {summary.coverage.grace_seconds ?? 0}s excluded. {promotionScopeLabel}: {summary.coverage.scope_repositories == null ? "all repositories" : `${summary.coverage.scope_repositories.length} configured repositories`}{summary.coverage.observation_started_at ? <>; observation epoch <TimeText value={summary.coverage.observation_started_at} /></> : null}.</p> : null}
         </Panel>
         {Object.keys(summary?.enqueue ?? {}).length ? <Panel title="Canary ingestion decisions"><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">{Object.entries(summary?.enqueue ?? {}).sort(([left], [right]) => left.localeCompare(right)).map(([state, count]) => <MiniStat key={state} label={state} value={count} />)}</div></Panel> : null}
         <Panel title="Exceptions requiring review">

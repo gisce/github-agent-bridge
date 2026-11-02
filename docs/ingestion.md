@@ -258,6 +258,16 @@ duration and `GITHUB_AGENT_BRIDGE_WEBHOOK_COVERAGE_GRACE_SECONDS` to change the
 default ten-minute grace period. Receipt retention must cover the full window
 plus its grace period or the gate remains `insufficient_data`.
 
+When corrected code or configuration starts a new rollout epoch, set
+`GITHUB_AGENT_BRIDGE_WEBHOOK_OBSERVATION_STARTED_AT` to that deployment's
+ISO-8601 UTC timestamp. The gate then ignores earlier evidence and remains
+`insufficient_data` until a complete new window has elapsed. In shadow and
+canary modes, coverage and exceptions are limited to the intended rollout
+cohort in `webhookCanaryRepos`; actionable events outside that scope are
+reported separately and cannot block the cohort gate. In primary mode, the
+same queries use the global `enabledRepos` scope. An empty `enabledRepos` is
+unrestricted, so primary coverage and exceptions include every repository.
+
 Every durable ingestion receipt also records the normalized repository, work
 key, event descriptor, bridge action, policy decision and work intent. The
 dashboard compares those receipt-scoped decisions when both transports share a
@@ -287,7 +297,9 @@ both `GITHUB_AGENT_BRIDGE_WEBHOOK_MODE=primary` and
 operator acknowledgement; `primary` fails closed without both it and
 `GITHUB_AGENT_BRIDGE_WEBHOOK_POLICY`. The configured policy remains authoritative
 for trust, action, routing and the global `enabledRepos` guardrail. Primary mode
-does not use the narrower `webhookCanaryRepos` allowlist.
+does not use the narrower `webhookCanaryRepos` allowlist. Its second observation
+window and exception queue cover `enabledRepos`, or all repositories when that
+global allowlist is empty.
 
 Primary changes which source is expected to win, not the idempotency model.
 Keep the IMAP reader enabled during the stable fallback phase. If webhook

@@ -56,6 +56,27 @@ def _actionable_ingest_predicate(receipt_alias: str, job_alias: str) -> str:
     )
 
 
+def _repository_scope_predicate(
+    expression: str,
+    repositories: set[str] | None,
+    *,
+    included: bool = True,
+) -> tuple[str, tuple[str, ...]]:
+    if repositories is None:
+        return "", ()
+    normalized = tuple(
+        sorted(repo.strip().lower() for repo in repositories if repo.strip())
+    )
+    if not normalized:
+        return (" AND 0", ()) if included else ("", ())
+    placeholders = ",".join("?" for _ in normalized)
+    operator = "IN" if included else "NOT IN"
+    return (
+        f" AND LOWER(COALESCE({expression},'')) {operator} ({placeholders})",
+        normalized,
+    )
+
+
 @dataclass(frozen=True)
 class WebhookReceipt:
     delivery_id: str
@@ -198,7 +219,24 @@ class WebhookRepository:
             else None
         )
 
-    def summary(self, window_start: str, window_end: str) -> dict[str, Any]:
+    def summary(
+        self,
+        window_start: str,
+        window_end: str,
+        repositories: set[str] | None = None,
+    ) -> dict[str, Any]:
+        email_scope, email_scope_args = _repository_scope_predicate(
+            "i.repository,j.repo", repositories
+        )
+        webhook_scope, webhook_scope_args = _repository_scope_predicate(
+            "w.repository", repositories
+        )
+        split_email_scope, split_email_scope_args = _repository_scope_predicate(
+            "e.repository,ej.repo", repositories
+        )
+        split_webhook_scope, split_webhook_scope_args = _repository_scope_predicate(
+            "w.repository,wj.repo", repositories
+        )
         with self.database.read("webhooks.summary") as con:
             receipt = con.execute(
                 "SELECT COALESCE(SUM(CASE WHEN status='observed' THEN 1 ELSE 0 END),0) observed,"
@@ -214,6 +252,7 @@ class WebhookRepository:
                 " WHERE i.source='email' AND i.event_key IS NOT NULL"
                 " AND julianday(i.created_at)>=julianday(?) AND julianday(i.created_at)<=julianday(?)"
                 f" AND {_actionable_ingest_predicate('i', 'j')}"
+                f"{email_scope}"
                 " GROUP BY i.event_key"
                 "), webhook_events AS ("
                 " SELECT w.event_key,MIN(w.created_at) created_at,"
@@ -227,6 +266,7 @@ class WebhookRepository:
                 " WHERE w.event_key IS NOT NULL"
                 " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
                 f" AND {_actionable_ingest_predicate('wi', 'j')}"
+                f"{webhook_scope}"
                 " GROUP BY w.event_key"
                 "), decision_traces AS ("
                 " SELECT e.event_key,"
@@ -263,6 +303,8 @@ class WebhookRepository:
                 f" AND {_actionable_ingest_predicate('w', 'wj')}"
                 " AND julianday(e.created_at)>=julianday(?) AND julianday(e.created_at)<=julianday(?)"
                 " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
+                f"{split_email_scope}"
+                f"{split_webhook_scope}"
                 " AND ABS((julianday(w.created_at)-julianday(e.created_at))*86400.0)<=?"
                 " GROUP BY e.event_key,w.event_key"
                 ") SELECT"
@@ -277,6 +319,10 @@ class WebhookRepository:
                 (
                     window_start,
                     window_end,
+                    *email_scope_args,
+                    window_start,
+                    window_end,
+                    *webhook_scope_args,
                     window_start,
                     window_end,
                     window_start,
@@ -285,8 +331,8 @@ class WebhookRepository:
                     window_end,
                     window_start,
                     window_end,
-                    window_start,
-                    window_end,
+                    *split_email_scope_args,
+                    *split_webhook_scope_args,
                     SPLIT_IDENTITY_MAX_DELAY_SECONDS,
                 ),
             ).fetchone()
@@ -318,9 +364,77 @@ class WebhookRepository:
             "enqueue": enqueue,
         }
 
+    def outside_scope_counts(
+        self,
+        window_start: str,
+        window_end: str,
+        repositories: set[str] | None,
+    ) -> dict[str, int]:
+        if repositories is None:
+            return {"imap_events": 0, "webhook_events": 0}
+        email_scope, email_scope_args = _repository_scope_predicate(
+            "i.repository,j.repo", repositories, included=False
+        )
+        webhook_scope, webhook_scope_args = _repository_scope_predicate(
+            "w.repository", repositories, included=False
+        )
+        with self.database.read("webhooks.outside_scope_counts") as con:
+            row = con.execute(
+                "WITH email_events AS ("
+                " SELECT i.event_key FROM ingest_receipts i"
+                " LEFT JOIN jobs j ON j.id=i.job_id"
+                " WHERE i.source='email' AND i.event_key IS NOT NULL"
+                " AND julianday(i.created_at)>=julianday(?) AND julianday(i.created_at)<=julianday(?)"
+                f" AND {_actionable_ingest_predicate('i', 'j')}"
+                f"{email_scope}"
+                " GROUP BY i.event_key"
+                "), webhook_events AS ("
+                " SELECT w.event_key FROM webhook_shadow_receipts w INDEXED BY idx_webhook_shadow_coverage"
+                " JOIN ingest_receipts wi ON wi.source='webhook' AND wi.source_key=w.delivery_id"
+                " LEFT JOIN jobs j ON j.id=COALESCE(w.job_id,wi.job_id)"
+                " WHERE w.event_key IS NOT NULL"
+                " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
+                f" AND {_actionable_ingest_predicate('wi', 'j')}"
+                f"{webhook_scope}"
+                " GROUP BY w.event_key"
+                ") SELECT (SELECT COUNT(*) FROM email_events) imap_events,"
+                " (SELECT COUNT(*) FROM webhook_events) webhook_events",
+                (
+                    window_start,
+                    window_end,
+                    *email_scope_args,
+                    window_start,
+                    window_end,
+                    *webhook_scope_args,
+                ),
+            ).fetchone()
+        return {
+            "imap_events": int(row["imap_events"]),
+            "webhook_events": int(row["webhook_events"]),
+        }
+
     def exceptions(
-        self, window_start: str, window_end: str, limit: int
+        self,
+        window_start: str,
+        window_end: str,
+        limit: int,
+        repositories: set[str] | None = None,
     ) -> list[dict[str, Any]]:
+        email_scope, email_scope_args = _repository_scope_predicate(
+            "i.repository,j.repo", repositories
+        )
+        webhook_scope, webhook_scope_args = _repository_scope_predicate(
+            "w.repository", repositories
+        )
+        split_email_scope, split_email_scope_args = _repository_scope_predicate(
+            "e.repository,ej.repo", repositories
+        )
+        split_webhook_scope, split_webhook_scope_args = _repository_scope_predicate(
+            "w.repository,wj.repo", repositories
+        )
+        unmatchable_scope, unmatchable_scope_args = _repository_scope_predicate(
+            "w.repository", repositories
+        )
         with self.database.read("webhooks.exceptions") as con:
             rows = con.execute(
                 "WITH email_events AS MATERIALIZED ("
@@ -332,6 +446,7 @@ class WebhookRepository:
                 " WHERE i.source='email' AND i.event_key IS NOT NULL"
                 " AND julianday(i.created_at)>=julianday(?) AND julianday(i.created_at)<=julianday(?)"
                 f" AND {_actionable_ingest_predicate('i', 'j')}"
+                f"{email_scope}"
                 " GROUP BY i.event_key"
                 "), webhook_events AS MATERIALIZED ("
                 " SELECT w.event_key,MIN(w.delivery_id) reference,MIN(w.created_at) created_at,"
@@ -343,6 +458,7 @@ class WebhookRepository:
                 " WHERE w.event_key IS NOT NULL"
                 " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
                 f" AND {_actionable_ingest_predicate('wi', 'j')}"
+                f"{webhook_scope}"
                 " GROUP BY w.event_key"
                 "), decision_traces AS ("
                 " SELECT e.event_key,MIN(e.source_key) reference,"
@@ -394,6 +510,8 @@ class WebhookRepository:
                 f" AND {_actionable_ingest_predicate('w', 'wj')}"
                 " AND julianday(e.created_at)>=julianday(?) AND julianday(e.created_at)<=julianday(?)"
                 " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
+                f"{split_email_scope}"
+                f"{split_webhook_scope}"
                 " AND ABS((julianday(w.created_at)-julianday(e.created_at))*86400.0)<=?"
                 " GROUP BY e.event_key,w.event_key"
                 "), candidates AS ("
@@ -409,6 +527,7 @@ class WebhookRepository:
                 " w.repository,w.event_name,w.action"
                 " FROM webhook_shadow_receipts w INDEXED BY idx_webhook_shadow_coverage WHERE w.event_key IS NULL"
                 " AND julianday(w.created_at)>=julianday(?) AND julianday(w.created_at)<=julianday(?)"
+                f"{unmatchable_scope}"
                 " UNION ALL SELECT 'decision_mismatch',event_key,NULL,reference,"
                 " related_reference,created_at,repository,event_type,event_action"
                 " FROM decision_traces WHERE mismatch=1 UNION ALL "
@@ -424,6 +543,10 @@ class WebhookRepository:
                 (
                     window_start,
                     window_end,
+                    *email_scope_args,
+                    window_start,
+                    window_end,
+                    *webhook_scope_args,
                     window_start,
                     window_end,
                     window_start,
@@ -432,11 +555,12 @@ class WebhookRepository:
                     window_end,
                     window_start,
                     window_end,
-                    window_start,
-                    window_end,
+                    *split_email_scope_args,
+                    *split_webhook_scope_args,
                     SPLIT_IDENTITY_MAX_DELAY_SECONDS,
                     window_start,
                     window_end,
+                    *unmatchable_scope_args,
                     limit,
                 ),
             ).fetchall()
