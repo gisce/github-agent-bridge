@@ -858,7 +858,11 @@ async def _receive_github_webhook(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_json")
     repository = payload.get("repository") if isinstance(payload, dict) else None
     full_name = repository.get("full_name") if isinstance(repository, dict) else None
-    owner = str(full_name or "").partition("/")[0].lower()
+    organization = payload.get("organization") if isinstance(payload, dict) else None
+    organization_login = (
+        organization.get("login") if isinstance(organization, dict) else None
+    )
+    owner = str(full_name or organization_login or "").partition("/")[0].lower()
     if config.webhook_secrets_by_owner:
         webhook_secrets = config.webhook_secrets_by_owner.get(owner, ())
         if not webhook_secrets:
