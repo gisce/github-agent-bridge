@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v0.88.1 (2026-11-02)
+
+### Bug Fixes
+
+- Preserve deferred executor reload across noop
+  ([#337](https://github.com/gisce/github-agent-bridge/pull/337),
+  [`bb4a8eb`](https://github.com/gisce/github-agent-bridge/commit/bb4a8eb73b22b1c6662a6f421227dadd07fbaf89))
+
+- Select owner secret for organization pings
+  ([#338](https://github.com/gisce/github-agent-bridge/pull/338),
+  [`7f5257d`](https://github.com/gisce/github-agent-bridge/commit/7f5257de45c8ea2699f0a5ad8e6e024b4e5fe282))
+
+
 ## v0.88.0 (2026-11-02)
 
 ### Bug Fixes
