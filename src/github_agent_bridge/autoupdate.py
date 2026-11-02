@@ -900,6 +900,7 @@ def plan_update(
 
 def record_update_plan(db: str | Path, plan: dict[str, Any]) -> dict[str, Any]:
     queue = JobQueue(db)
+    previous = load_update_state(queue)
     state = {
         "updated_at": utc_now(),
         "installed_version": plan["installed_version"],
@@ -918,5 +919,18 @@ def record_update_plan(db: str | Path, plan: dict[str, Any]) -> dict[str, Any]:
         "service_plan": plan.get("service_plan", {}),
         "warnings": plan.get("warnings", []),
     }
+    if plan["decision"] == "noop" and previous.get("executor_reload_pending"):
+        # A refresh can observe the newly installed version before the
+        # completion pass has restarted the executor. Keep the deferred action
+        # actionable instead of replacing it with an up-to-date noop plan.
+        for key in (
+            "decision",
+            "executor_reload_pending",
+            "blocked_reason",
+            "classification",
+            "service_plan",
+        ):
+            if key in previous:
+                state[key] = previous[key]
     save_update_state(queue, state)
     return state
