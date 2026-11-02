@@ -1767,6 +1767,32 @@ def test_webhook_shadow_selects_secret_by_repository_owner(tmp_path):
     ).status_code == 401
 
 
+def test_webhook_shadow_selects_secret_by_organization_owner_for_ping(tmp_path):
+    payload = json.dumps({
+        "zen": "Keep it logically awesome.",
+        "hook": {"id": 42, "type": "Organization"},
+        "organization": {"login": "gisce"},
+    }).encode()
+    client = TestClient(create_app(DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        require_auth=False,
+        webhook_secrets_by_owner={"gisce": ("gisce-secret",)},
+    )))
+
+    response = client.post(
+        "/api/webhooks/github",
+        content=payload,
+        headers=signed_headers(
+            payload,
+            delivery="organization-ping",
+            event="ping",
+            secret="gisce-secret",
+        ),
+    )
+
+    assert response.status_code == 200
+
+
 def test_webhook_shadow_rejects_unconfigured_repository_owner(tmp_path):
     payload = json.dumps({
         "action": "created",
