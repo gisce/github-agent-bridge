@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -7,11 +8,13 @@ import sqlite3
 import subprocess
 from datetime import UTC, datetime, timedelta
 
+import pytest
+from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
 from github_agent_bridge import backend
 from github_agent_bridge.actors import TriggerActor
-from github_agent_bridge.backend import DashboardConfig, _encode_session, _sign, create_app, create_webhook_app
+from github_agent_bridge.backend import DashboardConfig, _encode_session, _read_request_body_limited, _sign, create_app, create_webhook_app
 from github_agent_bridge.models import Notification, ResolvedGitHubEvent
 from github_agent_bridge.parser import extract_github_context
 from github_agent_bridge.policy import Policy
@@ -24,6 +27,32 @@ from github_agent_bridge.webhook import (
 
 
 SECRET = "test-secret"
+
+
+def test_webhook_body_limit_stops_before_consuming_remaining_chunks():
+    messages = [
+        {"type": "http.request", "body": b"1234", "more_body": True},
+        {"type": "http.request", "body": b"5678", "more_body": True},
+        {"type": "http.request", "body": b"must-not-be-read", "more_body": False},
+    ]
+    received = []
+
+    async def receive():
+        message = messages.pop(0)
+        received.append(message["body"])
+        return message
+
+    request = Request(
+        {"type": "http", "method": "POST", "path": "/api/webhooks/github", "headers": []},
+        receive,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(_read_request_body_limited(request, 6))
+
+    assert raised.value.status_code == 413
+    assert raised.value.detail == "payload_too_large"
+    assert received == [b"1234", b"5678"]
 
 
 def test_dedicated_webhook_ingress_exposes_only_health_and_delivery(tmp_path):
@@ -1819,7 +1848,7 @@ def test_webhook_status_requires_dashboard_admin(tmp_path):
         admin_users={"operator"},
         webhook_secrets=(SECRET,),
     )
-    client = TestClient(create_app(config))
+    client = TestClient(create_app(config), headers={"origin": "http://testserver"})
 
     paths = (
         "/api/webhooks/github/status",

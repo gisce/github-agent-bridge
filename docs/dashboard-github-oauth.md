@@ -63,6 +63,8 @@ GITHUB_AGENT_BRIDGE_DASHBOARD_ALLOWED_TEAMS=
 GITHUB_AGENT_BRIDGE_DASHBOARD_ADMIN_USERS=your-github-login
 GITHUB_AGENT_BRIDGE_DASHBOARD_ADMIN_TEAMS=
 GITHUB_AGENT_BRIDGE_DASHBOARD_PUBLIC_URL=
+GITHUB_AGENT_BRIDGE_DASHBOARD_SESSION_MAX_AGE_SECONDS=28800
+GITHUB_AGENT_BRIDGE_DASHBOARD_SESSION_VERSION=1
 GITHUB_AGENT_BRIDGE_WEB_PUSH_VAPID_PUBLIC_KEY=
 GITHUB_AGENT_BRIDGE_WEB_PUSH_VAPID_PRIVATE_KEY=
 GITHUB_AGENT_BRIDGE_WEB_PUSH_VAPID_CONTACT=mailto:admin@example.com
@@ -96,6 +98,11 @@ Use at least one authorization allowlist:
 - `GITHUB_AGENT_BRIDGE_DASHBOARD_PUBLIC_URL`: optional external dashboard
   origin, for example `https://bridge.example.com`, used in shareable dashboard
   links when the service runs behind nginx or another reverse proxy.
+- `GITHUB_AGENT_BRIDGE_DASHBOARD_SESSION_MAX_AGE_SECONDS`: absolute signed
+  session lifetime. The default is 28,800 seconds (8 hours).
+- `GITHUB_AGENT_BRIDGE_DASHBOARD_SESSION_VERSION`: positive integer embedded in
+  new sessions. Increment it to revoke every existing dashboard session without
+  rotating the signing secret.
 - `GITHUB_AGENT_BRIDGE_WEB_PUSH_VAPID_PUBLIC_KEY`: browser Push API VAPID public
   key served to signed-in dashboard users.
 - `GITHUB_AGENT_BRIDGE_WEB_PUSH_VAPID_PRIVATE_KEY`: matching VAPID private key
@@ -119,6 +126,16 @@ listed in an `ALLOWED_*` variable.
 
 Per-repository dashboard scopes are part of the issue #4 architecture but are
 not implemented in the current dashboard backend.
+
+Dashboard sessions contain signed issue and expiry times. User and admin
+allowlist configuration is re-evaluated on every authenticated request, so
+removing a directly listed login takes effect immediately. Organization and
+team memberships are captured during OAuth and are refreshed by requiring a
+new OAuth login when the absolute session lifetime expires; removing an org or
+team member therefore takes effect within at most the configured session
+lifetime. The **Sign out** action clears the browser session. Rotate the signing
+key or increment the session version when all outstanding sessions must be
+invalidated immediately.
 
 ## Browser Push Notifications
 
@@ -168,6 +185,9 @@ When exposing the dashboard beyond localhost:
 - terminate TLS before the dashboard;
 - set the OAuth App homepage and callback URL to the public HTTPS origin;
 - keep cookies `Secure`, `HttpOnly`, and `SameSite=Lax`;
+- preserve the browser `Origin` and `Referer` headers. Cookie-authenticated
+  `POST`, `PUT`, `PATCH`, and `DELETE` requests fail closed unless one of those
+  headers matches the configured/forwarded dashboard origin;
 - restrict proxy access to the intended operator network where possible;
 - do not publish the raw SQLite file or arbitrary filesystem paths;
 - rotate `GITHUB_OAUTH_CLIENT_SECRET` and
