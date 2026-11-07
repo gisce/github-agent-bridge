@@ -108,6 +108,10 @@ would couple rotation and increase the blast radius of a leak.
 `GITHUB_AGENT_BRIDGE_WEBHOOK_MAX_BYTES` defaults to 1 MiB. GitHub must send
 `Content-Type: application/json`, `X-GitHub-Delivery`, `X-GitHub-Event`, and a
 valid `X-Hub-Signature-256` computed over the unmodified request bytes.
+The ingress enforces this as an incremental hard cap while streaming the body,
+including requests without `Content-Length`; it does not buffer an oversized
+body before returning `413`. Set the reverse proxy limit to the same value. The
+packaged nginx example uses `client_max_body_size 1m`, matching the default.
 
 ### GitHub configuration
 

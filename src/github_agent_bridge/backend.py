@@ -68,7 +68,8 @@ GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_USER_URL = "https://api.github.com/user"
 GITHUB_TEAMS_URL = "https://api.github.com/user/teams"
 PROJECT_REPOSITORY_URL = "https://github.com/gisce/github-agent-bridge"
-SESSION_VERSION = 1
+SESSION_VERSION = 2
+DEFAULT_SESSION_MAX_AGE_SECONDS = 8 * 60 * 60
 WEBHOOK_TIMESERIES_MAX_DAYS = 366
 WEBHOOK_TIMESERIES_MAX_HOURLY_DAYS = 31
 def _expand_systemd_home_specifier(value: str) -> str:
@@ -315,6 +316,8 @@ class DashboardConfig:
         allowed_teams: set[str] | None = None,
         admin_users: set[str] | None = None,
         admin_teams: set[str] | None = None,
+        session_max_age_seconds: int | None = None,
+        session_version: int | None = None,
         require_auth: bool = True,
         static_dir: str | Path | None = None,
         public_url: str | None = None,
@@ -339,6 +342,20 @@ class DashboardConfig:
         self.allowed_teams = allowed_teams if allowed_teams is not None else _csv_env("GITHUB_AGENT_BRIDGE_DASHBOARD_ALLOWED_TEAMS")
         self.admin_users = admin_users if admin_users is not None else _csv_env("GITHUB_AGENT_BRIDGE_DASHBOARD_ADMIN_USERS")
         self.admin_teams = admin_teams if admin_teams is not None else _csv_env("GITHUB_AGENT_BRIDGE_DASHBOARD_ADMIN_TEAMS")
+        self.session_max_age_seconds = (
+            session_max_age_seconds
+            if session_max_age_seconds is not None
+            else int(os.getenv("GITHUB_AGENT_BRIDGE_DASHBOARD_SESSION_MAX_AGE_SECONDS", str(DEFAULT_SESSION_MAX_AGE_SECONDS)))
+        )
+        self.session_version = (
+            session_version
+            if session_version is not None
+            else int(os.getenv("GITHUB_AGENT_BRIDGE_DASHBOARD_SESSION_VERSION", "1"))
+        )
+        if self.session_max_age_seconds <= 0:
+            raise ValueError("GITHUB_AGENT_BRIDGE_DASHBOARD_SESSION_MAX_AGE_SECONDS must be greater than zero")
+        if self.session_version <= 0:
+            raise ValueError("GITHUB_AGENT_BRIDGE_DASHBOARD_SESSION_VERSION must be greater than zero")
         self.require_auth = require_auth
         self.static_dir = Path(static_dir or os.getenv("GITHUB_AGENT_BRIDGE_DASHBOARD_STATIC_DIR", Path(__file__).with_name("dashboard_static"))).expanduser()
         self.public_url = (public_url if public_url is not None else os.getenv("GITHUB_AGENT_BRIDGE_DASHBOARD_PUBLIC_URL", "")).rstrip("/")
@@ -680,24 +697,55 @@ def _unsign(config: DashboardConfig, value: str) -> str | None:
     return raw if hmac.compare_digest(digest, expected) else None
 
 
-def _encode_session(user: dict[str, Any], *, is_admin: bool = False) -> str:
+def _encode_session(
+    user: dict[str, Any],
+    *,
+    is_admin: bool = False,
+    authorized_orgs: set[str] | None = None,
+    authorized_teams: set[str] | None = None,
+    issued_at: datetime | None = None,
+    max_age_seconds: int = DEFAULT_SESSION_MAX_AGE_SECONDS,
+    session_version: int = 1,
+) -> str:
+    issued = int((issued_at or datetime.now(UTC)).timestamp())
     payload = {
         "v": SESSION_VERSION,
+        "sv": session_version,
+        "iat": issued,
+        "exp": issued + max_age_seconds,
         "login": str(user.get("login", "")).lower(),
         "avatar_url": str(user.get("avatar_url", "")),
         "html_url": str(user.get("html_url", "")),
         "is_admin": bool(is_admin),
+        "orgs": sorted(str(org).lower() for org in (authorized_orgs or set()) if org),
+        "teams": sorted(str(team).lower() for team in (authorized_teams or set()) if team),
     }
     data = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
-def _decode_session(value: str) -> dict[str, Any] | None:
+def _decode_session(
+    value: str,
+    *,
+    now: datetime | None = None,
+    session_version: int = 1,
+) -> dict[str, Any] | None:
     try:
         padded = value + "=" * (-len(value) % 4)
         payload = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
     except (ValueError, TypeError, json.JSONDecodeError):
-        return _profile_from_login(value) if value else None
+        return None
+    if not isinstance(payload, dict) or payload.get("v") != SESSION_VERSION or payload.get("sv") != session_version:
+        return None
+    issued_at = payload.get("iat")
+    expires_at = payload.get("exp")
+    if isinstance(issued_at, bool) or not isinstance(issued_at, int):
+        return None
+    if isinstance(expires_at, bool) or not isinstance(expires_at, int) or expires_at <= issued_at:
+        return None
+    current_timestamp = int((now or datetime.now(UTC)).timestamp())
+    if issued_at > current_timestamp + 60 or expires_at <= current_timestamp:
+        return None
     login = str(payload.get("login", "")).lower()
     if not login:
         return None
@@ -707,6 +755,12 @@ def _decode_session(value: str) -> dict[str, Any] | None:
         "avatar_url": str(payload.get("avatar_url") or fallback["avatar_url"]),
         "html_url": str(payload.get("html_url") or fallback["html_url"]),
         "is_admin": bool(payload.get("is_admin", False)),
+        "authorized_orgs": {
+            str(org).lower() for org in payload.get("orgs", []) if isinstance(org, str) and org
+        },
+        "authorized_teams": {
+            str(team).lower() for team in payload.get("teams", []) if isinstance(team, str) and team
+        },
     }
 
 
@@ -762,6 +816,65 @@ def _team_key(team: dict[str, Any]) -> str | None:
     return f"{org_login}/{slug}"
 
 
+def _github_authorization_memberships(
+    config: DashboardConfig,
+    token: str,
+) -> tuple[set[str], set[str]]:
+    orgs: set[str] = set()
+    teams: set[str] = set()
+    if config.allowed_orgs:
+        try:
+            payload = _github_json("https://api.github.com/user/orgs", token)
+        except (urllib.error.URLError, TimeoutError):
+            payload = []
+        orgs = {
+            str(org.get("login", "")).lower()
+            for org in payload
+            if isinstance(org, dict) and org.get("login")
+        }
+    if config.allowed_teams or config.admin_teams:
+        try:
+            payload = _github_json(GITHUB_TEAMS_URL, token)
+        except (urllib.error.URLError, TimeoutError):
+            payload = []
+        teams = {
+            key
+            for key in (
+                _team_key(team) for team in payload if isinstance(team, dict)
+            )
+            if key
+        }
+    return orgs, teams
+
+
+def _is_admin_for_memberships(
+    config: DashboardConfig,
+    login: str,
+    teams: set[str],
+) -> bool:
+    user = login.lower()
+    return bool(
+        (config.admin_users and user in config.admin_users)
+        or (config.admin_teams and config.admin_teams.intersection(teams))
+    )
+
+
+def _is_allowed_for_memberships(
+    config: DashboardConfig,
+    login: str,
+    orgs: set[str],
+    teams: set[str],
+) -> bool:
+    user = login.lower()
+    return bool(
+        _is_admin_for_memberships(config, login, teams)
+        or (config.allowed_users and user in config.allowed_users)
+        or (config.allowed_orgs and config.allowed_orgs.intersection(orgs))
+        or (config.allowed_teams and config.allowed_teams.intersection(teams))
+        or not config.has_authorization_policy
+    )
+
+
 def _exchange_code(config: DashboardConfig, code: str) -> str:
     data = urllib.parse.urlencode({
         "client_id": config.oauth_client_id,
@@ -778,38 +891,66 @@ def _exchange_code(config: DashboardConfig, code: str) -> str:
 
 
 def _is_allowed(config: DashboardConfig, login: str, token: str | None = None) -> bool:
-    user = login.lower()
-    if _is_admin(config, login, token):
-        return True
-    if config.allowed_users and user in config.allowed_users:
-        return True
-    if config.allowed_orgs and token:
-        try:
-            orgs = _github_json("https://api.github.com/user/orgs", token)
-        except (urllib.error.URLError, TimeoutError):
-            return False
-        if any(str(org.get("login", "")).lower() in config.allowed_orgs for org in orgs if isinstance(org, dict)):
-            return True
-    if config.allowed_teams and token:
-        try:
-            teams = _github_json(GITHUB_TEAMS_URL, token)
-        except (urllib.error.URLError, TimeoutError):
-            return False
-        return any(key in config.allowed_teams for key in (_team_key(team) for team in teams if isinstance(team, dict)) if key)
-    return not config.has_authorization_policy
+    orgs, teams = _github_authorization_memberships(config, token) if token else (set(), set())
+    return _is_allowed_for_memberships(config, login, orgs, teams)
 
 
 def _is_admin(config: DashboardConfig, login: str, token: str | None = None) -> bool:
-    user = login.lower()
-    if config.admin_users and user in config.admin_users:
-        return True
-    if config.admin_teams and token:
-        try:
-            teams = _github_json(GITHUB_TEAMS_URL, token)
-        except (urllib.error.URLError, TimeoutError):
+    _, teams = _github_authorization_memberships(config, token) if token else (set(), set())
+    return _is_admin_for_memberships(config, login, teams)
+
+
+def _same_origin(left: str, right: str) -> bool:
+    try:
+        left_url = urllib.parse.urlparse(left)
+        right_url = urllib.parse.urlparse(right)
+        if left_url.scheme not in {"http", "https"} or right_url.scheme not in {"http", "https"}:
             return False
-        return any(key in config.admin_teams for key in (_team_key(team) for team in teams if isinstance(team, dict)) if key)
-    return False
+        left_port = left_url.port or (443 if left_url.scheme == "https" else 80)
+        right_port = right_url.port or (443 if right_url.scheme == "https" else 80)
+    except ValueError:
+        return False
+    return (
+        left_url.scheme.lower(),
+        (left_url.hostname or "").lower(),
+        left_port,
+    ) == (
+        right_url.scheme.lower(),
+        (right_url.hostname or "").lower(),
+        right_port,
+    )
+
+
+def _require_same_origin_mutation(request: Request) -> None:
+    if request.method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return
+    source = request.headers.get("origin", "").strip()
+    if not source:
+        source = request.headers.get("referer", "").strip()
+    if not source:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="csrf_origin_required",
+        )
+    if not _same_origin(source, _dashboard_public_url(request)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="csrf_origin_mismatch",
+        )
+
+
+async def _read_request_body_limited(request: Request, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail="payload_too_large",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _webhook_schema_initializer(config: DashboardConfig):
@@ -846,12 +987,10 @@ async def _receive_github_webhook(
     if content_length:
         try:
             if int(content_length) > config.webhook_max_bytes:
-                raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="payload_too_large")
+                raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail="payload_too_large")
         except ValueError:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="invalid_content_length")
-    raw_payload = await request.body()
-    if len(raw_payload) > config.webhook_max_bytes:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="payload_too_large")
+    raw_payload = await _read_request_body_limited(request, config.webhook_max_bytes)
     try:
         payload = json.loads(raw_payload)
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -1013,9 +1152,19 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         if not signed or not cfg.secret_key:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="not_authenticated")
         raw = _unsign(cfg, signed)
-        profile = _decode_session(raw) if raw else None
+        profile = _decode_session(raw, session_version=cfg.session_version) if raw else None
         if not profile:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="session_invalid_or_expired")
+        orgs = profile.pop("authorized_orgs")
+        teams = profile.pop("authorized_teams")
+        if not _is_allowed_for_memberships(cfg, str(profile["login"]), orgs, teams):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="not_authorized")
+        profile["is_admin"] = bool(profile.get("is_admin")) and _is_admin_for_memberships(
+            cfg,
+            str(profile["login"]),
+            teams,
+        )
+        _require_same_origin_mutation(request)
         return profile
 
     def can_cancel_job(job_id: int, profile: dict[str, Any]) -> bool:
@@ -1930,12 +2079,41 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
         token = _exchange_code(config, code)
         user = _github_json(GITHUB_USER_URL, token)
         login = str(user.get("login", ""))
-        if not login or not _is_allowed(config, login, token):
+        orgs, teams = _github_authorization_memberships(config, token)
+        if not login or not _is_allowed_for_memberships(config, login, orgs, teams):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="not_authorized")
-        is_admin = _is_admin(config, login, token)
+        is_admin = _is_admin_for_memberships(config, login, teams)
         response = RedirectResponse("/", status_code=status.HTTP_302_FOUND)
-        response.set_cookie(SESSION_COOKIE, _sign(config, _encode_session(user, is_admin=is_admin)), httponly=True, secure=True, samesite="lax")
+        response.set_cookie(
+            SESSION_COOKIE,
+            _sign(
+                config,
+                _encode_session(
+                    user,
+                    is_admin=is_admin,
+                    authorized_orgs=orgs,
+                    authorized_teams=teams,
+                    max_age_seconds=config.session_max_age_seconds,
+                    session_version=config.session_version,
+                ),
+            ),
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            max_age=config.session_max_age_seconds,
+        )
         response.delete_cookie(OAUTH_STATE_COOKIE)
+        return response
+
+    @app.post("/auth/logout")
+    def logout(_: dict[str, Any] = Depends(current_profile)) -> RedirectResponse:
+        response = RedirectResponse("/auth/login", status_code=status.HTTP_303_SEE_OTHER)
+        response.delete_cookie(
+            SESSION_COOKIE,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+        )
         return response
 
     return app

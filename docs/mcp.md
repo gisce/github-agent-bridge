@@ -39,6 +39,15 @@ dashboard admins, the signed-in admin, and any users already linked to existing
 MCP tokens. Admins can use that selector to issue new tokens for a known user or
 link an existing active token to a user without exposing the token secret again.
 
+The linked user is a **lifecycle owner**, used to decide who can list and revoke
+the token. It is not a repository authorization scope. Repository knowledge is
+currently a single deployment-wide read model, just like the signed-in
+dashboard knowledge page: every valid MCP token can list and read every
+repository stored in that bridge database. Do not share one bridge database or
+its MCP endpoint across mutually untrusted tenants. A future repository ACL
+must be enforced consistently by both the dashboard read model and MCP; deriving
+access from incidental job authorship would not be a reliable security boundary.
+
 The dashboard MCP page shows both a public dashboard URL for token management
 and the public MCP endpoint URL. Behind a reverse proxy, set
 `GITHUB_AGENT_BRIDGE_DASHBOARD_PUBLIC_URL` to the external origin, for example

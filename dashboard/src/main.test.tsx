@@ -781,13 +781,13 @@ describe("MCP access page", () => {
     expect(screen.queryByText(/mcp-serve/)).not.toBeInTheDocument();
 
     await user.type(screen.getByLabelText("Token name"), "local agent");
-    await user.selectOptions(screen.getByLabelText("Owner"), "bob");
+    await user.selectOptions(screen.getByLabelText("Lifecycle owner"), "bob");
     await user.click(screen.getByRole("button", { name: "Create token" }));
 
     expect(onCreate).toHaveBeenCalledWith("local agent", "bob");
     expect(screen.getAllByText("@bob").length).toBeGreaterThan(0);
     expect(await screen.findByText("gab_mcp_secret")).toBeInTheDocument();
-    await user.selectOptions(screen.getAllByLabelText("Owner for local agent")[0], "admin");
+    await user.selectOptions(screen.getAllByLabelText("Lifecycle owner for local agent")[0], "admin");
     expect(onUpdateOwner).toHaveBeenCalledWith("token-1", "admin");
 
     await user.click(screen.getAllByRole("button", { name: "Revoke" })[0]);
@@ -841,8 +841,8 @@ describe("MCP access page", () => {
       />,
     );
 
-    expect(screen.getByText("Issue and revoke read-only tokens linked to your user.")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Owner")).not.toBeInTheDocument();
+    expect(screen.getByText("Issue and revoke globally readable knowledge tokens linked to your user.")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Lifecycle owner")).not.toBeInTheDocument();
 
     await user.type(screen.getByLabelText("Token name"), "reader agent");
     await user.click(screen.getByRole("button", { name: "Create token" }));

@@ -3070,7 +3070,7 @@ function McpPage({
   const mcpEndpointUrl = `${publicBaseUrl}/api/mcp`;
   return (
     <div className="grid min-w-0 gap-4">
-      <PageTitle icon={<KeyRound className="h-5 w-5 text-muted" aria-hidden />} title="MCP access" subtitle={user?.is_admin ? "Issue and revoke read-only tokens for any dashboard user." : "Issue and revoke read-only tokens linked to your user."} action={<RefreshButton onClick={onRefresh} />} />
+      <PageTitle icon={<KeyRound className="h-5 w-5 text-muted" aria-hidden />} title="MCP access" subtitle={user?.is_admin ? "Issue and revoke globally readable knowledge tokens for any dashboard user." : "Issue and revoke globally readable knowledge tokens linked to your user."} action={<RefreshButton onClick={onRefresh} />} />
       {error ? <Banner tone="error" text={error.message} /> : null}
       {actionError ? <Banner tone="error" text={actionError} /> : null}
       <McpSetupGuide dashboardUrl={mcpDashboardUrl} endpointUrl={mcpEndpointUrl} dashboardUrlSource={dashboardUrlSource ?? "request"} />
@@ -3113,9 +3113,9 @@ function McpPage({
             <input className="control" value={name} placeholder="local agent" disabled={creating} onChange={(event) => setName(event.target.value)} />
           </Field>
           {user?.is_admin ? (
-            <Field label="Owner">
+            <Field label="Lifecycle owner">
               <McpUserSelect
-                ariaLabel="Owner"
+                ariaLabel="Lifecycle owner"
                 value={userLogin}
                 ownerOptions={ownerOptions}
                 disabled={creating || ownerOptions.length === 0}
@@ -3123,7 +3123,7 @@ function McpPage({
                 emptyLabel="No known users"
                 onChange={setUserLogin}
               />
-              {selectedOwner ? <span className="font-normal text-muted">Token will be linked to @{selectedOwner.login}.</span> : null}
+              {selectedOwner ? <span className="font-normal text-muted">Token management will be linked to @{selectedOwner.login}; this does not restrict repository reads.</span> : null}
             </Field>
           ) : null}
           <button className="inline-flex h-9 items-center justify-center gap-2 self-end rounded-md bg-primary px-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60" type="submit" disabled={creating || !name.trim() || Boolean(user?.is_admin && !userLogin)}>
@@ -3270,7 +3270,7 @@ function McpTokenList({
             <div className="min-w-0">
               <h3 className="break-words text-sm font-semibold [overflow-wrap:anywhere]">{token.name}</h3>
               <div className="mt-1 break-all font-mono text-xs text-muted">{token.id}</div>
-              {canManageOwners ? <McpOwnerSelect token={token} ownerOptions={ownerOptions} disabled={updatingOwnerId === token.id} onUpdateOwner={onUpdateOwner} /> : token.user_login ? <div className="mt-1 text-xs text-muted">Owner: @{token.user_login}</div> : null}
+              {canManageOwners ? <McpOwnerSelect token={token} ownerOptions={ownerOptions} disabled={updatingOwnerId === token.id} onUpdateOwner={onUpdateOwner} /> : token.user_login ? <div className="mt-1 text-xs text-muted">Lifecycle owner: @{token.user_login}</div> : null}
             </div>
             <div className="grid grid-cols-2 gap-2 text-xs">
               <MiniStat label="Created" value={<TimeText value={token.created_at} relative now={now} />} />
@@ -3288,7 +3288,7 @@ function McpTokenList({
           <thead>
             <tr className="border-b border-border bg-slate-50 text-left text-xs text-muted">
               <th className="px-3 py-2 font-semibold">Name</th>
-              <th className="px-3 py-2 font-semibold">Owner</th>
+              <th className="px-3 py-2 font-semibold">Lifecycle owner</th>
               <th className="px-3 py-2 font-semibold">Created</th>
               <th className="px-3 py-2 font-semibold">Last used</th>
               <th className="px-3 py-2 font-semibold">ID</th>
@@ -3324,7 +3324,7 @@ function McpOwnerSelect({ token, ownerOptions, disabled, onUpdateOwner }: { toke
   const value = token.user_login ?? "";
   return (
     <McpUserSelect
-      ariaLabel={`Owner for ${token.name}`}
+      ariaLabel={`Lifecycle owner for ${token.name}`}
       value={value}
       ownerOptions={ownerOptions}
       disabled={disabled || ownerOptions.length === 0}
@@ -3460,6 +3460,13 @@ function UserMenu({ user, loading }: { user: UserProfile | undefined; loading: b
         <div className="text-xs text-slate-400">Signed in · {mode}</div>
       </div>
       {avatar}
+      {user?.login ? (
+        <form action="/auth/logout" method="post">
+          <button className="rounded-md border border-slate-700 px-2 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 hover:text-white" type="submit">
+            Sign out
+          </button>
+        </form>
+      ) : null}
     </div>
   );
 }
