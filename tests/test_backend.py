@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from github_agent_bridge import __version__
 from github_agent_bridge import feedback
-from github_agent_bridge.backend import DashboardConfig, _encode_session, _is_admin, _is_allowed, _journal_stream_events, _session_stream_events, _sign, create_app
+from github_agent_bridge.backend import DashboardConfig, _decode_session, _encode_session, _is_admin, _is_allowed, _journal_stream_events, _session_stream_events, _sign, _unsign, create_app
 from github_agent_bridge.dashboard_data import DashboardQueries, JOB_LIST_ORDER_SQL, get_job_detail, job_session, job_session_events, job_session_transcript, jobs_select_sql, list_all_job_actor_logins, list_job_actors, list_jobs, metrics_summary
 from github_agent_bridge.monitor import MonitorReport
 from github_agent_bridge.models import GitHubContext, Notification
@@ -198,7 +198,7 @@ def test_dashboard_executor_pause_is_visible_but_only_admin_can_change_it(tmp_pa
     db = tmp_path / "bridge.sqlite3"
     queue = JobQueue(db)
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice"}, admin_users={"admin"}))
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
 
     assert client.post("/api/executor/pause").status_code == 401
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Alice"})))
@@ -233,7 +233,7 @@ def test_dashboard_autoupdate_refresh_requires_admin_and_records_plan(tmp_path, 
     db = tmp_path / "bridge.sqlite3"
     JobQueue(db)
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice"}, admin_users={"alice"}))
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
     plan = {
         "installed_version": "0.27.0",
         "installed_tag": "v0.27.0",
@@ -583,7 +583,7 @@ def test_dashboard_job_owner_can_cancel_running_job(tmp_path, monkeypatch):
     claimed = q.claim_next("worker")
     assert claimed is not None
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"ecarreras"}))
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "ecarreras"})))
 
     def fake_cancel(queue, job_id, *, actor, reason):
@@ -610,7 +610,7 @@ def test_dashboard_cancel_rejects_non_owner_reader(tmp_path, monkeypatch):
     job, _ = q.enqueue(notif(from_addr="ecarreras <notifications@github.com>"), Policy(trusted_orgs=["gisce"]))
     q.claim_next("worker")
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"marc"}))
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "marc"})))
     monkeypatch.setattr("github_agent_bridge.backend.cancel_running_job", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not cancel")))
 
@@ -1324,7 +1324,7 @@ def test_dashboard_requires_auth_by_default(tmp_path):
     assert response.status_code == 401
 
 
-def test_dashboard_session_authorization_allows_configured_user(tmp_path):
+def test_dashboard_rejects_legacy_session_without_expiry(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     static_dir = tmp_path / "static"
     static_dir.mkdir()
@@ -1335,11 +1335,13 @@ def test_dashboard_session_authorization_allows_configured_user(tmp_path):
     client = TestClient(app)
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, "alice"))
 
-    assert client.get("/api/jobs").status_code == 200
-    assert client.get("/").status_code == 200
+    response = client.get("/api/jobs")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "session_invalid_or_expired"
 
 
-def test_dashboard_me_backfills_legacy_session_avatar(tmp_path):
+def test_dashboard_me_rejects_legacy_session_payload(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     JobQueue(db)
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice"}))
@@ -1348,13 +1350,8 @@ def test_dashboard_me_backfills_legacy_session_avatar(tmp_path):
 
     response = client.get("/api/me")
 
-    assert response.status_code == 200
-    assert response.json()["user"] == {
-        "login": "alice",
-        "avatar_url": "https://github.com/alice.png?size=80",
-        "html_url": "https://github.com/alice",
-        "is_admin": False,
-    }
+    assert response.status_code == 401
+    assert response.json()["detail"] == "session_invalid_or_expired"
 
 
 def test_dashboard_me_exposes_safe_oauth_profile(tmp_path):
@@ -1397,6 +1394,173 @@ def test_dashboard_me_exposes_admin_mode_from_signed_session(tmp_path):
     assert response.json()["user"]["is_admin"] is True
 
 
+def test_dashboard_session_has_absolute_expiry_and_version():
+    issued_at = datetime(2026, 11, 7, 10, 0, tzinfo=UTC)
+    encoded = _encode_session(
+        {"login": "alice"},
+        issued_at=issued_at,
+        max_age_seconds=300,
+        session_version=4,
+    )
+
+    active = _decode_session(
+        encoded,
+        now=issued_at + timedelta(seconds=299),
+        session_version=4,
+    )
+    expired = _decode_session(
+        encoded,
+        now=issued_at + timedelta(seconds=300),
+        session_version=4,
+    )
+
+    assert active is not None
+    assert active["login"] == "alice"
+    assert expired is None
+    assert _decode_session(encoded, now=issued_at, session_version=5) is None
+
+
+def test_dashboard_rechecks_user_allowlist_on_every_request(tmp_path):
+    allowed_users = {"alice"}
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        secret_key="secret",
+        allowed_users=allowed_users,
+    )
+    JobQueue(config.db)
+    client = TestClient(create_app(config))
+    client.cookies.set(
+        "gab_dashboard_session",
+        _sign(config, _encode_session({"login": "alice"})),
+    )
+
+    assert client.get("/api/me").status_code == 200
+    allowed_users.clear()
+    config.allowed_orgs.add("different-org")
+
+    response = client.get("/api/me")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "not_authorized"
+
+
+def test_dashboard_rechecks_admin_allowlist_on_every_request(tmp_path):
+    admin_users = {"alice"}
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        secret_key="secret",
+        allowed_users={"alice"},
+        admin_users=admin_users,
+    )
+    JobQueue(config.db)
+    client = TestClient(create_app(config))
+    client.cookies.set(
+        "gab_dashboard_session",
+        _sign(config, _encode_session({"login": "alice"}, is_admin=True)),
+    )
+
+    assert client.get("/api/me").json()["user"]["is_admin"] is True
+    admin_users.clear()
+
+    response = client.get("/api/me")
+
+    assert response.status_code == 200
+    assert response.json()["user"]["is_admin"] is False
+
+
+def test_dashboard_key_rotation_invalidates_existing_session(tmp_path):
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        secret_key="old-secret",
+        allowed_users={"alice"},
+    )
+    JobQueue(config.db)
+    client = TestClient(create_app(config))
+    client.cookies.set(
+        "gab_dashboard_session",
+        _sign(config, _encode_session({"login": "alice"})),
+    )
+    config.secret_key = "new-secret"
+
+    response = client.get("/api/me")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "session_invalid_or_expired"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("POST", "/api/executor/pause", None),
+        ("POST", "/api/autoupdate/refresh", None),
+        ("POST", "/api/web-push/subscriptions", {}),
+        ("POST", "/api/jobs/999/cancel", {"reason": "cross-origin"}),
+        ("POST", "/api/knowledge/proposals/missing/approve", None),
+        ("PATCH", "/api/knowledge/rules/missing", {"scope": "global"}),
+        ("DELETE", "/api/knowledge/rules/missing", None),
+        ("POST", "/api/mcp/tokens", {"name": "cross-origin"}),
+        ("POST", "/api/webhooks/github/hooks/42/ping", None),
+        ("POST", "/auth/logout", None),
+    ],
+)
+def test_dashboard_cookie_mutations_require_same_origin(tmp_path, method, path, payload):
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        secret_key="secret",
+        allowed_users={"alice"},
+        admin_users={"alice"},
+    )
+    JobQueue(config.db)
+    client = TestClient(create_app(config))
+    client.cookies.set(
+        "gab_dashboard_session",
+        _sign(config, _encode_session({"login": "alice"}, is_admin=True)),
+    )
+
+    missing = client.request(method, path, json=payload)
+    cross_origin = client.request(
+        method,
+        path,
+        json=payload,
+        headers={"origin": "https://untrusted.example"},
+    )
+
+    assert missing.status_code == 403
+    assert missing.json()["detail"] == "csrf_origin_required"
+    assert cross_origin.status_code == 403
+    assert cross_origin.json()["detail"] == "csrf_origin_mismatch"
+
+
+def test_dashboard_same_origin_referer_allows_cookie_mutation_and_logout(tmp_path):
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        secret_key="secret",
+        allowed_users={"alice"},
+    )
+    JobQueue(config.db)
+    client = TestClient(create_app(config), follow_redirects=False)
+    client.cookies.set(
+        "gab_dashboard_session",
+        _sign(config, _encode_session({"login": "alice"})),
+    )
+
+    created = client.post(
+        "/api/mcp/tokens",
+        json={"name": "same-origin"},
+        headers={"referer": "http://testserver/mcp"},
+    )
+    logged_out = client.post(
+        "/auth/logout",
+        headers={"origin": "http://testserver"},
+    )
+
+    assert created.status_code == 200
+    assert logged_out.status_code == 303
+    assert logged_out.headers["location"] == "/auth/login"
+    assert "gab_dashboard_session=\"\"" in logged_out.headers["set-cookie"]
+    assert "Max-Age=0" in logged_out.headers["set-cookie"]
+
+
 def test_dashboard_knowledge_lists_and_admin_moderates_feedback(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     JobQueue(db)
@@ -1424,7 +1588,7 @@ def test_dashboard_knowledge_lists_and_admin_moderates_feedback(tmp_path):
         auto_approve_confidence=0.9,
     )
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice"}, admin_users={"alice"}))
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Alice"})))
 
     listing = client.get("/api/knowledge", params={"repo": "gisce/erp"}).json()
@@ -1507,7 +1671,7 @@ def test_dashboard_admin_can_change_knowledge_rule_scope(tmp_path):
     JobQueue(db)
     rule = feedback.add_rule(db, "repo:gisce/erp", "operating_rule", "Keep knowledge management auditable.", 0.8)
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice"}, admin_users={"alice"}))
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Alice"})))
 
     forbidden = client.patch(f"/api/knowledge/rules/{rule['id']}", json={"scope": "global"})
@@ -1586,7 +1750,7 @@ def test_dashboard_user_can_manage_only_owned_knowledge_rules(tmp_path):
     alice_rule = feedback.add_rule(db, "repo:gisce/erp", "operating_rule", "Alice owned rule.", 0.8, [alice_event["id"]])
     bob_rule = feedback.add_rule(db, "repo:gisce/erp", "operating_rule", "Bob owned rule.", 0.8, [bob_event["id"]])
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice"}, admin_users={"admin"}))
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Alice"})))
 
     updated = client.patch(f"/api/knowledge/rules/{alice_rule['id']}", json={"scope": "org:gisce"})
@@ -1613,7 +1777,7 @@ def test_dashboard_admin_manages_mcp_tokens(tmp_path):
         con.execute("UPDATE jobs SET trigger_actor=?, trigger_actor_avatar_url=? WHERE id=1", ("pilipilisbot", "https://github.com/pilipilisbot.png?size=80"))
     legacy = create_token(db, "legacy agent")
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice", "bob"}, admin_users={"alice"}))
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Alice"})))
 
     reader_created = client.post("/api/mcp/tokens", json={"name": "reader agent"})
@@ -1675,7 +1839,7 @@ def test_dashboard_user_manages_only_own_mcp_tokens(tmp_path):
     alice = create_token(db, "alice agent", user_login="alice")
     bob = create_token(db, "bob agent", user_login="bob")
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice", "bob"}, admin_users={"admin"}))
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Alice"})))
 
     listed = client.get("/api/mcp/tokens")
@@ -1694,7 +1858,7 @@ def test_http_mcp_uses_bearer_tokens_and_shared_server(tmp_path):
     JobQueue(db)
     feedback.add_rule(db, "repo:gisce/erp", "technical_criterion", "Prefer the HTTP MCP endpoint for remote agents.", 0.9)
     token = create_token(db, "remote agent")["token"]
-    app = create_app(DashboardConfig(db=db, require_auth=False))
+    app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice"}))
     client = TestClient(app)
 
     missing = client.post("/api/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
@@ -1721,13 +1885,54 @@ def test_http_mcp_uses_bearer_tokens_and_shared_server(tmp_path):
     assert knowledge["rules"][0]["rule"] == "Prefer the HTTP MCP endpoint for remote agents."
 
 
+def test_http_mcp_lifecycle_owners_share_global_repository_knowledge(tmp_path):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    feedback.add_rule(db, "repo:gisce/erp", "technical_criterion", "ERP rule.", 0.9)
+    feedback.add_rule(db, "repo:other/project", "technical_criterion", "Other rule.", 0.9)
+    alice_token = create_token(db, "alice agent", user_login="alice")["token"]
+    bob_token = create_token(db, "bob agent", user_login="bob")["token"]
+    client = TestClient(create_app(DashboardConfig(db=db, secret_key="secret")))
+
+    for token in (alice_token, bob_token):
+        repositories_response = client.post(
+            "/api/mcp",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "list_repositories", "arguments": {}},
+            },
+        )
+        knowledge_response = client.post(
+            "/api/mcp",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "resources/read",
+                "params": {"uri": "gab://knowledge/other/project"},
+            },
+        )
+
+        repositories = json.loads(
+            repositories_response.json()["result"]["content"][0]["text"]
+        )
+        knowledge = json.loads(
+            knowledge_response.json()["result"]["contents"][0]["text"]
+        )
+        assert repositories["repositories"] == ["gisce/erp", "other/project"]
+        assert knowledge["rules"][0]["rule"] == "Other rule."
+
+
 def test_dashboard_retry_requires_admin_and_requeues_retryable_job(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     q = JobQueue(db)
     job, _ = q.enqueue(notif(), Policy(trusted_orgs=["gisce"]))
     q.finish(job.id, "blocked", "failed", "boom")
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice"}, admin_users={"alice"}))
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Alice"})))
 
     forbidden = client.post(f"/api/jobs/{job.id}/retry")
@@ -1747,7 +1952,7 @@ def test_dashboard_retry_rejects_non_retryable_jobs(tmp_path):
     q = JobQueue(db)
     job, _ = q.enqueue(notif(), Policy(trusted_orgs=["gisce"]))
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice"}, admin_users={"alice"}))
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Alice"}, is_admin=True)))
 
     response = client.post(f"/api/jobs/{job.id}/retry")
@@ -1764,7 +1969,7 @@ def test_dashboard_retry_cannot_override_policy_decision(tmp_path, decision, sta
     with q.connect() as con:
         con.execute("UPDATE jobs SET decision=?, status=? WHERE id=?", (decision, status, job.id))
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice"}, admin_users={"alice"}))
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Alice"}, is_admin=True)))
 
     response = client.post(f"/api/jobs/{job.id}/retry")
@@ -1780,7 +1985,7 @@ def test_dashboard_dismiss_requires_admin_and_marks_recoverable_job_done(tmp_pat
     job, _ = q.enqueue(notif(), Policy(trusted_orgs=["gisce"]))
     q.finish(job.id, "blocked", "failed", "boom")
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice"}, admin_users={"alice"}))
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Alice"})))
 
     forbidden = client.post(f"/api/jobs/{job.id}/dismiss")
@@ -1801,7 +2006,7 @@ def test_dashboard_dismiss_rejects_non_recoverable_jobs(tmp_path):
     q = JobQueue(db)
     job, _ = q.enqueue(notif(), Policy(trusted_orgs=["gisce"]))
     app = create_app(DashboardConfig(db=db, secret_key="secret", allowed_users={"alice"}, admin_users={"alice"}))
-    client = TestClient(app)
+    client = TestClient(app, headers={"origin": "http://testserver"})
     client.cookies.set("gab_dashboard_session", _sign(app.state.dashboard_config, _encode_session({"login": "Alice"}, is_admin=True)))
 
     response = client.post(f"/api/jobs/{job.id}/dismiss")
@@ -1889,6 +2094,48 @@ def test_dashboard_oauth_login_requests_org_scope_for_admin_team(tmp_path):
     assert response.status_code == 302
     query = parse_qs(urlparse(response.headers["location"]).query)
     assert query["scope"] == ["read:user read:org"]
+
+
+def test_dashboard_oauth_callback_sets_bounded_session_with_memberships(tmp_path, monkeypatch):
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        secret_key="secret",
+        oauth_client_id="client-id",
+        oauth_client_secret="client-secret",
+        allowed_teams={"example/platform"},
+        admin_teams={"example/platform"},
+        session_max_age_seconds=600,
+        session_version=3,
+    )
+    JobQueue(config.db)
+    app = create_app(config)
+    client = TestClient(app, follow_redirects=False)
+    client.cookies.set("gab_dashboard_oauth_state", _sign(config, "state"))
+    monkeypatch.setattr("github_agent_bridge.backend._exchange_code", lambda cfg, code: "token")
+
+    def fake_github_json(url, token):
+        assert token == "token"
+        if url.endswith("/user/teams"):
+            return [{"slug": "platform", "organization": {"login": "Example"}}]
+        if url.endswith("/user"):
+            return {"login": "Alice"}
+        raise AssertionError(url)
+
+    monkeypatch.setattr("github_agent_bridge.backend._github_json", fake_github_json)
+
+    response = client.get("/auth/callback", params={"code": "code", "state": "state"})
+    signed_session = response.cookies.get("gab_dashboard_session")
+    decoded = _decode_session(
+        _unsign(config, signed_session),
+        session_version=config.session_version,
+    )
+
+    assert response.status_code == 302
+    assert "Max-Age=600" in response.headers["set-cookie"]
+    assert decoded is not None
+    assert decoded["login"] == "alice"
+    assert decoded["is_admin"] is True
+    assert decoded["authorized_teams"] == {"example/platform"}
 
 
 def test_dashboard_session_authorization_allows_configured_team(monkeypatch):
