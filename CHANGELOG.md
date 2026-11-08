@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.88.2 (2026-11-08)
+
+### Bug Fixes
+
+- **security**: Harden dashboard and webhook boundaries
+  ([`f02e243`](https://github.com/gisce/github-agent-bridge/commit/f02e243c7a1daa934e9f7af4b34f1cc1052fff02))
+
+
 ## v0.88.1 (2026-11-02)
 
 ### Bug Fixes
