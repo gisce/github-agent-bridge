@@ -25,9 +25,11 @@ import {
   WebPushControl,
   WebhookHookDetailPage,
   WebhookPage,
+  api,
   buildJobQuery,
   buildKnowledgeQuery,
   changelogMarkdown,
+  createUnauthorizedHandler,
   formatRuntimeUsageSeconds,
   groupSessionEvents,
   groupTranscriptEntries,
@@ -133,6 +135,30 @@ function sampleSloMetrics() {
 }
 
 describe("dashboard routing and API query helpers", () => {
+  it("starts only one OAuth login when concurrent API requests find an expired session", async () => {
+    const redirectToLogin = vi.fn();
+    const handleUnauthorized = createUnauthorizedHandler(redirectToLogin);
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, {
+      status: 401,
+      statusText: "Unauthorized",
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const results = await Promise.allSettled([
+      api("/api/me", undefined, handleUnauthorized),
+      api("/api/status", undefined, handleUnauthorized),
+    ]);
+
+    expect(redirectToLogin).toHaveBeenCalledOnce();
+    expect(redirectToLogin).toHaveBeenCalledWith("/auth/login");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(results).toEqual([
+      expect.objectContaining({ status: "rejected", reason: expect.objectContaining({ message: "401 Unauthorized" }) }),
+      expect.objectContaining({ status: "rejected", reason: expect.objectContaining({ message: "401 Unauthorized" }) }),
+    ]);
+    vi.unstubAllGlobals();
+  });
+
   it("builds trimmed job queries and preserves the requested limit", () => {
     expect(
       buildJobQuery(
