@@ -2,6 +2,17 @@
 
 <!-- version list -->
 
+## v0.88.3 (2026-11-11)
+
+### Bug Fixes
+
+- Reauthenticate expired dashboard sessions
+  ([`00bd7c6`](https://github.com/gisce/github-agent-bridge/commit/00bd7c688b61ba599da5fd3b5b2a73f6c58a50b3))
+
+- Serialize expired-session redirects
+  ([`3693320`](https://github.com/gisce/github-agent-bridge/commit/3693320f46c02de3f01ac6446768b5faa0dac8c7))
+
+
 ## v0.88.2 (2026-11-08)
 
 ### Bug Fixes
