@@ -25,6 +25,7 @@ import {
   WebPushControl,
   WebhookHookDetailPage,
   WebhookPage,
+  api,
   buildJobQuery,
   buildKnowledgeQuery,
   changelogMarkdown,
@@ -133,6 +134,22 @@ function sampleSloMetrics() {
 }
 
 describe("dashboard routing and API query helpers", () => {
+  it("starts a fresh OAuth login when an API request finds an expired session", async () => {
+    const redirectToLogin = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, {
+      status: 401,
+      statusText: "Unauthorized",
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api("/api/me", undefined, redirectToLogin)).rejects.toThrow("401 Unauthorized");
+
+    expect(redirectToLogin).toHaveBeenCalledOnce();
+    expect(redirectToLogin).toHaveBeenCalledWith("/auth/login");
+    expect(fetchMock).toHaveBeenCalledOnce();
+    vi.unstubAllGlobals();
+  });
+
   it("builds trimmed job queries and preserves the requested limit", () => {
     expect(
       buildJobQuery(

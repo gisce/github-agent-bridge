@@ -763,10 +763,17 @@ function cn(...values: Array<string | false | null | undefined>) {
   return twMerge(clsx(values));
 }
 
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
+function redirectToLogin(path: string) {
+  window.location.replace(path);
+}
+
+async function api<T>(path: string, init?: RequestInit, onUnauthorized = redirectToLogin): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set("Accept", "application/json");
   const response = await fetch(path, { ...init, headers });
+  if (response.status === 401) {
+    onUnauthorized("/auth/login");
+  }
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
   }
@@ -5541,6 +5548,7 @@ export {
   webhookTimeseriesPath,
   WebhookPage,
   WebhookHookDetailPage,
+  api,
 };
 
 const root = document.getElementById("root");
