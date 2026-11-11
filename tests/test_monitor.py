@@ -59,11 +59,12 @@ def test_monitor_ok_on_empty_initialized_db(tmp_path):
 def test_monitor_alerts_before_database_filesystem_is_exhausted(tmp_path, monkeypatch):
     db = tmp_path / "bridge.sqlite3"
     JobQueue(db)
-    monkeypatch.setattr(
-        monitor_module.shutil,
-        "disk_usage",
-        lambda path: SimpleNamespace(total=1000, used=950, free=50),
-    )
+
+    def disk_usage(path):
+        assert path == db.parent.resolve()
+        return SimpleNamespace(total=1000, used=950, free=50)
+
+    monkeypatch.setattr(monitor_module.shutil, "disk_usage", disk_usage)
 
     report = monitor(
         db,
