@@ -1152,6 +1152,29 @@ def test_heartbeat_loop_does_not_hide_non_contention_database_errors(tmp_path, m
         pool._heartbeat_loop("worker-test")
 
 
+def test_run_stops_when_heartbeat_hits_fatal_storage_error(tmp_path, monkeypatch):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    pool = ExecutorPool(
+        queue,
+        Policy(),
+        RecordingDispatcher(),
+        config=ExecutorConfig(run_once=True),
+    )
+
+    def fail_heartbeat(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(queue, "record_worker_heartbeat", fail_heartbeat)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"executor worker terminated unexpectedly: .*/heartbeat: OperationalError: disk I/O error",
+    ):
+        pool.run()
+
+    assert pool.stop_event.is_set() is True
+
+
 def test_acknowledgement_loop_does_not_hide_non_contention_database_errors(tmp_path, monkeypatch):
     queue = JobQueue(tmp_path / "bridge.sqlite3")
     pool = ExecutorPool(queue, Policy(), RecordingDispatcher())
