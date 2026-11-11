@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -25,6 +26,7 @@ from .process_inspection import direct_children, process_identity_matches
 ALERT_RELEASE_AVAILABLE = "monitor.release_available"
 ALERT_DATABASE_MISSING = "monitor.database_missing"
 ALERT_SCHEMA_MISSING = "monitor.schema_missing"
+ALERT_DATABASE_DISK_SPACE_LOW = "monitor.database_disk_space_low"
 ALERT_BLOCKED_JOBS = "monitor.blocked_jobs"
 ALERT_PENDING_QUEUE_OLD = "monitor.pending_queue_old"
 ALERT_EXECUTOR_SERVICE = "monitor.executor_service"
@@ -56,6 +58,7 @@ SLO_THRESHOLD_FIELDS = (
 
 @dataclass(frozen=True)
 class MonitorThresholds:
+    database_free_warn_bytes: int = 1024**3
     pending_warn_seconds: int = 300
     review_running_warn_seconds: int = 1200
     work_running_warn_seconds: int = 4200
@@ -74,6 +77,8 @@ class MonitorThresholds:
     slo_retry_rate_percent: float | None = None
 
     def __post_init__(self) -> None:
+        if self.database_free_warn_bytes < 0:
+            raise ValueError("database_free_warn_bytes must be non-negative")
         if self.slo_window not in SLO_WINDOWS:
             raise ValueError(f"unsupported SLO window {self.slo_window!r}")
         if self.slo_min_samples < 1:
@@ -229,6 +234,13 @@ def inspect_db(path: str | Path) -> dict[str, Any]:
     return DashboardQueries(path).status()
 
 
+def _database_filesystem_path(path: str | Path) -> Path:
+    candidate = Path(path).expanduser().parent
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    return candidate
+
+
 def _package_version() -> str:
     try:
         return metadata.version("github-agent-bridge")
@@ -312,8 +324,27 @@ def monitor(
     process_sample_retention_seconds: int = DEFAULT_PROCESS_SAMPLE_RETENTION_SECONDS,
 ) -> MonitorReport:
     thresholds = thresholds or MonitorThresholds()
-    metrics = inspect_db(db)
+    disk_usage = shutil.disk_usage(_database_filesystem_path(db))
+    metrics = {
+        "database_filesystem_total_bytes": disk_usage.total,
+        "database_filesystem_used_bytes": disk_usage.used,
+        "database_filesystem_free_bytes": disk_usage.free,
+    }
+    metrics.update(inspect_db(db))
     alerts: list[str] = []
+    database_space_low = disk_usage.free < thresholds.database_free_warn_bytes
+    if database_space_low:
+        _add_alert(
+            metrics,
+            alerts,
+            ALERT_DATABASE_DISK_SPACE_LOW,
+            "database filesystem free space "
+            f"{disk_usage.free} bytes < {thresholds.database_free_warn_bytes} bytes",
+            context={
+                "free_bytes": disk_usage.free,
+                "warn_bytes": thresholds.database_free_warn_bytes,
+            },
+        )
     package_version = _package_version()
     release_repo = os.getenv("GITHUB_AGENT_BRIDGE_RELEASE_REPO", "").strip()
     metrics["package_version"] = package_version
@@ -523,7 +554,12 @@ def monitor(
             "metrics": {},
         }
 
-    if persist_observability and metrics.get("db_exists") and metrics.get("schema_ok", True):
+    if (
+        persist_observability
+        and metrics.get("db_exists")
+        and metrics.get("schema_ok", True)
+        and not database_space_low
+    ):
         record_monitor_observation(
             db,
             metrics,
@@ -531,6 +567,8 @@ def monitor(
             process_sample_retention_seconds=process_sample_retention_seconds,
             monitor_slo_state=slo_state_update,
         )
+    elif persist_observability and database_space_low:
+        metrics["observability_persistence_skipped"] = "low_database_disk_space"
 
     return MonitorReport(ok=not alerts, alerts=alerts, metrics=metrics)
 

@@ -166,6 +166,7 @@ The monitor exits:
 
 It checks:
 
+- database filesystem free space (1 GiB warning threshold by default);
 - executor service active;
 - reader timer active;
 - last reader service result;
@@ -173,6 +174,12 @@ It checks:
 - pending jobs older than 300 seconds;
 - running jobs older than review/work thresholds;
 - configured SLO thresholds after a minimum sample count and sustained breach.
+
+Override the storage threshold with
+`GITHUB_AGENT_BRIDGE_DATABASE_FREE_WARN_BYTES` or
+`gab monitor --database-free-warn-bytes`; set it to `0` to disable the alert.
+When the threshold is breached, the monitor skips its own observability write so
+it does not consume the remaining SQLite filesystem capacity.
 
 By default the monitor command also writes bounded observability rows to the
 bridge database:

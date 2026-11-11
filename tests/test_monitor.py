@@ -10,6 +10,19 @@ from github_agent_bridge.policy import Policy
 from github_agent_bridge.queue import JobQueue
 
 
+@pytest.fixture(autouse=True)
+def healthy_database_filesystem(monkeypatch):
+    monkeypatch.setattr(
+        monitor_module.shutil,
+        "disk_usage",
+        lambda path: type(
+            "DiskUsage",
+            (),
+            {"total": 20 * 1024**3, "used": 10 * 1024**3, "free": 10 * 1024**3},
+        )(),
+    )
+
+
 def notif(uid=1, mid="<1@github.com>", body="@pilipilisbot https://github.com/gisce/erp/pull/1#issuecomment-10"):
     return Notification(uid=uid, message_id=mid, subject="Re: [gisce/erp] PR", from_addr="ecarreras <notifications@github.com>", body=body, auth={"spf": True, "dkim": True, "dmarc": True})
 
@@ -53,6 +66,38 @@ def test_monitor_ok_on_empty_initialized_db(tmp_path):
     report = monitor(db, check_systemd=False)
     assert report.ok is True
     assert "pending=0" in report.text()
+
+
+def test_monitor_alerts_before_database_filesystem_is_exhausted(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    monkeypatch.setattr(
+        monitor_module.shutil,
+        "disk_usage",
+        lambda path: type(
+            "DiskUsage",
+            (),
+            {"total": 10 * 1024**3, "used": 10 * 1024**3 - 512, "free": 512},
+        )(),
+    )
+
+    report = monitor(
+        db,
+        thresholds=MonitorThresholds(database_free_warn_bytes=1024),
+        check_systemd=False,
+        persist_observability=True,
+    )
+
+    assert report.ok is False
+    assert report.metrics["database_filesystem_free_bytes"] == 512
+    assert report.metrics["observability_persistence_skipped"] == "low_database_disk_space"
+    assert report.metrics["alert_codes"] == ["monitor.database_disk_space_low"]
+    assert "database filesystem free space 512 bytes < 1024 bytes" in report.alerts
+
+
+def test_monitor_thresholds_reject_negative_database_free_space():
+    with pytest.raises(ValueError, match="database_free_warn_bytes must be non-negative"):
+        MonitorThresholds(database_free_warn_bytes=-1)
 
 
 def test_monitor_alerts_when_github_release_is_newer(tmp_path, monkeypatch):

@@ -141,6 +141,25 @@ def test_alert_config_passes_slo_thresholds_from_environment(tmp_path, monkeypat
     assert args[args.index("--slo-retry-rate-percent") + 1] == "12.5"
 
 
+def test_alert_config_passes_database_free_space_threshold(tmp_path, monkeypatch):
+    config = monitor_alert.AlertConfig.from_env({
+        "GITHUB_AGENT_BRIDGE_STATE_DIR": str(tmp_path),
+        "GITHUB_AGENT_BRIDGE_DATABASE_FREE_WARN_BYTES": "2147483648",
+    })
+    calls = []
+    monkeypatch.setattr(
+        monitor_alert,
+        "_run",
+        lambda args, check=False: calls.append(args) or type("Proc", (), {"stdout": "", "returncode": 0})(),
+    )
+
+    monitor_alert.run_monitor(config)
+
+    args = calls[0]
+    assert config.database_free_warn_bytes == 2147483648
+    assert args[args.index("--database-free-warn-bytes") + 1] == "2147483648"
+
+
 def test_load_state_accepts_legacy_shell_format(tmp_path):
     state_file = tmp_path / "monitor-alert.state"
     state_file.write_text("LAST_HASH='abc'\nLAST_TS=123\n", encoding="utf-8")

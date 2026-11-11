@@ -392,6 +392,7 @@ def cmd_backfill_trigger_actors(args: argparse.Namespace) -> int:
 
 def cmd_monitor(args: argparse.Namespace) -> int:
     thresholds = MonitorThresholds(
+        database_free_warn_bytes=args.database_free_warn_bytes,
         pending_warn_seconds=args.pending_warn_seconds,
         review_running_warn_seconds=args.review_running_warn_seconds,
         work_running_warn_seconds=args.work_running_warn_seconds,
@@ -660,6 +661,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--executor-unit", default="github-agent-bridge.service")
     s.add_argument("--reader-timer-unit", default="github-agent-bridge-reader.timer")
     s.add_argument("--reader-service-unit", default="github-agent-bridge-reader.service")
+    s.add_argument(
+        "--database-free-warn-bytes",
+        type=int,
+        default=int(os.getenv("GITHUB_AGENT_BRIDGE_DATABASE_FREE_WARN_BYTES", str(1024**3))),
+    )
     s.add_argument("--pending-warn-seconds", type=int, default=300)
     s.add_argument("--review-running-warn-seconds", type=int, default=1200)
     s.add_argument("--work-running-warn-seconds", type=int, default=4200)
