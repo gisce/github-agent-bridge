@@ -26,7 +26,13 @@ from .dashboard_data import DashboardQueries, JobListFilters
 from .dispatch import FEEDBACK_LEARNING_RULES, GitHubClient, OpenClawDispatcher, RunMode, prompt_rule
 from .executor import ExecutorConfig, ExecutorPool
 from .models import Notification, utc_now
-from .monitor import MonitorThresholds, monitor, report_json
+from .monitor import (
+    DEFAULT_DATABASE_FREE_WARN_BYTES,
+    DEFAULT_DATABASE_FREE_WARN_PERCENT,
+    MonitorThresholds,
+    monitor,
+    report_json,
+)
 from .mcp import authenticate_token, create_token, list_tokens, revoke_token, serve_stdio
 from .observability import DEFAULT_PROCESS_SAMPLE_RETENTION_SECONDS, configure_sentry
 from .parser import decode_header_value, extract_body_text, is_github_notification_message, parse_auth_results
@@ -396,6 +402,8 @@ def cmd_monitor(args: argparse.Namespace) -> int:
         review_running_warn_seconds=args.review_running_warn_seconds,
         work_running_warn_seconds=args.work_running_warn_seconds,
         progress_warn_seconds=args.progress_warn_seconds,
+        database_free_warn_bytes=args.database_free_warn_bytes,
+        database_free_warn_percent=args.database_free_warn_percent,
         slo_window=args.slo_window,
         slo_min_samples=args.slo_min_samples,
         slo_breach_observations=args.slo_breach_observations,
@@ -664,6 +672,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--review-running-warn-seconds", type=int, default=1200)
     s.add_argument("--work-running-warn-seconds", type=int, default=4200)
     s.add_argument("--progress-warn-seconds", type=int, default=600)
+    s.add_argument("--database-free-warn-bytes", type=int, default=DEFAULT_DATABASE_FREE_WARN_BYTES)
+    s.add_argument("--database-free-warn-percent", type=float, default=DEFAULT_DATABASE_FREE_WARN_PERCENT)
     s.add_argument("--slo-window", choices=("24h", "7d", "30d"), default="7d")
     s.add_argument("--slo-min-samples", type=int, default=20)
     s.add_argument("--slo-breach-observations", type=int, default=3)

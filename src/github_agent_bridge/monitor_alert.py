@@ -12,7 +12,12 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .monitor import ALERT_RUNNING_NO_EXECUTOR_CHILD, ALERT_RUNNING_PROCESS_MISMATCH
+from .monitor import (
+    ALERT_RUNNING_NO_EXECUTOR_CHILD,
+    ALERT_RUNNING_PROCESS_MISMATCH,
+    DEFAULT_DATABASE_FREE_WARN_BYTES,
+    DEFAULT_DATABASE_FREE_WARN_PERCENT,
+)
 from .observability import configure_sentry
 
 
@@ -40,6 +45,8 @@ class AlertConfig:
     kill_stale_children: bool
     terminate_grace_seconds: int
     proc_idle_seconds: int
+    database_free_warn_bytes: int = DEFAULT_DATABASE_FREE_WARN_BYTES
+    database_free_warn_percent: float = DEFAULT_DATABASE_FREE_WARN_PERCENT
     executor_unit: str = "github-agent-bridge.service"
     slo_window: str = "7d"
     slo_min_samples: int = 20
@@ -84,6 +91,12 @@ class AlertConfig:
             kill_stale_children=_parse_bool(values.get("GITHUB_AGENT_BRIDGE_KILL_STALE_CHILDREN", "")),
             terminate_grace_seconds=int(values.get("GITHUB_AGENT_BRIDGE_TERMINATE_GRACE_SECONDS", "5")),
             proc_idle_seconds=int(values.get("GITHUB_AGENT_BRIDGE_PROC_IDLE_SECONDS", "240")),
+            database_free_warn_bytes=int(
+                values.get("GITHUB_AGENT_BRIDGE_DATABASE_FREE_WARN_BYTES", str(DEFAULT_DATABASE_FREE_WARN_BYTES))
+            ),
+            database_free_warn_percent=float(
+                values.get("GITHUB_AGENT_BRIDGE_DATABASE_FREE_WARN_PERCENT", str(DEFAULT_DATABASE_FREE_WARN_PERCENT))
+            ),
             executor_unit=values.get("GITHUB_AGENT_BRIDGE_EXECUTOR_UNIT", "github-agent-bridge.service"),
             slo_window=values.get("GITHUB_AGENT_BRIDGE_SLO_WINDOW", "7d"),
             slo_min_samples=int(values.get("GITHUB_AGENT_BRIDGE_SLO_MIN_SAMPLES", "20")),
@@ -154,6 +167,10 @@ def run_monitor(config: AlertConfig) -> subprocess.CompletedProcess[str]:
         str(config.work_running_warn_seconds),
         "--progress-warn-seconds",
         str(config.progress_warn_seconds),
+        "--database-free-warn-bytes",
+        str(config.database_free_warn_bytes),
+        "--database-free-warn-percent",
+        str(config.database_free_warn_percent),
         "--executor-unit",
         config.executor_unit,
         "--slo-window",

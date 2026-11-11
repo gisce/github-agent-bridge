@@ -1,4 +1,5 @@
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -53,6 +54,85 @@ def test_monitor_ok_on_empty_initialized_db(tmp_path):
     report = monitor(db, check_systemd=False)
     assert report.ok is True
     assert "pending=0" in report.text()
+
+
+def test_monitor_alerts_before_database_filesystem_is_exhausted(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+
+    def disk_usage(path):
+        assert path == db.parent.resolve()
+        return SimpleNamespace(total=1000, used=950, free=50)
+
+    monkeypatch.setattr(monitor_module.shutil, "disk_usage", disk_usage)
+
+    report = monitor(
+        db,
+        thresholds=MonitorThresholds(
+            database_free_warn_bytes=100,
+            database_free_warn_percent=10,
+        ),
+        check_systemd=False,
+    )
+
+    assert report.ok is False
+    assert report.metrics["database_filesystem"]["available_bytes"] == 50
+    assert report.metrics["database_filesystem"]["available_percent"] == 5
+    assert report.metrics["alert_codes"] == ["monitor.database_filesystem_low"]
+    assert report.metrics["alert_details"][0]["context"]["warn_bytes"] == 100
+    assert "database filesystem low space" in report.alerts[0]
+    assert "db_disk_free=50 B/5.0%" in report.text()
+
+
+def test_monitor_database_filesystem_thresholds_can_be_disabled(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    monkeypatch.setattr(
+        monitor_module.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(total=1000, used=999, free=1),
+    )
+
+    report = monitor(
+        db,
+        thresholds=MonitorThresholds(
+            database_free_warn_bytes=0,
+            database_free_warn_percent=0,
+        ),
+        check_systemd=False,
+    )
+
+    assert report.ok is True
+    assert report.metrics["database_filesystem"]["available_bytes"] == 1
+
+
+def test_monitor_fails_closed_when_database_filesystem_cannot_be_measured(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+
+    def fail_disk_usage(path):
+        raise OSError("statvfs failed")
+
+    monkeypatch.setattr(monitor_module.shutil, "disk_usage", fail_disk_usage)
+
+    report = monitor(db, check_systemd=False)
+
+    assert report.ok is False
+    assert report.metrics["database_filesystem_error"] == "statvfs failed"
+    assert report.metrics["alert_codes"] == ["monitor.database_filesystem_unavailable"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"database_free_warn_bytes": -1}, "database_free_warn_bytes must be non-negative"),
+        ({"database_free_warn_percent": -1}, "database_free_warn_percent must be between 0 and 100"),
+        ({"database_free_warn_percent": 101}, "database_free_warn_percent must be between 0 and 100"),
+    ],
+)
+def test_monitor_rejects_invalid_database_filesystem_thresholds(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        MonitorThresholds(**kwargs)
 
 
 def test_monitor_alerts_when_github_release_is_newer(tmp_path, monkeypatch):
