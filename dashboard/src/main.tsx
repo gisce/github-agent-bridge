@@ -767,12 +767,24 @@ function redirectToLogin(path: string) {
   window.location.replace(path);
 }
 
-async function api<T>(path: string, init?: RequestInit, onUnauthorized = redirectToLogin): Promise<T> {
+function createUnauthorizedHandler(redirect = redirectToLogin) {
+  let redirectStarted = false;
+  return () => {
+    if (redirectStarted) return;
+    redirectStarted = true;
+    redirect("/auth/login");
+  };
+}
+
+// Each login replaces the OAuth state cookie, so the page must start this flow only once.
+const handleUnauthorized = createUnauthorizedHandler();
+
+async function api<T>(path: string, init?: RequestInit, onUnauthorized = handleUnauthorized): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set("Accept", "application/json");
   const response = await fetch(path, { ...init, headers });
   if (response.status === 401) {
-    onUnauthorized("/auth/login");
+    onUnauthorized();
   }
   if (!response.ok) {
     throw new Error(`${response.status} ${response.statusText}`);
@@ -5549,6 +5561,7 @@ export {
   WebhookPage,
   WebhookHookDetailPage,
   api,
+  createUnauthorizedHandler,
 };
 
 const root = document.getElementById("root");
