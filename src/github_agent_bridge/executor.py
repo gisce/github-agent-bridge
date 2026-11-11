@@ -584,13 +584,26 @@ class ExecutorPool:
             self._loop(worker_id, retire_event)
         except BaseException as exc:
             self._set_worker_state(worker_id, "error", error=True)
-            self._record_worker_heartbeat(worker_id)
-            with self._worker_failure_lock:
-                self._worker_failures.append((worker_id, exc))
-            self._request_shutdown()
+            self._record_worker_failure(worker_id, exc)
         finally:
             if heartbeat_stop_event is not None:
                 heartbeat_stop_event.set()
+
+    def _run_heartbeat(
+        self,
+        worker_id: str,
+        heartbeat_stop_event: threading.Event,
+    ) -> None:
+        try:
+            self._heartbeat_loop(worker_id, heartbeat_stop_event)
+        except BaseException as exc:
+            self._set_worker_state(worker_id, "error", error=True)
+            self._record_worker_failure(f"{worker_id}/heartbeat", exc)
+
+    def _record_worker_failure(self, worker_id: str, exc: BaseException) -> None:
+        with self._worker_failure_lock:
+            self._worker_failures.append((worker_id, exc))
+        self._request_shutdown()
 
     def _spawn_worker(self) -> _WorkerSlot:
         with self._worker_slots_lock:
@@ -601,7 +614,7 @@ class ExecutorPool:
         heartbeat_stop_event = threading.Event()
         claim_lock = threading.Lock()
         heartbeat_thread = threading.Thread(
-            target=self._heartbeat_loop,
+            target=self._run_heartbeat,
             args=(worker_id, heartbeat_stop_event),
             daemon=True,
             name=f"gab-heartbeat-{worker_number}",
