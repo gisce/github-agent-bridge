@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 
 from .dispatch import GitHubClient, OpenClawDispatcher, RunMode
-from .models import GitHubContext
+from .models import GitHubContext, Job
 from .policy import Policy, complexity_from_metadata
 from .queue import JobQueue
 from .session_events import redact_event_detail
@@ -277,6 +277,25 @@ class ExecutorPool:
     def _wake_commit_status_publisher(self) -> None:
         self._commit_status_wakeup.set()
 
+    def _claim_next_job(self, worker_id: str) -> Job | None:
+        while not self.stop_event.is_set():
+            try:
+                if self.queue.executor_paused():
+                    self._set_worker_state(worker_id, "paused")
+                    return None
+                self._set_worker_state(worker_id, "claiming")
+                job = self.queue.claim_next(worker_id, self.config.work_intents)
+                if job is None:
+                    self._set_worker_state(worker_id, "idle")
+                return job
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_contention_error(exc):
+                    raise
+                self._record_worker_storage_error(worker_id)
+                if self.stop_event.wait(self.config.idle_sleep_seconds):
+                    return None
+        return None
+
     def work_one(self, worker_id: str | None = None) -> bool:
         worker_id = worker_id or f"worker-{uuid.uuid4().hex[:8]}"
         with self._worker_slots_lock:
@@ -286,13 +305,8 @@ class ExecutorPool:
             if slot is not None and slot.retire_event.is_set():
                 self._set_worker_state(worker_id, "draining")
                 return False
-            if self.queue.executor_paused():
-                self._set_worker_state(worker_id, "paused")
-                return False
-            self._set_worker_state(worker_id, "claiming")
-            job = self.queue.claim_next(worker_id, self.config.work_intents)
+            job = self._claim_next_job(worker_id)
             if not job:
-                self._set_worker_state(worker_id, "idle")
                 return False
             self._set_worker_state(worker_id, "running", job.id)
         self._wake_commit_status_publisher()
