@@ -4,6 +4,7 @@ import errno
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from github_agent_bridge import monitor_alert
@@ -154,6 +155,93 @@ def test_main_sends_due_alert_when_resend_state_write_fails(tmp_path, monkeypatc
     assert monitor_alert.main() == 2
     assert sent == ["database filesystem low space\n"]
     assert "failed to save monitor alert resend state" in capsys.readouterr().err
+
+
+def test_main_sends_due_alert_when_resend_state_read_fails(tmp_path, monkeypatch, capsys):
+    config = make_config(tmp_path)
+    sent = []
+    monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
+    monkeypatch.setattr(
+        monitor_alert,
+        "run_monitor",
+        lambda config: subprocess.CompletedProcess([], 2, "database filesystem low space\n"),
+    )
+    monkeypatch.setattr(monitor_alert, "maybe_unlock_stale", lambda config, output: "")
+    monkeypatch.setattr(
+        monitor_alert,
+        "load_state",
+        lambda path: (_ for _ in ()).throw(OSError(errno.EIO, "Input/output error")),
+    )
+    monkeypatch.setattr(monitor_alert, "send_alert", lambda config, output, unlock: sent.append(output))
+
+    assert monitor_alert.main() == 2
+    assert sent == ["database filesystem low space\n"]
+    assert "failed to load monitor alert resend state" in capsys.readouterr().err
+
+
+def test_main_sends_due_alert_when_resend_state_is_malformed(tmp_path, monkeypatch, capsys):
+    config = make_config(tmp_path)
+    config.state_file.write_text("LAST_HASH=abc\n", encoding="utf-8")
+    sent = []
+    monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
+    monkeypatch.setattr(
+        monitor_alert,
+        "run_monitor",
+        lambda config: subprocess.CompletedProcess([], 2, "database filesystem low space\n"),
+    )
+    monkeypatch.setattr(monitor_alert, "maybe_unlock_stale", lambda config, output: "")
+    monkeypatch.setattr(monitor_alert, "send_alert", lambda config, output, unlock: sent.append(output))
+
+    assert monitor_alert.main() == 2
+    assert sent == ["database filesystem low space\n"]
+    assert "failed to load monitor alert resend state" in capsys.readouterr().err
+
+
+def test_main_sends_low_space_alert_when_stale_job_reconciliation_fails(tmp_path, monkeypatch, capsys):
+    config = replace(make_config(tmp_path), kill_stale_children=True)
+    payload = {
+        "ok": False,
+        "alerts": [
+            "database filesystem low space: 2.6 GiB available",
+            "running job 7 owner/repo#1 age 1200s > 900s",
+        ],
+        "metrics": {
+            "database_filesystem": {
+                "available_bytes": 2791728742,
+                "available_percent": 0.9,
+            },
+            "alert_codes": [
+                "monitor.database_filesystem_low",
+                "monitor.running_stale",
+            ],
+            "running_jobs": [],
+        },
+    }
+    sent = []
+    monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
+    monkeypatch.setattr(
+        monitor_alert,
+        "run_monitor",
+        lambda config: subprocess.CompletedProcess([], 2, json.dumps(payload)),
+    )
+    monkeypatch.setattr(monitor_alert, "get_main_pid", lambda unit="github-agent-bridge.service": "123")
+    monkeypatch.setattr(monitor_alert, "has_child_processes", lambda pid: True)
+    monkeypatch.setattr(
+        monitor_alert,
+        "sample_executor_activity",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError(errno.ENOSPC, "No space left on device")),
+    )
+    monkeypatch.setattr(
+        monitor_alert,
+        "send_alert",
+        lambda config, output, unlock: sent.append((output, unlock)),
+    )
+
+    assert monitor_alert.main() == 2
+    assert len(sent) == 1
+    assert "database filesystem low space" in sent[0][0]
+    assert "failed to reconcile stale jobs" in sent[0][1]
+    assert "failed to reconcile stale jobs" in capsys.readouterr().err
 
 
 def test_main_propagates_throttled_monitor_failure(tmp_path, monkeypatch):

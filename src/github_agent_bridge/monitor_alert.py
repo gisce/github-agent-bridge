@@ -490,7 +490,9 @@ def load_state(path: Path) -> tuple[str, int]:
     if hash_match and ts_match:
         return hash_match.group(1), int(ts_match.group(1))
     parts = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
-    return parts.get("LAST_HASH", ""), int(parts.get("LAST_TS", "0") or "0")
+    if "LAST_HASH" not in parts or "LAST_TS" not in parts:
+        raise ValueError("missing LAST_HASH or LAST_TS")
+    return parts["LAST_HASH"], int(parts["LAST_TS"])
 
 
 def save_state(path: Path, alert_hash: str, now: int) -> None:
@@ -537,7 +539,11 @@ def should_send_alert(
 ) -> bool:
     now = int(time.time() if now is None else now)
     alert_hash = hashlib.sha256((identity or output).encode("utf-8")).hexdigest()
-    last_hash, last_ts = load_state(path)
+    try:
+        last_hash, last_ts = load_state(path)
+    except (OSError, ValueError) as exc:
+        print(f"warning: failed to load monitor alert resend state {path}: {exc}", file=sys.stderr)
+        last_hash, last_ts = "", 0
     if alert_hash == last_hash and (now - last_ts) < resend_seconds:
         return False
     try:
@@ -581,7 +587,11 @@ def main(argv: list[str] | None = None) -> int:
         config.state_file.unlink(missing_ok=True)
         return 0
 
-    unlock_output = maybe_unlock_stale(config, output)
+    try:
+        unlock_output = maybe_unlock_stale(config, output)
+    except Exception as exc:
+        unlock_output = f"warning: failed to reconcile stale jobs: {exc}\n"
+        print(unlock_output, end="", file=sys.stderr)
     if unlock_output:
         print(unlock_output, end="" if unlock_output.endswith("\n") else "\n")
 
