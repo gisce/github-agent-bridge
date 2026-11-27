@@ -2159,8 +2159,15 @@ def test_dashboard_oauth_concurrent_logins_keep_independent_states(tmp_path, mon
     second_state = parse_qs(urlparse(second_login.headers["location"]).query)["state"][0]
 
     assert first_state != second_state
-    assert client.get("/auth/callback", params={"code": "first-code", "state": first_state}).status_code == 302
-    assert client.get("/auth/callback", params={"code": "second-code", "state": second_state}).status_code == 302
+    first_callback = client.get("/auth/callback", params={"code": "first-code", "state": first_state})
+    second_callback = client.get("/auth/callback", params={"code": "second-code", "state": second_state})
+
+    assert first_callback.status_code == 302
+    assert first_callback.headers["location"] == "/"
+    assert first_callback.cookies.get("gab_dashboard_session") is not None
+    assert second_callback.status_code == 302
+    assert second_callback.headers["location"] == "/"
+    assert second_callback.cookies.get("gab_dashboard_session") is not None
 
 
 def test_dashboard_oauth_state_mismatch_restarts_login(tmp_path):
