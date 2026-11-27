@@ -2,6 +2,20 @@
 
 <!-- version list -->
 
+## v0.88.4 (2026-11-27)
+
+### Bug Fixes
+
+- Release claim lock during contention backoff
+  ([`e235e90`](https://github.com/gisce/github-agent-bridge/commit/e235e90b6f669ba0d5399035efb5b6026cbf2624))
+
+- Retry contended executor claims
+  ([`f6e326e`](https://github.com/gisce/github-agent-bridge/commit/f6e326ef378ccd69d2ca3b2722340ddfadf78740))
+
+- Supervise fatal heartbeat storage errors
+  ([`3eadccc`](https://github.com/gisce/github-agent-bridge/commit/3eadccc1cc79b30bc5db2a2dec1d39d58ce29dec))
+
+
 ## v0.88.3 (2026-11-11)
 
 ### Bug Fixes
