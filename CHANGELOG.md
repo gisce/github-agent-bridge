@@ -2,6 +2,40 @@
 
 <!-- version list -->
 
+## v0.88.5 (2026-11-27)
+
+### Bug Fixes
+
+- Alert before sqlite filesystem exhaustion
+  ([`5f18035`](https://github.com/gisce/github-agent-bridge/commit/5f180354373ee7992732e4492040fae3b6701059))
+
+- Isolate concurrent OAuth state
+  ([`3a812ac`](https://github.com/gisce/github-agent-bridge/commit/3a812ac4cfa4ddb47d898925aff031e5a121b6cf))
+
+- Keep monitor alert delivery best effort
+  ([`0738468`](https://github.com/gisce/github-agent-bridge/commit/07384683cb0356ba1aaca06da4503d225cafe980))
+
+- Preserve alerts when resend state cannot persist
+  ([`76a0346`](https://github.com/gisce/github-agent-bridge/commit/76a0346039c100eb58682bc57cfbe58f88697b76))
+
+- Preserve and throttle disk capacity alerts
+  ([`2f88d4d`](https://github.com/gisce/github-agent-bridge/commit/2f88d4d81b3d5b4248c6eb01bb9fe14b550608ed))
+
+- Preserve capacity alerts after database I/O failure
+  ([`8961688`](https://github.com/gisce/github-agent-bridge/commit/8961688fbfcbc4be2411c2ec23b3984908e48069))
+
+- Run disk probe before creating alert state
+  ([`3be3277`](https://github.com/gisce/github-agent-bridge/commit/3be32774c11ed9159b46afb7c94e0de3b7e98016))
+
+### Testing
+
+- Assert concurrent OAuth callbacks succeed
+  ([`2f24376`](https://github.com/gisce/github-agent-bridge/commit/2f2437673e121686882d276bd41a279dafac304f))
+
+- Verify sqlite filesystem probe path
+  ([`88a3ab5`](https://github.com/gisce/github-agent-bridge/commit/88a3ab5120fd017399b64f81e66d35150657b2f8))
+
+
 ## v0.88.4 (2026-11-27)
 
 ### Bug Fixes
