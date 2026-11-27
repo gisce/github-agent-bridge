@@ -48,6 +48,20 @@ def slo_metrics(*, queue_p90=120, sample_count=20, schema_error=None):
     }
 
 
+@pytest.fixture(autouse=True)
+def healthy_database_filesystem(monkeypatch):
+    gibibyte = 1024**3
+    monkeypatch.setattr(
+        monitor_module.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(
+            total=100 * gibibyte,
+            used=50 * gibibyte,
+            free=50 * gibibyte,
+        ),
+    )
+
+
 def test_monitor_ok_on_empty_initialized_db(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     JobQueue(db)
@@ -153,6 +167,47 @@ def test_monitor_probes_filesystem_when_database_inspection_fails(tmp_path, monk
         "monitor.database_inspection_failed",
     ]
     assert "database filesystem low space" in report.text()
+
+
+def test_monitor_preserves_filesystem_alert_when_database_exists_check_fails(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    db.touch()
+    monkeypatch.setattr(
+        monitor_module.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(total=1000, used=950, free=50),
+    )
+    original_exists = type(db).exists
+    database_exists_calls = 0
+
+    def fail_database_exists(path):
+        nonlocal database_exists_calls
+        if path == db:
+            database_exists_calls += 1
+            raise OSError("disk I/O error")
+        return original_exists(path)
+
+    monkeypatch.setattr(type(db), "exists", fail_database_exists)
+
+    report = monitor(
+        db,
+        thresholds=MonitorThresholds(
+            database_free_warn_bytes=100,
+            database_free_warn_percent=10,
+        ),
+        check_systemd=False,
+    )
+
+    assert report.ok is False
+    assert report.metrics["database_filesystem"]["available_bytes"] == 50
+    assert report.metrics["db_exists"] is None
+    assert report.metrics["schema_ok"] is False
+    assert report.metrics["database_inspection_error"] == "disk I/O error"
+    assert database_exists_calls == 1
+    assert report.metrics["alert_codes"] == [
+        "monitor.database_filesystem_low",
+        "monitor.database_inspection_failed",
+    ]
 
 
 def test_monitor_preserves_filesystem_alert_when_observability_write_fails(tmp_path, monkeypatch):

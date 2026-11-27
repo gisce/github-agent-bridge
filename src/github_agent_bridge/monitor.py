@@ -425,7 +425,7 @@ def monitor(
     except (OSError, sqlite3.Error) as exc:
         metrics.update({
             "db_path": str(database_path),
-            "db_exists": database_path.exists(),
+            "db_exists": None,
             "schema_ok": False,
         })
         _add_database_inspection_failure(metrics, alerts, exc)
