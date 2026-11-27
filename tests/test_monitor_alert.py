@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import subprocess
 import sys
@@ -131,6 +132,28 @@ def test_main_propagates_monitor_failure_after_sending_alert(tmp_path, monkeypat
 
     assert monitor_alert.main() == 2
     assert sent == ["invalid monitor arguments\n"]
+
+
+def test_main_sends_due_alert_when_resend_state_write_fails(tmp_path, monkeypatch, capsys):
+    config = make_config(tmp_path)
+    sent = []
+    monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
+    monkeypatch.setattr(
+        monitor_alert,
+        "run_monitor",
+        lambda config: subprocess.CompletedProcess([], 2, "database filesystem low space\n"),
+    )
+    monkeypatch.setattr(monitor_alert, "maybe_unlock_stale", lambda config, output: "")
+    monkeypatch.setattr(
+        monitor_alert,
+        "save_state",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError(errno.ENOSPC, "No space left on device")),
+    )
+    monkeypatch.setattr(monitor_alert, "send_alert", lambda config, output, unlock: sent.append(output))
+
+    assert monitor_alert.main() == 2
+    assert sent == ["database filesystem low space\n"]
+    assert "failed to save monitor alert resend state" in capsys.readouterr().err
 
 
 def test_main_propagates_throttled_monitor_failure(tmp_path, monkeypatch):

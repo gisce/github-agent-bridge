@@ -540,7 +540,10 @@ def should_send_alert(
     last_hash, last_ts = load_state(path)
     if alert_hash == last_hash and (now - last_ts) < resend_seconds:
         return False
-    save_state(path, alert_hash, now)
+    try:
+        save_state(path, alert_hash, now)
+    except OSError as exc:
+        print(f"warning: failed to save monitor alert resend state {path}: {exc}", file=sys.stderr)
     return True
 
 
