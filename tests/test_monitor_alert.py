@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -34,6 +35,47 @@ def test_should_send_alert_persists_and_throttles(tmp_path):
     assert monitor_alert.should_send_alert(state_file, "boom", resend_seconds=900, now=1000) is True
     assert monitor_alert.should_send_alert(state_file, "boom", resend_seconds=900, now=1500) is False
     assert monitor_alert.should_send_alert(state_file, "boom", resend_seconds=900, now=2001) is True
+
+
+def test_main_throttles_changing_low_space_readings_by_stable_alert_identity(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    readings = iter(("2.6 GiB", "2.5 GiB"))
+    sent = []
+
+    def run_monitor(config):
+        available = next(readings)
+        message = f"database filesystem low space: {available} available"
+        payload = {
+            "ok": False,
+            "alerts": [message],
+            "metrics": {
+                "database_filesystem": {
+                    "available_bytes": 1,
+                    "available_percent": 1.0,
+                },
+                "alert_codes": ["monitor.database_filesystem_low"],
+                "alert_details": [{
+                    "code": "monitor.database_filesystem_low",
+                    "message": message,
+                    "fingerprint": "monitor.database_filesystem_low",
+                }],
+            },
+        }
+        return subprocess.CompletedProcess([], 2, json.dumps(payload))
+
+    monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
+    monkeypatch.setattr(monitor_alert, "run_monitor", run_monitor)
+    monkeypatch.setattr(monitor_alert, "maybe_unlock_stale", lambda config, output: "")
+    monkeypatch.setattr(
+        monitor_alert,
+        "send_alert",
+        lambda config, output, unlock: sent.append(output),
+    )
+
+    assert monitor_alert.main() == 2
+    assert monitor_alert.main() == 2
+    assert len(sent) == 1
+    assert "2.6 GiB available" in sent[0]
 
 
 def test_alert_config_defaults_to_bridge_beside_user_entrypoint(tmp_path, monkeypatch):

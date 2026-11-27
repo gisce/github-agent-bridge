@@ -17,6 +17,7 @@ from .monitor import (
     ALERT_RUNNING_PROCESS_MISMATCH,
     DEFAULT_DATABASE_FREE_WARN_BYTES,
     DEFAULT_DATABASE_FREE_WARN_PERCENT,
+    MonitorReport,
 )
 from .observability import configure_sentry
 
@@ -159,6 +160,7 @@ def run_monitor(config: AlertConfig) -> subprocess.CompletedProcess[str]:
         "--policy",
         _expand(config.policy),
         "monitor",
+        "--json",
         "--pending-warn-seconds",
         str(config.pending_warn_seconds),
         "--review-running-warn-seconds",
@@ -496,9 +498,45 @@ def save_state(path: Path, alert_hash: str, now: int) -> None:
     path.write_text(f"LAST_HASH='{alert_hash}'\nLAST_TS={now}\n", encoding="utf-8")
 
 
-def should_send_alert(path: Path, output: str, resend_seconds: int, now: int | None = None) -> bool:
+def _structured_monitor_output(raw_output: str) -> tuple[str, str | None]:
+    try:
+        payload = json.loads(raw_output)
+    except (json.JSONDecodeError, TypeError):
+        return raw_output, None
+    if not isinstance(payload, dict):
+        return raw_output, None
+    alerts = payload.get("alerts")
+    metrics = payload.get("metrics")
+    if not isinstance(alerts, list) or not isinstance(metrics, dict):
+        return raw_output, None
+
+    report = MonitorReport(
+        ok=bool(payload.get("ok")),
+        alerts=[str(alert) for alert in alerts],
+        metrics=metrics,
+    )
+    identities: list[str] = []
+    details = metrics.get("alert_details") or []
+    if not isinstance(details, list):
+        details = []
+    for index, message in enumerate(report.alerts):
+        detail = details[index] if index < len(details) and isinstance(details[index], dict) else {}
+        fingerprint = str(detail.get("fingerprint") or "")
+        identities.append(f"fingerprint:{fingerprint}" if fingerprint else f"message:{message}")
+    identity = json.dumps(sorted(identities), ensure_ascii=False, separators=(",", ":"))
+    return report.text() + "\n", identity
+
+
+def should_send_alert(
+    path: Path,
+    output: str,
+    resend_seconds: int,
+    now: int | None = None,
+    *,
+    identity: str | None = None,
+) -> bool:
     now = int(time.time() if now is None else now)
-    alert_hash = hashlib.sha256(output.encode("utf-8")).hexdigest()
+    alert_hash = hashlib.sha256((identity or output).encode("utf-8")).hexdigest()
     last_hash, last_ts = load_state(path)
     if alert_hash == last_hash and (now - last_ts) < resend_seconds:
         return False
@@ -529,7 +567,7 @@ def main(argv: list[str] | None = None) -> int:
     config.state_dir.mkdir(parents=True, exist_ok=True)
 
     monitor_proc = run_monitor(config)
-    output = monitor_proc.stdout
+    output, alert_identity = _structured_monitor_output(monitor_proc.stdout)
     print(output, end="" if output.endswith("\n") else "\n")
 
     if monitor_proc.returncode == 0:
@@ -544,7 +582,12 @@ def main(argv: list[str] | None = None) -> int:
     if unlock_output:
         print(unlock_output, end="" if unlock_output.endswith("\n") else "\n")
 
-    if not should_send_alert(config.state_file, output, config.resend_seconds):
+    if not should_send_alert(
+        config.state_file,
+        output,
+        config.resend_seconds,
+        identity=alert_identity,
+    ):
         return monitor_proc.returncode
 
     send_alert(config, output, unlock_output)

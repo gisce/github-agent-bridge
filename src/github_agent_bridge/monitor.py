@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import time
 import urllib.error
@@ -26,8 +27,10 @@ from .process_inspection import direct_children, process_identity_matches
 ALERT_RELEASE_AVAILABLE = "monitor.release_available"
 ALERT_DATABASE_MISSING = "monitor.database_missing"
 ALERT_SCHEMA_MISSING = "monitor.schema_missing"
+ALERT_DATABASE_INSPECTION_FAILED = "monitor.database_inspection_failed"
 ALERT_DATABASE_FILESYSTEM_LOW = "monitor.database_filesystem_low"
 ALERT_DATABASE_FILESYSTEM_UNAVAILABLE = "monitor.database_filesystem_unavailable"
+ALERT_OBSERVABILITY_PERSISTENCE_FAILED = "monitor.observability_persistence_failed"
 ALERT_BLOCKED_JOBS = "monitor.blocked_jobs"
 ALERT_PENDING_QUEUE_OLD = "monitor.pending_queue_old"
 ALERT_EXECUTOR_SERVICE = "monitor.executor_service"
@@ -348,6 +351,23 @@ def _add_alert(
     metrics.setdefault("alert_details", []).append(detail)
 
 
+def _add_database_inspection_failure(
+    metrics: dict[str, Any],
+    alerts: list[str],
+    exc: BaseException,
+) -> None:
+    metrics["database_inspection_error"] = str(exc)
+    if ALERT_DATABASE_INSPECTION_FAILED in metrics.get("alert_codes", []):
+        return
+    _add_alert(
+        metrics,
+        alerts,
+        ALERT_DATABASE_INSPECTION_FAILED,
+        f"database inspection failed: {exc}",
+        fingerprint=ALERT_DATABASE_INSPECTION_FAILED,
+    )
+
+
 def monitor(
     db: str | Path,
     executor_unit: str = "github-agent-bridge.service",
@@ -359,7 +379,7 @@ def monitor(
     process_sample_retention_seconds: int = DEFAULT_PROCESS_SAMPLE_RETENTION_SECONDS,
 ) -> MonitorReport:
     thresholds = thresholds or MonitorThresholds()
-    metrics = inspect_db(db)
+    metrics: dict[str, Any] = {}
     alerts: list[str] = []
     try:
         database_filesystem = _database_filesystem_usage(db)
@@ -370,6 +390,7 @@ def monitor(
             alerts,
             ALERT_DATABASE_FILESYSTEM_UNAVAILABLE,
             f"database filesystem capacity check failed: {exc}",
+            fingerprint=ALERT_DATABASE_FILESYSTEM_UNAVAILABLE,
         )
     else:
         metrics["database_filesystem"] = database_filesystem
@@ -391,12 +412,23 @@ def monitor(
                 f"({database_filesystem['available_percent']:.1f}%) at {database_filesystem['path']}; "
                 f"requires at least {_format_bytes(thresholds.database_free_warn_bytes)} "
                 f"and {thresholds.database_free_warn_percent:.1f}%",
+                fingerprint=ALERT_DATABASE_FILESYSTEM_LOW,
                 context={
                     **database_filesystem,
                     "warn_bytes": thresholds.database_free_warn_bytes,
                     "warn_percent": thresholds.database_free_warn_percent,
                 },
             )
+    database_path = Path(db).expanduser()
+    try:
+        metrics.update(inspect_db(db))
+    except (OSError, sqlite3.Error) as exc:
+        metrics.update({
+            "db_path": str(database_path),
+            "db_exists": database_path.exists(),
+            "schema_ok": False,
+        })
+        _add_database_inspection_failure(metrics, alerts, exc)
     package_version = _package_version()
     release_repo = os.getenv("GITHUB_AGENT_BRIDGE_RELEASE_REPO", "").strip()
     metrics["package_version"] = package_version
@@ -423,10 +455,11 @@ def monitor(
         else:
             metrics["latest_release_error"] = f"could not fetch latest release for {release_repo}"
 
-    if not metrics.get("db_exists"):
-        _add_alert(metrics, alerts, ALERT_DATABASE_MISSING, f"database missing: {metrics.get('db_path')}")
-    elif not metrics.get("schema_ok", True):
-        _add_alert(metrics, alerts, ALERT_SCHEMA_MISSING, "database schema missing jobs table")
+    if not metrics.get("database_inspection_error"):
+        if not metrics.get("db_exists"):
+            _add_alert(metrics, alerts, ALERT_DATABASE_MISSING, f"database missing: {metrics.get('db_path')}")
+        elif not metrics.get("schema_ok", True):
+            _add_alert(metrics, alerts, ALERT_SCHEMA_MISSING, "database schema missing jobs table")
 
     pending = int(metrics.get("pending", 0) or 0)
     blocked = int(metrics.get("blocked", 0) or 0)
@@ -557,7 +590,17 @@ def monitor(
                         f"running job {job.get('id')} process ownership mismatch: {problem}",
                     )
 
-    latest_sample = recent_process_samples(db, limit=1)
+    database_accessible = (
+        not metrics.get("database_inspection_error")
+        and metrics.get("db_exists")
+        and metrics.get("schema_ok", True)
+    )
+    try:
+        latest_sample = recent_process_samples(db, limit=1) if database_accessible else []
+    except (OSError, sqlite3.Error) as exc:
+        latest_sample = []
+        database_accessible = False
+        _add_database_inspection_failure(metrics, alerts, exc)
     metrics["latest_process_sample"] = latest_sample[-1] if latest_sample else None
     for job in metrics.get("running_jobs", []):
         age = job.get("age_seconds")
@@ -578,22 +621,31 @@ def monitor(
         "window": thresholds.slo_window,
         "evaluations": [],
     }
-    if thresholds.slo_enabled and metrics.get("db_exists") and metrics.get("schema_ok", True):
-        slo_monitor, slo_alerts, slo_state_update = _evaluate_slo_thresholds(
-            db,
-            thresholds,
-            persist_state=persist_observability,
-        )
-        metrics["slo_monitor"] = slo_monitor
-        for alert in slo_alerts:
-            _add_alert(
-                metrics,
-                alerts,
-                alert["code"],
-                alert["message"],
-                fingerprint=alert["fingerprint"],
-                context=alert["context"],
+    if thresholds.slo_enabled and database_accessible:
+        try:
+            slo_monitor, slo_alerts, slo_state_update = _evaluate_slo_thresholds(
+                db,
+                thresholds,
+                persist_state=persist_observability,
             )
+        except (OSError, sqlite3.Error) as exc:
+            database_accessible = False
+            _add_database_inspection_failure(metrics, alerts, exc)
+            metrics["slo_monitor"].update({
+                "schema_ok": False,
+                "schema_error": str(exc),
+            })
+        else:
+            metrics["slo_monitor"] = slo_monitor
+            for alert in slo_alerts:
+                _add_alert(
+                    metrics,
+                    alerts,
+                    alert["code"],
+                    alert["message"],
+                    fingerprint=alert["fingerprint"],
+                    context=alert["context"],
+                )
     elif thresholds.slo_enabled:
         metrics["slo_monitor"].update({
             "schema_ok": False,
@@ -606,14 +658,24 @@ def monitor(
             "metrics": {},
         }
 
-    if persist_observability and metrics.get("db_exists") and metrics.get("schema_ok", True):
-        record_monitor_observation(
-            db,
-            metrics,
-            alerts,
-            process_sample_retention_seconds=process_sample_retention_seconds,
-            monitor_slo_state=slo_state_update,
-        )
+    if persist_observability and database_accessible:
+        try:
+            record_monitor_observation(
+                db,
+                metrics,
+                alerts,
+                process_sample_retention_seconds=process_sample_retention_seconds,
+                monitor_slo_state=slo_state_update,
+            )
+        except (OSError, sqlite3.Error) as exc:
+            metrics["observability_persistence_error"] = str(exc)
+            _add_alert(
+                metrics,
+                alerts,
+                ALERT_OBSERVABILITY_PERSISTENCE_FAILED,
+                f"monitor observability persistence failed: {exc}",
+                fingerprint=ALERT_OBSERVABILITY_PERSISTENCE_FAILED,
+            )
 
     return MonitorReport(ok=not alerts, alerts=alerts, metrics=metrics)
 
