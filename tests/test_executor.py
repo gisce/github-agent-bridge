@@ -1167,6 +1167,63 @@ def test_worker_recovers_after_transient_database_lock_before_claim(tmp_path, mo
     assert [dispatched.id for dispatched in dispatcher.jobs] == [job.id]
 
 
+def test_worker_can_drain_while_database_lock_blocks_claim(tmp_path, monkeypatch):
+    queue = JobQueue(tmp_path / "bridge.sqlite3")
+    job = enqueue_pr_comment(queue)
+    queue.database.timeout_seconds = 0.01
+    queue.database.busy_timeout_ms = 10
+    dispatcher = RecordingDispatcher()
+    pool = ExecutorPool(
+        queue,
+        Policy(trusted_orgs={"gisce"}),
+        dispatcher,
+        github=FakeGitHub(assigned=True),
+        config=ExecutorConfig(
+            idle_sleep_seconds=0.5,
+            heartbeat_interval_seconds=0.01,
+        ),
+    )
+    claim_attempted = threading.Event()
+    original_claim = queue.claim_next
+
+    def claim_next(*args, **kwargs):
+        claim_attempted.set()
+        return original_claim(*args, **kwargs)
+
+    monkeypatch.setattr(queue, "claim_next", claim_next)
+    locker = sqlite3.connect(queue.path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    slot = pool._spawn_worker()
+    drained = threading.Event()
+
+    def mark_draining():
+        pool._mark_worker_draining(slot)
+        drained.set()
+
+    drain_thread = threading.Thread(target=mark_draining)
+    try:
+        assert claim_attempted.wait(timeout=1)
+        drain_thread.start()
+        assert drained.wait(timeout=0.25)
+        assert locker.in_transaction is True
+    finally:
+        if locker.in_transaction:
+            locker.rollback()
+        locker.close()
+        if drain_thread.ident is not None:
+            drain_thread.join(timeout=2)
+        pool._request_shutdown()
+        slot.worker_thread.join(timeout=2)
+        slot.heartbeat_thread.join(timeout=2)
+
+    assert drain_thread.is_alive() is False
+    assert slot.worker_thread.is_alive() is False
+    assert dispatcher.jobs == []
+    stored = queue.get(job.id)
+    assert stored is not None
+    assert stored.status == "pending"
+
+
 def test_worker_does_not_hide_non_contention_database_error_before_claim(tmp_path, monkeypatch):
     queue = JobQueue(tmp_path / "bridge.sqlite3")
     pool = ExecutorPool(queue, Policy(), RecordingDispatcher())

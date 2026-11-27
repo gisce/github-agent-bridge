@@ -277,23 +277,39 @@ class ExecutorPool:
     def _wake_commit_status_publisher(self) -> None:
         self._commit_status_wakeup.set()
 
-    def _claim_next_job(self, worker_id: str) -> Job | None:
+    def _claim_next_job(
+        self,
+        worker_id: str,
+        slot: _WorkerSlot | None,
+        claim_lock: threading.Lock,
+    ) -> Job | None:
         while not self.stop_event.is_set():
-            try:
-                if self.queue.executor_paused():
-                    self._set_worker_state(worker_id, "paused")
+            with claim_lock:
+                if slot is not None and slot.retire_event.is_set():
+                    self._set_worker_state(worker_id, "draining")
                     return None
-                self._set_worker_state(worker_id, "claiming")
-                job = self.queue.claim_next(worker_id, self.config.work_intents)
-                if job is None:
-                    self._set_worker_state(worker_id, "idle")
-                return job
-            except sqlite3.OperationalError as exc:
-                if not _is_sqlite_contention_error(exc):
-                    raise
-                self._record_worker_storage_error(worker_id)
-                if self.stop_event.wait(self.config.idle_sleep_seconds):
-                    return None
+                try:
+                    if self.queue.executor_paused():
+                        self._set_worker_state(worker_id, "paused")
+                        return None
+                    self._set_worker_state(worker_id, "claiming")
+                    job = self.queue.claim_next(
+                        worker_id, self.config.work_intents
+                    )
+                except sqlite3.OperationalError as exc:
+                    if not _is_sqlite_contention_error(exc):
+                        raise
+                    self._record_worker_storage_error(worker_id)
+                else:
+                    if job is None:
+                        self._set_worker_state(worker_id, "idle")
+                    else:
+                        self._set_worker_state(worker_id, "running", job.id)
+                    return job
+            retry_event = (
+                slot.retire_event if slot is not None else self.stop_event
+            )
+            retry_event.wait(self.config.idle_sleep_seconds)
         return None
 
     def work_one(self, worker_id: str | None = None) -> bool:
@@ -301,14 +317,9 @@ class ExecutorPool:
         with self._worker_slots_lock:
             slot = self._worker_slots.get(worker_id)
         claim_lock = slot.claim_lock if slot is not None else threading.Lock()
-        with claim_lock:
-            if slot is not None and slot.retire_event.is_set():
-                self._set_worker_state(worker_id, "draining")
-                return False
-            job = self._claim_next_job(worker_id)
-            if not job:
-                return False
-            self._set_worker_state(worker_id, "running", job.id)
+        job = self._claim_next_job(worker_id, slot, claim_lock)
+        if not job:
+            return False
         self._wake_commit_status_publisher()
         if self.stop_event.is_set():
             self.queue.block_running(
