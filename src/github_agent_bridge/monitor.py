@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+import sqlite3
 import subprocess
 import time
 import urllib.error
@@ -25,6 +27,10 @@ from .process_inspection import direct_children, process_identity_matches
 ALERT_RELEASE_AVAILABLE = "monitor.release_available"
 ALERT_DATABASE_MISSING = "monitor.database_missing"
 ALERT_SCHEMA_MISSING = "monitor.schema_missing"
+ALERT_DATABASE_INSPECTION_FAILED = "monitor.database_inspection_failed"
+ALERT_DATABASE_FILESYSTEM_LOW = "monitor.database_filesystem_low"
+ALERT_DATABASE_FILESYSTEM_UNAVAILABLE = "monitor.database_filesystem_unavailable"
+ALERT_OBSERVABILITY_PERSISTENCE_FAILED = "monitor.observability_persistence_failed"
 ALERT_BLOCKED_JOBS = "monitor.blocked_jobs"
 ALERT_PENDING_QUEUE_OLD = "monitor.pending_queue_old"
 ALERT_EXECUTOR_SERVICE = "monitor.executor_service"
@@ -45,6 +51,8 @@ ALERT_SLO_RETRY_RATE = "monitor.slo.retry_rate"
 
 
 SLO_WINDOWS = {"24h", "7d", "30d"}
+DEFAULT_DATABASE_FREE_WARN_BYTES = 5 * 1024 * 1024 * 1024
+DEFAULT_DATABASE_FREE_WARN_PERCENT = 10.0
 SLO_THRESHOLD_FIELDS = (
     "slo_queued_to_claimed_p90_seconds",
     "slo_claimed_to_first_output_p90_seconds",
@@ -62,6 +70,8 @@ class MonitorThresholds:
     progress_warn_seconds: int = 600
     reader_recent_seconds: int = 180
     worker_heartbeat_warn_seconds: int = 20
+    database_free_warn_bytes: int = DEFAULT_DATABASE_FREE_WARN_BYTES
+    database_free_warn_percent: float = DEFAULT_DATABASE_FREE_WARN_PERCENT
     slo_window: str = "7d"
     slo_min_samples: int = 20
     slo_breach_observations: int = 3
@@ -74,6 +84,10 @@ class MonitorThresholds:
     slo_retry_rate_percent: float | None = None
 
     def __post_init__(self) -> None:
+        if self.database_free_warn_bytes < 0:
+            raise ValueError("database_free_warn_bytes must be non-negative")
+        if not 0 <= self.database_free_warn_percent <= 100:
+            raise ValueError("database_free_warn_percent must be between 0 and 100")
         if self.slo_window not in SLO_WINDOWS:
             raise ValueError(f"unsupported SLO window {self.slo_window!r}")
         if self.slo_min_samples < 1:
@@ -139,6 +153,13 @@ class MonitorReport:
             f"oldest_pending={metrics.get('oldest_pending_age_seconds') if metrics.get('oldest_pending_age_seconds') is not None else '-'}",
             f"last_uid={metrics.get('last_uid', '-')}",
         ]
+        database_filesystem = metrics.get("database_filesystem") or {}
+        if database_filesystem:
+            compact.append(
+                "db_disk_free="
+                f"{_format_bytes(database_filesystem.get('available_bytes'))}/"
+                f"{database_filesystem.get('available_percent', 0):.1f}%"
+            )
         parts.append(" ".join(compact))
         if self.alerts:
             alert_codes = metrics.get("alert_codes") or []
@@ -229,6 +250,35 @@ def inspect_db(path: str | Path) -> dict[str, Any]:
     return DashboardQueries(path).status()
 
 
+def _database_filesystem_usage(path: str | Path) -> dict[str, Any]:
+    database_path = Path(path).expanduser().resolve(strict=False)
+    probe_path = database_path.parent
+    while not probe_path.exists() and probe_path != probe_path.parent:
+        probe_path = probe_path.parent
+    usage = shutil.disk_usage(probe_path)
+    available_percent = (usage.free / usage.total * 100.0) if usage.total else 0.0
+    return {
+        "path": str(probe_path.resolve()),
+        "total_bytes": int(usage.total),
+        "used_bytes": int(usage.used),
+        "available_bytes": int(usage.free),
+        "available_percent": available_percent,
+    }
+
+
+def _format_bytes(value: Any) -> str:
+    try:
+        size = float(value)
+    except (TypeError, ValueError):
+        return "-"
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    for unit in units[:-1]:
+        if abs(size) < 1024:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} {units[-1]}"
+
+
 def _package_version() -> str:
     try:
         return metadata.version("github-agent-bridge")
@@ -301,6 +351,23 @@ def _add_alert(
     metrics.setdefault("alert_details", []).append(detail)
 
 
+def _add_database_inspection_failure(
+    metrics: dict[str, Any],
+    alerts: list[str],
+    exc: BaseException,
+) -> None:
+    metrics["database_inspection_error"] = str(exc)
+    if ALERT_DATABASE_INSPECTION_FAILED in metrics.get("alert_codes", []):
+        return
+    _add_alert(
+        metrics,
+        alerts,
+        ALERT_DATABASE_INSPECTION_FAILED,
+        f"database inspection failed: {exc}",
+        fingerprint=ALERT_DATABASE_INSPECTION_FAILED,
+    )
+
+
 def monitor(
     db: str | Path,
     executor_unit: str = "github-agent-bridge.service",
@@ -312,8 +379,56 @@ def monitor(
     process_sample_retention_seconds: int = DEFAULT_PROCESS_SAMPLE_RETENTION_SECONDS,
 ) -> MonitorReport:
     thresholds = thresholds or MonitorThresholds()
-    metrics = inspect_db(db)
+    metrics: dict[str, Any] = {}
     alerts: list[str] = []
+    try:
+        database_filesystem = _database_filesystem_usage(db)
+    except OSError as exc:
+        metrics["database_filesystem_error"] = str(exc)
+        _add_alert(
+            metrics,
+            alerts,
+            ALERT_DATABASE_FILESYSTEM_UNAVAILABLE,
+            f"database filesystem capacity check failed: {exc}",
+            fingerprint=ALERT_DATABASE_FILESYSTEM_UNAVAILABLE,
+        )
+    else:
+        metrics["database_filesystem"] = database_filesystem
+        below_bytes = (
+            thresholds.database_free_warn_bytes > 0
+            and database_filesystem["available_bytes"] < thresholds.database_free_warn_bytes
+        )
+        below_percent = (
+            thresholds.database_free_warn_percent > 0
+            and database_filesystem["available_percent"] < thresholds.database_free_warn_percent
+        )
+        if below_bytes or below_percent:
+            _add_alert(
+                metrics,
+                alerts,
+                ALERT_DATABASE_FILESYSTEM_LOW,
+                "database filesystem low space: "
+                f"{_format_bytes(database_filesystem['available_bytes'])} available "
+                f"({database_filesystem['available_percent']:.1f}%) at {database_filesystem['path']}; "
+                f"requires at least {_format_bytes(thresholds.database_free_warn_bytes)} "
+                f"and {thresholds.database_free_warn_percent:.1f}%",
+                fingerprint=ALERT_DATABASE_FILESYSTEM_LOW,
+                context={
+                    **database_filesystem,
+                    "warn_bytes": thresholds.database_free_warn_bytes,
+                    "warn_percent": thresholds.database_free_warn_percent,
+                },
+            )
+    database_path = Path(db).expanduser()
+    try:
+        metrics.update(inspect_db(db))
+    except (OSError, sqlite3.Error) as exc:
+        metrics.update({
+            "db_path": str(database_path),
+            "db_exists": None,
+            "schema_ok": False,
+        })
+        _add_database_inspection_failure(metrics, alerts, exc)
     package_version = _package_version()
     release_repo = os.getenv("GITHUB_AGENT_BRIDGE_RELEASE_REPO", "").strip()
     metrics["package_version"] = package_version
@@ -340,10 +455,11 @@ def monitor(
         else:
             metrics["latest_release_error"] = f"could not fetch latest release for {release_repo}"
 
-    if not metrics.get("db_exists"):
-        _add_alert(metrics, alerts, ALERT_DATABASE_MISSING, f"database missing: {metrics.get('db_path')}")
-    elif not metrics.get("schema_ok", True):
-        _add_alert(metrics, alerts, ALERT_SCHEMA_MISSING, "database schema missing jobs table")
+    if not metrics.get("database_inspection_error"):
+        if not metrics.get("db_exists"):
+            _add_alert(metrics, alerts, ALERT_DATABASE_MISSING, f"database missing: {metrics.get('db_path')}")
+        elif not metrics.get("schema_ok", True):
+            _add_alert(metrics, alerts, ALERT_SCHEMA_MISSING, "database schema missing jobs table")
 
     pending = int(metrics.get("pending", 0) or 0)
     blocked = int(metrics.get("blocked", 0) or 0)
@@ -474,7 +590,17 @@ def monitor(
                         f"running job {job.get('id')} process ownership mismatch: {problem}",
                     )
 
-    latest_sample = recent_process_samples(db, limit=1)
+    database_accessible = (
+        not metrics.get("database_inspection_error")
+        and metrics.get("db_exists")
+        and metrics.get("schema_ok", True)
+    )
+    try:
+        latest_sample = recent_process_samples(db, limit=1) if database_accessible else []
+    except (OSError, sqlite3.Error) as exc:
+        latest_sample = []
+        database_accessible = False
+        _add_database_inspection_failure(metrics, alerts, exc)
     metrics["latest_process_sample"] = latest_sample[-1] if latest_sample else None
     for job in metrics.get("running_jobs", []):
         age = job.get("age_seconds")
@@ -495,22 +621,31 @@ def monitor(
         "window": thresholds.slo_window,
         "evaluations": [],
     }
-    if thresholds.slo_enabled and metrics.get("db_exists") and metrics.get("schema_ok", True):
-        slo_monitor, slo_alerts, slo_state_update = _evaluate_slo_thresholds(
-            db,
-            thresholds,
-            persist_state=persist_observability,
-        )
-        metrics["slo_monitor"] = slo_monitor
-        for alert in slo_alerts:
-            _add_alert(
-                metrics,
-                alerts,
-                alert["code"],
-                alert["message"],
-                fingerprint=alert["fingerprint"],
-                context=alert["context"],
+    if thresholds.slo_enabled and database_accessible:
+        try:
+            slo_monitor, slo_alerts, slo_state_update = _evaluate_slo_thresholds(
+                db,
+                thresholds,
+                persist_state=persist_observability,
             )
+        except (OSError, sqlite3.Error) as exc:
+            database_accessible = False
+            _add_database_inspection_failure(metrics, alerts, exc)
+            metrics["slo_monitor"].update({
+                "schema_ok": False,
+                "schema_error": str(exc),
+            })
+        else:
+            metrics["slo_monitor"] = slo_monitor
+            for alert in slo_alerts:
+                _add_alert(
+                    metrics,
+                    alerts,
+                    alert["code"],
+                    alert["message"],
+                    fingerprint=alert["fingerprint"],
+                    context=alert["context"],
+                )
     elif thresholds.slo_enabled:
         metrics["slo_monitor"].update({
             "schema_ok": False,
@@ -523,14 +658,24 @@ def monitor(
             "metrics": {},
         }
 
-    if persist_observability and metrics.get("db_exists") and metrics.get("schema_ok", True):
-        record_monitor_observation(
-            db,
-            metrics,
-            alerts,
-            process_sample_retention_seconds=process_sample_retention_seconds,
-            monitor_slo_state=slo_state_update,
-        )
+    if persist_observability and database_accessible:
+        try:
+            record_monitor_observation(
+                db,
+                metrics,
+                alerts,
+                process_sample_retention_seconds=process_sample_retention_seconds,
+                monitor_slo_state=slo_state_update,
+            )
+        except (OSError, sqlite3.Error) as exc:
+            metrics["observability_persistence_error"] = str(exc)
+            _add_alert(
+                metrics,
+                alerts,
+                ALERT_OBSERVABILITY_PERSISTENCE_FAILED,
+                f"monitor observability persistence failed: {exc}",
+                fingerprint=ALERT_OBSERVABILITY_PERSISTENCE_FAILED,
+            )
 
     return MonitorReport(ok=not alerts, alerts=alerts, metrics=metrics)
 

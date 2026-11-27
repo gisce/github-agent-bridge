@@ -12,7 +12,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .monitor import ALERT_RUNNING_NO_EXECUTOR_CHILD, ALERT_RUNNING_PROCESS_MISMATCH
+from .monitor import (
+    ALERT_RUNNING_NO_EXECUTOR_CHILD,
+    ALERT_RUNNING_PROCESS_MISMATCH,
+    DEFAULT_DATABASE_FREE_WARN_BYTES,
+    DEFAULT_DATABASE_FREE_WARN_PERCENT,
+    MonitorReport,
+)
 from .observability import configure_sentry
 
 
@@ -40,6 +46,8 @@ class AlertConfig:
     kill_stale_children: bool
     terminate_grace_seconds: int
     proc_idle_seconds: int
+    database_free_warn_bytes: int = DEFAULT_DATABASE_FREE_WARN_BYTES
+    database_free_warn_percent: float = DEFAULT_DATABASE_FREE_WARN_PERCENT
     executor_unit: str = "github-agent-bridge.service"
     slo_window: str = "7d"
     slo_min_samples: int = 20
@@ -84,6 +92,12 @@ class AlertConfig:
             kill_stale_children=_parse_bool(values.get("GITHUB_AGENT_BRIDGE_KILL_STALE_CHILDREN", "")),
             terminate_grace_seconds=int(values.get("GITHUB_AGENT_BRIDGE_TERMINATE_GRACE_SECONDS", "5")),
             proc_idle_seconds=int(values.get("GITHUB_AGENT_BRIDGE_PROC_IDLE_SECONDS", "240")),
+            database_free_warn_bytes=int(
+                values.get("GITHUB_AGENT_BRIDGE_DATABASE_FREE_WARN_BYTES", str(DEFAULT_DATABASE_FREE_WARN_BYTES))
+            ),
+            database_free_warn_percent=float(
+                values.get("GITHUB_AGENT_BRIDGE_DATABASE_FREE_WARN_PERCENT", str(DEFAULT_DATABASE_FREE_WARN_PERCENT))
+            ),
             executor_unit=values.get("GITHUB_AGENT_BRIDGE_EXECUTOR_UNIT", "github-agent-bridge.service"),
             slo_window=values.get("GITHUB_AGENT_BRIDGE_SLO_WINDOW", "7d"),
             slo_min_samples=int(values.get("GITHUB_AGENT_BRIDGE_SLO_MIN_SAMPLES", "20")),
@@ -146,6 +160,7 @@ def run_monitor(config: AlertConfig) -> subprocess.CompletedProcess[str]:
         "--policy",
         _expand(config.policy),
         "monitor",
+        "--json",
         "--pending-warn-seconds",
         str(config.pending_warn_seconds),
         "--review-running-warn-seconds",
@@ -154,6 +169,10 @@ def run_monitor(config: AlertConfig) -> subprocess.CompletedProcess[str]:
         str(config.work_running_warn_seconds),
         "--progress-warn-seconds",
         str(config.progress_warn_seconds),
+        "--database-free-warn-bytes",
+        str(config.database_free_warn_bytes),
+        "--database-free-warn-percent",
+        str(config.database_free_warn_percent),
         "--executor-unit",
         config.executor_unit,
         "--slo-window",
@@ -471,7 +490,9 @@ def load_state(path: Path) -> tuple[str, int]:
     if hash_match and ts_match:
         return hash_match.group(1), int(ts_match.group(1))
     parts = dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
-    return parts.get("LAST_HASH", ""), int(parts.get("LAST_TS", "0") or "0")
+    if "LAST_HASH" not in parts or "LAST_TS" not in parts:
+        raise ValueError("missing LAST_HASH or LAST_TS")
+    return parts["LAST_HASH"], int(parts["LAST_TS"])
 
 
 def save_state(path: Path, alert_hash: str, now: int) -> None:
@@ -479,13 +500,56 @@ def save_state(path: Path, alert_hash: str, now: int) -> None:
     path.write_text(f"LAST_HASH='{alert_hash}'\nLAST_TS={now}\n", encoding="utf-8")
 
 
-def should_send_alert(path: Path, output: str, resend_seconds: int, now: int | None = None) -> bool:
+def _structured_monitor_output(raw_output: str) -> tuple[str, str | None]:
+    try:
+        payload = json.loads(raw_output)
+    except (json.JSONDecodeError, TypeError):
+        return raw_output, None
+    if not isinstance(payload, dict):
+        return raw_output, None
+    alerts = payload.get("alerts")
+    metrics = payload.get("metrics")
+    if not isinstance(alerts, list) or not isinstance(metrics, dict):
+        return raw_output, None
+
+    report = MonitorReport(
+        ok=bool(payload.get("ok")),
+        alerts=[str(alert) for alert in alerts],
+        metrics=metrics,
+    )
+    identities: list[str] = []
+    details = metrics.get("alert_details") or []
+    if not isinstance(details, list):
+        details = []
+    for index, message in enumerate(report.alerts):
+        detail = details[index] if index < len(details) and isinstance(details[index], dict) else {}
+        fingerprint = str(detail.get("fingerprint") or "")
+        identities.append(f"fingerprint:{fingerprint}" if fingerprint else f"message:{message}")
+    identity = json.dumps(sorted(identities), ensure_ascii=False, separators=(",", ":"))
+    return report.text() + "\n", identity
+
+
+def should_send_alert(
+    path: Path,
+    output: str,
+    resend_seconds: int,
+    now: int | None = None,
+    *,
+    identity: str | None = None,
+) -> bool:
     now = int(time.time() if now is None else now)
-    alert_hash = hashlib.sha256(output.encode("utf-8")).hexdigest()
-    last_hash, last_ts = load_state(path)
+    alert_hash = hashlib.sha256((identity or output).encode("utf-8")).hexdigest()
+    try:
+        last_hash, last_ts = load_state(path)
+    except (OSError, ValueError) as exc:
+        print(f"warning: failed to load monitor alert resend state {path}: {exc}", file=sys.stderr)
+        last_hash, last_ts = "", 0
     if alert_hash == last_hash and (now - last_ts) < resend_seconds:
         return False
-    save_state(path, alert_hash, now)
+    try:
+        save_state(path, alert_hash, now)
+    except OSError as exc:
+        print(f"warning: failed to save monitor alert resend state {path}: {exc}", file=sys.stderr)
     return True
 
 
@@ -509,10 +573,9 @@ def main(argv: list[str] | None = None) -> int:
     del argv
     configure_sentry(service="monitor-alert")
     config = AlertConfig.from_env()
-    config.state_dir.mkdir(parents=True, exist_ok=True)
 
     monitor_proc = run_monitor(config)
-    output = monitor_proc.stdout
+    output, alert_identity = _structured_monitor_output(monitor_proc.stdout)
     print(output, end="" if output.endswith("\n") else "\n")
 
     if monitor_proc.returncode == 0:
@@ -523,11 +586,20 @@ def main(argv: list[str] | None = None) -> int:
         config.state_file.unlink(missing_ok=True)
         return 0
 
-    unlock_output = maybe_unlock_stale(config, output)
+    try:
+        unlock_output = maybe_unlock_stale(config, output)
+    except Exception as exc:
+        unlock_output = f"warning: failed to reconcile stale jobs: {exc}\n"
+        print(unlock_output, end="", file=sys.stderr)
     if unlock_output:
         print(unlock_output, end="" if unlock_output.endswith("\n") else "\n")
 
-    if not should_send_alert(config.state_file, output, config.resend_seconds):
+    if not should_send_alert(
+        config.state_file,
+        output,
+        config.resend_seconds,
+        identity=alert_identity,
+    ):
         return monitor_proc.returncode
 
     send_alert(config, output, unlock_output)

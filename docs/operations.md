@@ -172,7 +172,17 @@ It checks:
 - blocked jobs;
 - pending jobs older than 300 seconds;
 - running jobs older than review/work thresholds;
+- free capacity on the filesystem containing the SQLite database (by default,
+  alert below either 5 GiB or 10% available);
 - configured SLO thresholds after a minimum sample count and sustained breach.
+
+The disk thresholds can be tuned in the private systemd environment. Set an
+individual threshold to `0` to disable that condition:
+
+```text
+GITHUB_AGENT_BRIDGE_DATABASE_FREE_WARN_BYTES=5368709120
+GITHUB_AGENT_BRIDGE_DATABASE_FREE_WARN_PERCENT=10
+```
 
 By default the monitor command also writes bounded observability rows to the
 bridge database:

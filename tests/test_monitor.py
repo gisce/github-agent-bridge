@@ -1,4 +1,5 @@
 import sqlite3
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,12 +48,212 @@ def slo_metrics(*, queue_p90=120, sample_count=20, schema_error=None):
     }
 
 
+@pytest.fixture(autouse=True)
+def healthy_database_filesystem(monkeypatch):
+    gibibyte = 1024**3
+    monkeypatch.setattr(
+        monitor_module.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(
+            total=100 * gibibyte,
+            used=50 * gibibyte,
+            free=50 * gibibyte,
+        ),
+    )
+
+
 def test_monitor_ok_on_empty_initialized_db(tmp_path):
     db = tmp_path / "bridge.sqlite3"
     JobQueue(db)
     report = monitor(db, check_systemd=False)
     assert report.ok is True
     assert "pending=0" in report.text()
+
+
+def test_monitor_alerts_before_database_filesystem_is_exhausted(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+
+    def disk_usage(path):
+        assert path == db.parent.resolve()
+        return SimpleNamespace(total=1000, used=950, free=50)
+
+    monkeypatch.setattr(monitor_module.shutil, "disk_usage", disk_usage)
+
+    report = monitor(
+        db,
+        thresholds=MonitorThresholds(
+            database_free_warn_bytes=100,
+            database_free_warn_percent=10,
+        ),
+        check_systemd=False,
+    )
+
+    assert report.ok is False
+    assert report.metrics["database_filesystem"]["available_bytes"] == 50
+    assert report.metrics["database_filesystem"]["available_percent"] == 5
+    assert report.metrics["alert_codes"] == ["monitor.database_filesystem_low"]
+    assert report.metrics["alert_details"][0]["fingerprint"] == "monitor.database_filesystem_low"
+    assert report.metrics["alert_details"][0]["context"]["warn_bytes"] == 100
+    assert "database filesystem low space" in report.alerts[0]
+    assert "db_disk_free=50 B/5.0%" in report.text()
+
+
+def test_monitor_database_filesystem_thresholds_can_be_disabled(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    monkeypatch.setattr(
+        monitor_module.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(total=1000, used=999, free=1),
+    )
+
+    report = monitor(
+        db,
+        thresholds=MonitorThresholds(
+            database_free_warn_bytes=0,
+            database_free_warn_percent=0,
+        ),
+        check_systemd=False,
+    )
+
+    assert report.ok is True
+    assert report.metrics["database_filesystem"]["available_bytes"] == 1
+
+
+def test_monitor_fails_closed_when_database_filesystem_cannot_be_measured(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+
+    def fail_disk_usage(path):
+        raise OSError("statvfs failed")
+
+    monkeypatch.setattr(monitor_module.shutil, "disk_usage", fail_disk_usage)
+
+    report = monitor(db, check_systemd=False)
+
+    assert report.ok is False
+    assert report.metrics["database_filesystem_error"] == "statvfs failed"
+    assert report.metrics["alert_codes"] == ["monitor.database_filesystem_unavailable"]
+
+
+def test_monitor_probes_filesystem_when_database_inspection_fails(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    db.touch()
+    monkeypatch.setattr(
+        monitor_module.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(total=1000, used=950, free=50),
+    )
+    monkeypatch.setattr(
+        monitor_module,
+        "inspect_db",
+        lambda path: (_ for _ in ()).throw(sqlite3.OperationalError("disk I/O error")),
+    )
+
+    report = monitor(
+        db,
+        thresholds=MonitorThresholds(
+            database_free_warn_bytes=100,
+            database_free_warn_percent=10,
+        ),
+        check_systemd=False,
+    )
+
+    assert report.ok is False
+    assert report.metrics["database_filesystem"]["available_bytes"] == 50
+    assert report.metrics["alert_codes"] == [
+        "monitor.database_filesystem_low",
+        "monitor.database_inspection_failed",
+    ]
+    assert "database filesystem low space" in report.text()
+
+
+def test_monitor_preserves_filesystem_alert_when_database_exists_check_fails(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    db.touch()
+    monkeypatch.setattr(
+        monitor_module.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(total=1000, used=950, free=50),
+    )
+    original_exists = type(db).exists
+    database_exists_calls = 0
+
+    def fail_database_exists(path):
+        nonlocal database_exists_calls
+        if path == db:
+            database_exists_calls += 1
+            raise OSError("disk I/O error")
+        return original_exists(path)
+
+    monkeypatch.setattr(type(db), "exists", fail_database_exists)
+
+    report = monitor(
+        db,
+        thresholds=MonitorThresholds(
+            database_free_warn_bytes=100,
+            database_free_warn_percent=10,
+        ),
+        check_systemd=False,
+    )
+
+    assert report.ok is False
+    assert report.metrics["database_filesystem"]["available_bytes"] == 50
+    assert report.metrics["db_exists"] is None
+    assert report.metrics["schema_ok"] is False
+    assert report.metrics["database_inspection_error"] == "disk I/O error"
+    assert database_exists_calls == 1
+    assert report.metrics["alert_codes"] == [
+        "monitor.database_filesystem_low",
+        "monitor.database_inspection_failed",
+    ]
+
+
+def test_monitor_preserves_filesystem_alert_when_observability_write_fails(tmp_path, monkeypatch):
+    db = tmp_path / "bridge.sqlite3"
+    JobQueue(db)
+    monkeypatch.setattr(
+        monitor_module.shutil,
+        "disk_usage",
+        lambda path: SimpleNamespace(total=1000, used=950, free=50),
+    )
+    monkeypatch.setattr(
+        monitor_module,
+        "record_monitor_observation",
+        lambda *args, **kwargs: (_ for _ in ()).throw(sqlite3.OperationalError("database or disk is full")),
+    )
+
+    report = monitor(
+        db,
+        thresholds=MonitorThresholds(
+            database_free_warn_bytes=100,
+            database_free_warn_percent=10,
+        ),
+        check_systemd=False,
+        persist_observability=True,
+    )
+
+    assert report.ok is False
+    assert report.metrics["alert_codes"] == [
+        "monitor.database_filesystem_low",
+        "monitor.observability_persistence_failed",
+    ]
+    assert "database filesystem low space" in report.text()
+    assert "database or disk is full" in report.text()
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"database_free_warn_bytes": -1}, "database_free_warn_bytes must be non-negative"),
+        ({"database_free_warn_percent": -1}, "database_free_warn_percent must be between 0 and 100"),
+        ({"database_free_warn_percent": 101}, "database_free_warn_percent must be between 0 and 100"),
+    ],
+)
+def test_monitor_rejects_invalid_database_filesystem_thresholds(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        MonitorThresholds(**kwargs)
 
 
 def test_monitor_alerts_when_github_release_is_newer(tmp_path, monkeypatch):

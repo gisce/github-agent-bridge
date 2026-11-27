@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import errno
+import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from github_agent_bridge import monitor_alert
@@ -34,6 +37,47 @@ def test_should_send_alert_persists_and_throttles(tmp_path):
     assert monitor_alert.should_send_alert(state_file, "boom", resend_seconds=900, now=1000) is True
     assert monitor_alert.should_send_alert(state_file, "boom", resend_seconds=900, now=1500) is False
     assert monitor_alert.should_send_alert(state_file, "boom", resend_seconds=900, now=2001) is True
+
+
+def test_main_throttles_changing_low_space_readings_by_stable_alert_identity(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    readings = iter(("2.6 GiB", "2.5 GiB"))
+    sent = []
+
+    def run_monitor(config):
+        available = next(readings)
+        message = f"database filesystem low space: {available} available"
+        payload = {
+            "ok": False,
+            "alerts": [message],
+            "metrics": {
+                "database_filesystem": {
+                    "available_bytes": 1,
+                    "available_percent": 1.0,
+                },
+                "alert_codes": ["monitor.database_filesystem_low"],
+                "alert_details": [{
+                    "code": "monitor.database_filesystem_low",
+                    "message": message,
+                    "fingerprint": "monitor.database_filesystem_low",
+                }],
+            },
+        }
+        return subprocess.CompletedProcess([], 2, json.dumps(payload))
+
+    monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
+    monkeypatch.setattr(monitor_alert, "run_monitor", run_monitor)
+    monkeypatch.setattr(monitor_alert, "maybe_unlock_stale", lambda config, output: "")
+    monkeypatch.setattr(
+        monitor_alert,
+        "send_alert",
+        lambda config, output, unlock: sent.append(output),
+    )
+
+    assert monitor_alert.main() == 2
+    assert monitor_alert.main() == 2
+    assert len(sent) == 1
+    assert "2.6 GiB available" in sent[0]
 
 
 def test_alert_config_defaults_to_bridge_beside_user_entrypoint(tmp_path, monkeypatch):
@@ -91,6 +135,142 @@ def test_main_propagates_monitor_failure_after_sending_alert(tmp_path, monkeypat
     assert sent == ["invalid monitor arguments\n"]
 
 
+def test_main_sends_due_alert_when_resend_state_write_fails(tmp_path, monkeypatch, capsys):
+    config = make_config(tmp_path)
+    sent = []
+    monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
+    monkeypatch.setattr(
+        monitor_alert,
+        "run_monitor",
+        lambda config: subprocess.CompletedProcess([], 2, "database filesystem low space\n"),
+    )
+    monkeypatch.setattr(monitor_alert, "maybe_unlock_stale", lambda config, output: "")
+    monkeypatch.setattr(
+        monitor_alert,
+        "save_state",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError(errno.ENOSPC, "No space left on device")),
+    )
+    monkeypatch.setattr(monitor_alert, "send_alert", lambda config, output, unlock: sent.append(output))
+
+    assert monitor_alert.main() == 2
+    assert sent == ["database filesystem low space\n"]
+    assert "failed to save monitor alert resend state" in capsys.readouterr().err
+
+
+def test_main_sends_due_alert_when_state_directory_creation_fails(tmp_path, monkeypatch, capsys):
+    config = make_config(tmp_path / "missing-state-dir")
+    sent = []
+    monitor_calls = []
+    original_mkdir = type(config.state_dir).mkdir
+
+    def fail_state_directory_mkdir(path, *args, **kwargs):
+        if path == config.state_dir:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return original_mkdir(path, *args, **kwargs)
+
+    def run_monitor(config):
+        monitor_calls.append(config)
+        return subprocess.CompletedProcess([], 2, "database filesystem low space\n")
+
+    monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
+    monkeypatch.setattr(type(config.state_dir), "mkdir", fail_state_directory_mkdir)
+    monkeypatch.setattr(monitor_alert, "run_monitor", run_monitor)
+    monkeypatch.setattr(monitor_alert, "maybe_unlock_stale", lambda config, output: "")
+    monkeypatch.setattr(monitor_alert, "send_alert", lambda config, output, unlock: sent.append(output))
+
+    assert monitor_alert.main() == 2
+    assert monitor_calls == [config]
+    assert sent == ["database filesystem low space\n"]
+    assert "failed to save monitor alert resend state" in capsys.readouterr().err
+
+
+def test_main_sends_due_alert_when_resend_state_read_fails(tmp_path, monkeypatch, capsys):
+    config = make_config(tmp_path)
+    sent = []
+    monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
+    monkeypatch.setattr(
+        monitor_alert,
+        "run_monitor",
+        lambda config: subprocess.CompletedProcess([], 2, "database filesystem low space\n"),
+    )
+    monkeypatch.setattr(monitor_alert, "maybe_unlock_stale", lambda config, output: "")
+    monkeypatch.setattr(
+        monitor_alert,
+        "load_state",
+        lambda path: (_ for _ in ()).throw(OSError(errno.EIO, "Input/output error")),
+    )
+    monkeypatch.setattr(monitor_alert, "send_alert", lambda config, output, unlock: sent.append(output))
+
+    assert monitor_alert.main() == 2
+    assert sent == ["database filesystem low space\n"]
+    assert "failed to load monitor alert resend state" in capsys.readouterr().err
+
+
+def test_main_sends_due_alert_when_resend_state_is_malformed(tmp_path, monkeypatch, capsys):
+    config = make_config(tmp_path)
+    config.state_file.write_text("LAST_HASH=abc\n", encoding="utf-8")
+    sent = []
+    monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
+    monkeypatch.setattr(
+        monitor_alert,
+        "run_monitor",
+        lambda config: subprocess.CompletedProcess([], 2, "database filesystem low space\n"),
+    )
+    monkeypatch.setattr(monitor_alert, "maybe_unlock_stale", lambda config, output: "")
+    monkeypatch.setattr(monitor_alert, "send_alert", lambda config, output, unlock: sent.append(output))
+
+    assert monitor_alert.main() == 2
+    assert sent == ["database filesystem low space\n"]
+    assert "failed to load monitor alert resend state" in capsys.readouterr().err
+
+
+def test_main_sends_low_space_alert_when_stale_job_reconciliation_fails(tmp_path, monkeypatch, capsys):
+    config = replace(make_config(tmp_path), kill_stale_children=True)
+    payload = {
+        "ok": False,
+        "alerts": [
+            "database filesystem low space: 2.6 GiB available",
+            "running job 7 owner/repo#1 age 1200s > 900s",
+        ],
+        "metrics": {
+            "database_filesystem": {
+                "available_bytes": 2791728742,
+                "available_percent": 0.9,
+            },
+            "alert_codes": [
+                "monitor.database_filesystem_low",
+                "monitor.running_stale",
+            ],
+            "running_jobs": [],
+        },
+    }
+    sent = []
+    monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
+    monkeypatch.setattr(
+        monitor_alert,
+        "run_monitor",
+        lambda config: subprocess.CompletedProcess([], 2, json.dumps(payload)),
+    )
+    monkeypatch.setattr(monitor_alert, "get_main_pid", lambda unit="github-agent-bridge.service": "123")
+    monkeypatch.setattr(monitor_alert, "has_child_processes", lambda pid: True)
+    monkeypatch.setattr(
+        monitor_alert,
+        "sample_executor_activity",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError(errno.ENOSPC, "No space left on device")),
+    )
+    monkeypatch.setattr(
+        monitor_alert,
+        "send_alert",
+        lambda config, output, unlock: sent.append((output, unlock)),
+    )
+
+    assert monitor_alert.main() == 2
+    assert len(sent) == 1
+    assert "database filesystem low space" in sent[0][0]
+    assert "failed to reconcile stale jobs" in sent[0][1]
+    assert "failed to reconcile stale jobs" in capsys.readouterr().err
+
+
 def test_main_propagates_throttled_monitor_failure(tmp_path, monkeypatch):
     config = make_config(tmp_path)
     monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
@@ -139,6 +319,26 @@ def test_alert_config_passes_slo_thresholds_from_environment(tmp_path, monkeypat
     assert args[args.index("--slo-queue-to-claim-p90-seconds") + 1] == "45.0"
     assert args[args.index("--slo-blocked-rate-percent") + 1] == "5.0"
     assert args[args.index("--slo-retry-rate-percent") + 1] == "12.5"
+
+
+def test_alert_config_passes_database_filesystem_thresholds_from_environment(tmp_path, monkeypatch):
+    config = monitor_alert.AlertConfig.from_env({
+        "GITHUB_AGENT_BRIDGE_STATE_DIR": str(tmp_path),
+        "GITHUB_AGENT_BRIDGE_DATABASE_FREE_WARN_BYTES": "1073741824",
+        "GITHUB_AGENT_BRIDGE_DATABASE_FREE_WARN_PERCENT": "7.5",
+    })
+    calls = []
+    monkeypatch.setattr(
+        monitor_alert,
+        "_run",
+        lambda args, check=False: calls.append(args) or type("Proc", (), {"stdout": "", "returncode": 0})(),
+    )
+
+    monitor_alert.run_monitor(config)
+
+    args = calls[0]
+    assert args[args.index("--database-free-warn-bytes") + 1] == "1073741824"
+    assert args[args.index("--database-free-warn-percent") + 1] == "7.5"
 
 
 def test_load_state_accepts_legacy_shell_format(tmp_path):
