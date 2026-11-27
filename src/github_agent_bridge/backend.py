@@ -697,6 +697,13 @@ def _unsign(config: DashboardConfig, value: str) -> str | None:
     return raw if hmac.compare_digest(digest, expected) else None
 
 
+def _oauth_state_cookie_name(state: str) -> str:
+    import hashlib
+
+    digest = hashlib.sha256(state.encode("utf-8")).hexdigest()[:24]
+    return f"{OAUTH_STATE_COOKIE}_{digest}"
+
+
 def _encode_session(
     user: dict[str, Any],
     *,
@@ -2066,16 +2073,19 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             scopes.append("read:org")
         params = urllib.parse.urlencode({"client_id": config.oauth_client_id, "scope": " ".join(scopes), "state": state})
         response = RedirectResponse(f"{GITHUB_AUTHORIZE_URL}?{params}", status_code=status.HTTP_302_FOUND)
-        response.set_cookie(OAUTH_STATE_COOKIE, _sign(config, state), httponly=True, secure=True, samesite="lax", max_age=600)
+        response.set_cookie(_oauth_state_cookie_name(state), _sign(config, state), httponly=True, secure=True, samesite="lax", max_age=600)
         return response
 
     @app.get("/auth/callback")
     def callback(code: str, state: str, request: Request) -> RedirectResponse:
         if not config.oauth_ready:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="oauth_not_configured")
-        signed_state = request.cookies.get(OAUTH_STATE_COOKIE)
+        state_cookie = _oauth_state_cookie_name(state)
+        signed_state = request.cookies.get(state_cookie)
         if not signed_state or _unsign(config, signed_state) != state:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="oauth_state_mismatch")
+            response = RedirectResponse("/auth/login", status_code=status.HTTP_302_FOUND)
+            response.delete_cookie(state_cookie, httponly=True, secure=True, samesite="lax")
+            return response
         token = _exchange_code(config, code)
         user = _github_json(GITHUB_USER_URL, token)
         login = str(user.get("login", ""))
@@ -2102,7 +2112,7 @@ def create_app(config: DashboardConfig | None = None) -> FastAPI:
             samesite="lax",
             max_age=config.session_max_age_seconds,
         )
-        response.delete_cookie(OAUTH_STATE_COOKIE)
+        response.delete_cookie(state_cookie, httponly=True, secure=True, samesite="lax")
         return response
 
     @app.post("/auth/logout")

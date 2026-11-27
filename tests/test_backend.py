@@ -2109,8 +2109,9 @@ def test_dashboard_oauth_callback_sets_bounded_session_with_memberships(tmp_path
     )
     JobQueue(config.db)
     app = create_app(config)
-    client = TestClient(app, follow_redirects=False)
-    client.cookies.set("gab_dashboard_oauth_state", _sign(config, "state"))
+    client = TestClient(app, base_url="https://testserver", follow_redirects=False)
+    login_response = client.get("/auth/login")
+    state = parse_qs(urlparse(login_response.headers["location"]).query)["state"][0]
     monkeypatch.setattr("github_agent_bridge.backend._exchange_code", lambda cfg, code: "token")
 
     def fake_github_json(url, token):
@@ -2123,7 +2124,7 @@ def test_dashboard_oauth_callback_sets_bounded_session_with_memberships(tmp_path
 
     monkeypatch.setattr("github_agent_bridge.backend._github_json", fake_github_json)
 
-    response = client.get("/auth/callback", params={"code": "code", "state": "state"})
+    response = client.get("/auth/callback", params={"code": "code", "state": state})
     signed_session = response.cookies.get("gab_dashboard_session")
     decoded = _decode_session(
         _unsign(config, signed_session),
@@ -2136,6 +2137,56 @@ def test_dashboard_oauth_callback_sets_bounded_session_with_memberships(tmp_path
     assert decoded["login"] == "alice"
     assert decoded["is_admin"] is True
     assert decoded["authorized_teams"] == {"example/platform"}
+
+
+def test_dashboard_oauth_concurrent_logins_keep_independent_states(tmp_path, monkeypatch):
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        secret_key="secret",
+        oauth_client_id="client-id",
+        oauth_client_secret="client-secret",
+        allowed_users={"alice"},
+    )
+    JobQueue(config.db)
+    app = create_app(config)
+    client = TestClient(app, base_url="https://testserver", follow_redirects=False)
+    monkeypatch.setattr("github_agent_bridge.backend._exchange_code", lambda cfg, code: "token")
+    monkeypatch.setattr("github_agent_bridge.backend._github_json", lambda url, token: {"login": "Alice"})
+
+    first_login = client.get("/auth/login")
+    second_login = client.get("/auth/login")
+    first_state = parse_qs(urlparse(first_login.headers["location"]).query)["state"][0]
+    second_state = parse_qs(urlparse(second_login.headers["location"]).query)["state"][0]
+
+    assert first_state != second_state
+    first_callback = client.get("/auth/callback", params={"code": "first-code", "state": first_state})
+    second_callback = client.get("/auth/callback", params={"code": "second-code", "state": second_state})
+
+    assert first_callback.status_code == 302
+    assert first_callback.headers["location"] == "/"
+    assert first_callback.cookies.get("gab_dashboard_session") is not None
+    assert second_callback.status_code == 302
+    assert second_callback.headers["location"] == "/"
+    assert second_callback.cookies.get("gab_dashboard_session") is not None
+
+
+def test_dashboard_oauth_state_mismatch_restarts_login(tmp_path):
+    config = DashboardConfig(
+        db=tmp_path / "bridge.sqlite3",
+        secret_key="secret",
+        oauth_client_id="client-id",
+        oauth_client_secret="client-secret",
+    )
+    JobQueue(config.db)
+    app = create_app(config)
+
+    response = TestClient(app, follow_redirects=False).get(
+        "/auth/callback",
+        params={"code": "stale-code", "state": "stale-state"},
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/auth/login"
 
 
 def test_dashboard_session_authorization_allows_configured_team(monkeypatch):
