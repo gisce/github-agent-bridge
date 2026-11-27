@@ -573,7 +573,6 @@ def main(argv: list[str] | None = None) -> int:
     del argv
     configure_sentry(service="monitor-alert")
     config = AlertConfig.from_env()
-    config.state_dir.mkdir(parents=True, exist_ok=True)
 
     monitor_proc = run_monitor(config)
     output, alert_identity = _structured_monitor_output(monitor_proc.stdout)

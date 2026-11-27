@@ -157,6 +157,33 @@ def test_main_sends_due_alert_when_resend_state_write_fails(tmp_path, monkeypatc
     assert "failed to save monitor alert resend state" in capsys.readouterr().err
 
 
+def test_main_sends_due_alert_when_state_directory_creation_fails(tmp_path, monkeypatch, capsys):
+    config = make_config(tmp_path / "missing-state-dir")
+    sent = []
+    monitor_calls = []
+    original_mkdir = type(config.state_dir).mkdir
+
+    def fail_state_directory_mkdir(path, *args, **kwargs):
+        if path == config.state_dir:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return original_mkdir(path, *args, **kwargs)
+
+    def run_monitor(config):
+        monitor_calls.append(config)
+        return subprocess.CompletedProcess([], 2, "database filesystem low space\n")
+
+    monkeypatch.setattr(monitor_alert.AlertConfig, "from_env", lambda: config)
+    monkeypatch.setattr(type(config.state_dir), "mkdir", fail_state_directory_mkdir)
+    monkeypatch.setattr(monitor_alert, "run_monitor", run_monitor)
+    monkeypatch.setattr(monitor_alert, "maybe_unlock_stale", lambda config, output: "")
+    monkeypatch.setattr(monitor_alert, "send_alert", lambda config, output, unlock: sent.append(output))
+
+    assert monitor_alert.main() == 2
+    assert monitor_calls == [config]
+    assert sent == ["database filesystem low space\n"]
+    assert "failed to save monitor alert resend state" in capsys.readouterr().err
+
+
 def test_main_sends_due_alert_when_resend_state_read_fails(tmp_path, monkeypatch, capsys):
     config = make_config(tmp_path)
     sent = []
